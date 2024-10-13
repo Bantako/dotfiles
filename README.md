@@ -10,4 +10,11 @@ EndeavourOS
 
 KDE + hyprland
 
+### applications
+
+- neovim
+- hyprland
+- zsh
+
+
 
