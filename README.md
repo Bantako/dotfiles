@@ -8,7 +8,7 @@ EndeavourOS
 
 ### DE
 
-KDE + hyprland
+hyprland (HyDE)
 
 ### applications
 
