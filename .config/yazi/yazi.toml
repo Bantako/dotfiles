@@ -1,0 +1,9 @@
+[opener]
+open = [
+  { run = 'open $0', block = true, desc = 'Browser'},
+]
+
+[open]
+prepend_rules = [
+{ name = "*.html", use = [ "open", "edit"] },
+]
