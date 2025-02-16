@@ -14,6 +14,9 @@ config.leader = {
 	timeout_milliseconds = 2000,
 }
 
+config.send_composed_key_when_left_alt_is_pressed = false
+config.send_composed_key_when_right_alt_is_pressed = false
+
 if wezterm.target_triple ~= "aarch64-apple-darwin" then
 	config.disable_default_key_bindings = true
 	local conf = require("keybinds_linux")
