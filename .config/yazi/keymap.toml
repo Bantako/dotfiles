@@ -1,0 +1,14 @@
+[[manager.prepend_keymap]]
+on = ["g", "D"]
+run = "cd ~/dotfiles"
+desc = "cd to ~/dotfiles"
+
+[[manager.prepend_keymap]]
+on = ["g", "s"]
+run = "cd /mnt/Synology/"
+desc = "cd to /mnt/Synology/"
+
+[[manager.prepend_keymap]]
+on = ["g", "p"]
+run = "cd ~/projects/"
+desc = "cd to ~/projects/"
