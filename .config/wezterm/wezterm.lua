@@ -3,8 +3,10 @@ local wezterm = require("wezterm")
 local config = wezterm.config_builder()
 
 -- ****** general behavior ******
-config.enable_wayland = false
+-- config.enable_wayland = false
 config.automatically_reload_config = true
+config.use_ime = true
+config.xim_im_name = "fcitx"
 
 -- ****** keybinds ******
 -- prefix key（Ctrl + Space）
