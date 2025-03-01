@@ -15,6 +15,7 @@ hyprland (HyDE)
 - neovim
 - hyprland
 - zsh
+- yazi
 
 
 
