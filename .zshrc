@@ -29,8 +29,8 @@ function y() {
 
 eval "$(zoxide init zsh)"
 
-if [ -f .zshrc_secrets ]; then
-  source .zshrc_secrets
+if [ -f ~/.zshrc_secrets ]; then
+  source ~/.zshrc_secrets
 fi
 
 export EDITOR=nvim
