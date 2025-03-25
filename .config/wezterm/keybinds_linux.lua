@@ -46,7 +46,7 @@ return {
 			action = act.CharSelect({ copy_on_select = true, copy_to = "ClipboardAndPrimarySelection" }),
 		},
 		{ key = "v", mods = "CTRL", action = act.PasteFrom("Clipboard") },
-		{ key = "W", mods = "CTRL", action = act.CloseCurrentTab({ confirm = true }) },
+		{ key = "w", mods = "CTRL", action = act.CloseCurrentTab({ confirm = true }) },
 		{ key = "X", mods = "CTRL", action = act.ActivateCopyMode },
 		{ key = "Z", mods = "CTRL", action = act.TogglePaneZoomState },
 		{ key = "[", mods = "SHIFT|CTRL", action = act.ActivateTabRelative(-1) },
