@@ -1,9 +1,26 @@
 [opener]
 open = [
-  { run = 'open $0', block = true, desc = 'Browser'},
+  { run = 'xdg-open "$0"', block = false, desc = 'Browser'},
+]
+read = [
+  { run = 'zathura "$0"', block = false, desc = 'PDF Viewer'},
+]
+exif = [
+  { run = 'exif "$0"', block = true, desc = 'Show Exif'},
+]
+view = [
+  { run = 'vimiv "$0"', block = false, desc = 'View image with vimiv'}
 ]
 
 [open]
 prepend_rules = [
-{ name = "*.html", use = [ "open", "edit"] },
+  { name = "*.html", use = ["open", "edit"] },
+  { name = "*.pdf", use = ["read", "exif"] },
+  { name = "*.{jpg,jpeg,png,gif,webp,tiff}", use = ["view", "exif"] },
 ]
+
+[[plugin.prepend_fetchers]]
+id   = "mime"
+name = "*"
+run  = "mime-ext"
+prio = "high"
