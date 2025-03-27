@@ -7,7 +7,7 @@
 #  Plugins 
 # oh-my-zsh plugins are loaded  in ~/.hyde.zshrc file, see the file for more information
 
-plugins=(git aliases copypath history zsh-completions zsh-autosuggestions zsh-syntax-highlighting)
+plugins=(git aliases copypath history zsh-completions zsh-autosuggestions zsh-syntax-highlighting fzf-tab)
 
 #  Aliases 
 # Add aliases here
