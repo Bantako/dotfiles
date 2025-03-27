@@ -36,3 +36,5 @@ fi
 export EDITOR=nvim
 export TERMINAL=wezterm
 export BROWSER="~/.local/share/applications/vivaldi.desktop"
+
+. "$HOME/.local/share/../bin/env"
