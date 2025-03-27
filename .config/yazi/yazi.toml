@@ -19,6 +19,10 @@ prepend_rules = [
   { name = "*.{jpg,jpeg,png,gif,webp,tiff}", use = ["view", "exif"] },
 ]
 
+[manager]
+show_hidden = true
+show_symlink = true
+
 [[plugin.prepend_fetchers]]
 id   = "mime"
 name = "*"
