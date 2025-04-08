@@ -2,63 +2,37 @@ local wezterm = require("wezterm")
 
 local config = wezterm.config_builder()
 
+local function is_linux()
+  return string.find(wezterm.target_triple, "linux") ~= nil
+end
+
+local function is_macos()
+  return string.find(wezterm.target_triple, "darwin") ~= nil
+end
+
 -- ****** general behavior ******
 -- config.enable_wayland = false
 config.automatically_reload_config = true
 config.use_ime = true
-config.xim_im_name = "fcitx"
+if is_linux() then
+  config.xim_im_name = "fcitx"
+end
 
 -- ****** keybinds ******
--- prefix key（Ctrl + Space）
+-- prefix key（Super + J）
 config.leader = {
-	key = "Space",
-	mods = "ALT",
+	key = "J",
+	mods = "SUPER",
 	timeout_milliseconds = 2000,
 }
 
 config.send_composed_key_when_left_alt_is_pressed = false
 config.send_composed_key_when_right_alt_is_pressed = false
 
-if wezterm.target_triple ~= "aarch64-apple-darwin" then
-	config.disable_default_key_bindings = true
-	local conf = require("keybinds_linux")
-	config.keys = conf.keys
-	-- config.key_tables = conf.key_tables
-	-- table.insert(config, conf)
-end
-
-local keybinds = {
-	-- Swap Super and Ctrl
-
-	-- quick select (tmux-fingers)
-	{
-		mods = "LEADER",
-		key = "f",
-		action = wezterm.action.QuickSelect,
-	},
-
-	-- activate copy mode or vim mode
-	{
-		mods = "LEADER",
-		key = "[",
-		action = wezterm.action.ActivateCopyMode,
-	},
-	-- splitting
-	{
-		mods = "LEADER",
-		key = "v",
-		action = wezterm.action.SplitVertical({ domain = "CurrentPaneDomain" }),
-	},
-	{
-		mods = "LEADER",
-		key = "s",
-		action = wezterm.action.SplitHorizontal({ domain = "CurrentPaneDomain" }),
-	},
-}
-
-for _, keybind in ipairs(keybinds) do
-	table.insert(config.keys, keybind)
-end
+config.disable_default_key_bindings = true
+local conf = require("keybinds")
+config.keys = conf.keys
+config.key_tables = conf.key_tables
 
 -- ****** color and fonts ******
 
@@ -87,7 +61,9 @@ config.window_padding = {
 config.show_new_tab_button_in_tab_bar = false
 config.use_fancy_tab_bar = false
 config.tab_max_width = 100
--- config.integrated_title_button_style = "MacOsNative"
+if is_macos() then
+  config.integrated_title_button_style = "MacOsNative"
+end
 
 config.colors = {
 	tab_bar = {

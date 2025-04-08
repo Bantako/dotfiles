@@ -83,6 +83,28 @@ return {
 		{ key = "Insert", mods = "SUPER", action = act.CopyTo("PrimarySelection") },
 		{ key = "Copy", mods = "NONE", action = act.CopyTo("Clipboard") },
 		{ key = "Paste", mods = "NONE", action = act.PasteFrom("Clipboard") },
+    -- quick select (tmux-fingers)
+    { mods = "LEADER", key = "f", action = wezterm.action.QuickSelect, },
+
+    -- activate copy mode or vim mode
+    { mods = "LEADER", key = "[", action = wezterm.action.ActivateCopyMode, },
+    -- splitting
+    { mods = "LEADER",
+      key = "v",
+      action = wezterm.action.SplitVertical({ domain = "CurrentPaneDomain" }),
+    },
+    {
+      mods = "LEADER",
+      key = "s",
+      action = wezterm.action.SplitHorizontal({ domain = "CurrentPaneDomain" }),
+    },
+    { mods = "SUPER", key = "Q", action = act.QuitApplication },
+    -- scroll to prompt
+    { mods = "SHIFT", key = "UpArrow", action = act.ScrollToPrompt(-1) },
+    { mods = "SHIFT", key = "DownArrow", action = act.ScrollToPrompt(1) },
+    { mods = "SHIFT", key = "PageUp", action = act.ScrollByPage(-1) },
+    { mods = "SHIFT", key = "PageDown", action = act.ScrollByPage(1) },
+
 	},
 
 	key_tables = {
