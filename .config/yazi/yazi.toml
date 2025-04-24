@@ -23,8 +23,8 @@ prepend_rules = [
 show_hidden = true
 show_symlink = true
 
-[[plugin.prepend_fetchers]]
-id   = "mime"
-name = "*"
-run  = "mime-ext"
-prio = "high"
+# [[plugin.prepend_fetchers]]
+# id   = "mime"
+# name = "*"
+# run  = "mime-ext"
+# prio = "high"

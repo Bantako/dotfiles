@@ -13,10 +13,10 @@ use = "yazi-rs/plugins:chmod"
 rev = "2730199"
 hash = "2f1053f89d1a301a648ab181d0948e38"
 
-[[plugin.deps]]
-use = "yazi-rs/plugins:mime-ext"
-rev = "2730199"
-hash = "1f9fc0e55ff859a32e793833403ee7bd"
+# [[plugin.deps]]
+# use = "yazi-rs/plugins:mime-ext"
+# rev = "2730199"
+# hash = "1f9fc0e55ff859a32e793833403ee7bd"
 
 [flavor]
 deps = []
