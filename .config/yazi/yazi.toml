@@ -12,11 +12,19 @@ view = [
   { run = 'vimiv "$0"', block = false, desc = 'View image with vimiv'}
 ]
 
+unzip = [
+  { run = 'unzip -O cp932 "$0"', block = false, desc = 'Unzip with Shift-jis encoding'}
+]
+
 [open]
 prepend_rules = [
   { name = "*.html", use = ["open", "edit"] },
   { name = "*.pdf", use = ["read", "exif"] },
   { name = "*.{jpg,jpeg,png,gif,webp,tiff}", use = ["view", "exif"] },
+]
+
+append_rules = [
+  { name = "*.zip", use = ["unzip"]}
 ]
 
 [manager]
