@@ -1,0 +1,8 @@
+modmap:
+  - name: Only Wezterm
+    application:
+      only: org.wezfurlong.wezterm
+    remap:
+      CapsLock: CTRL_L
+      SUPER_L: CTRL_L
+      CTRL_L: SUPER_L
