@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "tag": "tag",
+      "title": "Description : keybinding"
+    },
+    {
+      "tag": "Kwin",
+      "title": "Minimize Window : meta+m"
+    }
+  ],
+  "styles": {
+    "accent": "#b4befe",
+    "subtext": "#6c7086"
+  }
+}
