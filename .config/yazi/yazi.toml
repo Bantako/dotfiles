@@ -27,7 +27,7 @@ append_rules = [
   { name = "*.zip", use = ["unzip"]}
 ]
 
-[manager]
+[mgr]
 show_hidden = true
 show_symlink = true
 
