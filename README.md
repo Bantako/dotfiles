@@ -4,11 +4,11 @@ this is my dotfiles
 
 ## OS
 
-EndeavourOS
+AxOS
 
 ### DE
 
-hyprland (HyDE)
+hyprland (Sleex)
 
 ### applications
 
@@ -16,6 +16,3 @@ hyprland (HyDE)
 - hyprland
 - zsh
 - yazi
-
-
-
