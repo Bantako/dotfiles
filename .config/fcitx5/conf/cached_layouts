@@ -58,6 +58,11 @@ Description="キーボード - ウクライナ語 - Ukrainian (Windows)"
 Language=uk
 Label="ua (winkeys)"
 
+[keyboard-ua-winkeysenhanced]
+Description="キーボード - ウクライナ語 - Ukrainian (Windows Enhanced)"
+Language=uk
+Label="ua (winkeysenhanced)"
+
 [keyboard-ua-macOS]
 Description="キーボード - ウクライナ語 - Ukrainian (macOS)"
 Language=uk
@@ -107,6 +112,11 @@ Label="th (tis)"
 Description="キーボード - タイ語 - タイ語 (Pattachote)"
 Language=th
 Label="th (pat)"
+
+[keyboard-th-mnc]
+Description="キーボード - タイ語 - Thai (Manoonchai)"
+Language=th
+Label="th (mnc)"
 
 [keyboard-tz]
 Description="キーボード - スワヒリ語 (タンザニア)"
@@ -688,6 +698,11 @@ Description="キーボード - Ancient - Avestan"
 Language=ae
 Label="ancient (ave)"
 
+[keyboard-ancient-got-alt]
+Description="キーボード - Ancient - Gothic (Alternative)"
+Language=got
+Label="ancient (got-alt)"
+
 [keyboard-mt]
 Description="キーボード - マルタ語"
 Language=mt
@@ -958,6 +973,11 @@ Description="キーボード - スウェーデン語 - スウェーデン語 (Sv
 Language=sv
 Label="se (svdvorak)"
 
+[keyboard-se-colemak]
+Description="キーボード - スウェーデン語 - Swedish (Colemak)"
+Language=sv
+Label="se (colemak)"
+
 [keyboard-se-mac]
 Description="キーボード - スウェーデン語 - スウェーデン語 (Macintosh)"
 Language=sv
@@ -1032,6 +1052,11 @@ Label="pk (urd-crulp)"
 Description="キーボード - ウルドゥー語 (パキスタン) - ウルドゥー語 (パキスタン、NLA)"
 Language=ur
 Label="pk (urd-nla)"
+
+[keyboard-pk-pak_urdu_phonetic]
+Description="キーボード - ウルドゥー語 (パキスタン) - Urdu (Pak Urdu Phonetic)"
+Language=ur
+Label="pk (pak_urdu_phonetic)"
 
 [keyboard-pk-ara]
 Description="キーボード - ウルドゥー語 (パキスタン) - アラビア語 (パキスタン)"
@@ -1245,12 +1270,12 @@ Label="ba (us)"
 
 [keyboard-tw]
 Description="キーボード - 台湾語"
-Language=
+Language=fox
 Label=zh
 
 [keyboard-tw-indigenous]
 Description="キーボード - 台湾語 - 台湾語 (現地語)"
-Language=tay
+Language=ami
 Label="tw (indigenous)"
 
 [keyboard-tw-saisiyat]
@@ -1800,32 +1825,32 @@ Label=ar
 
 [keyboard-ma-tifinagh]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh)"
-Language=
+Language=ber
 Label="ber (tifinagh)"
 
 [keyboard-ma-tifinagh-alt]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh alt.)"
-Language=
+Language=ber
 Label="ber (tifinagh-alt)"
 
 [keyboard-ma-tifinagh-alt-phonetic]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh phonetic, alt.)"
-Language=
+Language=ber
 Label="ber (tifinagh-alt-phonetic)"
 
 [keyboard-ma-tifinagh-extended]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh extended)"
-Language=
+Language=ber
 Label="ber (tifinagh-extended)"
 
 [keyboard-ma-tifinagh-phonetic]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh phonetic)"
-Language=
+Language=ber
 Label="ber (tifinagh-phonetic)"
 
 [keyboard-ma-tifinagh-extended-phonetic]
 Description="キーボード - アラビア語 (モロッコ) - Berber (Morocco, Tifinagh extended phonetic)"
-Language=
+Language=ber
 Label="ber (tifinagh-extended-phonetic)"
 
 [keyboard-ma-french]
@@ -2029,9 +2054,14 @@ Language=en
 Label="us (altgr-intl)"
 
 [keyboard-us-mac]
-Description="キーボード - 英語 (US) - 英語 (Macintosh)"
+Description="キーボード - 英語 (US) - English (Macintosh, ABC, ANSI)"
 Language=en
 Label="us (mac)"
+
+[keyboard-us-mac-iso]
+Description="キーボード - 英語 (US) - English (Macintosh, ABC, ISO)"
+Language=en
+Label="us (mac-iso)"
 
 [keyboard-us-colemak]
 Description="キーボード - 英語 (US) - 英語 (Colemak)"
@@ -2099,9 +2129,14 @@ Language=en
 Label="us (dvp)"
 
 [keyboard-us-dvorak-mac]
-Description="キーボード - 英語 (US) - English (Dvorak, Macintosh)"
+Description="キーボード - 英語 (US) - English (Dvorak, Macintosh, ANSI)"
 Language=en
 Label="us (dvorak-mac)"
+
+[keyboard-us-dvorak-mac-iso]
+Description="キーボード - 英語 (US) - English (Dvorak, Macintosh, ISO)"
+Language=en
+Label="us (dvorak-mac-iso)"
 
 [keyboard-us-norman]
 Description="キーボード - 英語 (US) - English (Norman)"
@@ -2360,52 +2395,52 @@ Label="bd (probhat)"
 
 [keyboard-ph]
 Description="キーボード - フィリピノ語"
-Language=fil
+Language=en
 Label=ph
 
 [keyboard-ph-qwerty-bay]
 Description="キーボード - フィリピノ語 - Filipino (QWERTY, Baybayin)"
-Language=fil
+Language=bik
 Label="ph (qwerty-bay)"
 
 [keyboard-ph-capewell-dvorak]
 Description="キーボード - フィリピノ語 - Filipino (Capewell-Dvorak, Latin)"
-Language=fil
+Language=en
 Label="ph (capewell-dvorak)"
 
 [keyboard-ph-capewell-dvorak-bay]
 Description="キーボード - フィリピノ語 - Filipino (Capewell-Dvorak, Baybayin)"
-Language=fil
+Language=bik
 Label="ph (capewell-dvorak-bay)"
 
 [keyboard-ph-capewell-qwerf2k6]
 Description="キーボード - フィリピノ語 - Filipino (Capewell-QWERF 2006, Latin)"
-Language=fil
+Language=en
 Label="ph (capewell-qwerf2k6)"
 
 [keyboard-ph-capewell-qwerf2k6-bay]
 Description="キーボード - フィリピノ語 - Filipino (Capewell-QWERF 2006, Baybayin)"
-Language=fil
+Language=bik
 Label="ph (capewell-qwerf2k6-bay)"
 
 [keyboard-ph-colemak]
 Description="キーボード - フィリピノ語 - Filipino (Colemak, Latin)"
-Language=fil
+Language=en
 Label="ph (colemak)"
 
 [keyboard-ph-colemak-bay]
 Description="キーボード - フィリピノ語 - Filipino (Colemak, Baybayin)"
-Language=fil
+Language=bik
 Label="ph (colemak-bay)"
 
 [keyboard-ph-dvorak]
 Description="キーボード - フィリピノ語 - Filipino (Dvorak, Latin)"
-Language=fil
+Language=en
 Label="ph (dvorak)"
 
 [keyboard-ph-dvorak-bay]
 Description="キーボード - フィリピノ語 - Filipino (Dvorak, Baybayin)"
-Language=fil
+Language=bik
 Label="ph (dvorak-bay)"
 
 [keyboard-uz]
@@ -2820,7 +2855,7 @@ Label="kz (latin)"
 
 [keyboard-kz-ruskaz]
 Description="キーボード - カザフ語 - ロシア語 (カザフスタン、カザフ語付き)"
-Language=ru
+Language=kk
 Label="ru (ruskaz)"
 
 [keyboard-ch]
@@ -3180,7 +3215,7 @@ Label="id (pegon-phonetic)"
 
 [keyboard-id-javanese]
 Description="キーボード - Indonesian (Latin) - Javanese"
-Language=jax
+Language=id
 Label="id (javanese)"
 
 [keyboard-sn]
@@ -3672,11 +3707,6 @@ Label=ja
 Description="キーボード - 日本語 - 日本語 (かな)"
 Language=ja
 Label="jp (kana)"
-
-[keyboard-jp-kana86]
-Description="キーボード - 日本語 - 日本語 (かな 86)"
-Language=ja
-Label="jp (kana86)"
 
 [keyboard-jp-OADG109A]
 Description="キーボード - 日本語 - 日本語 (OADG 109A)"
