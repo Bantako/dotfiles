@@ -1,0 +1,13 @@
+shell = "zsh"
+
+[plugins]
+
+[plugins.zsh-autosuggestions]
+github = "zsh-users/zsh-autosuggestions"
+
+[plugins.pure]
+github = "sindresorhus/pure"
+use = ["async.zsh", "pure.zsh"]
+
+[plugins.zoxide]
+github = "ajeetdsouza/zoxide"
