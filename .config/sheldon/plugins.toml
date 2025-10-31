@@ -2,8 +2,17 @@ shell = "zsh"
 
 [plugins]
 
+[plugins.init]
+inline = "autoload -Uz compinit && promptinit"
+
+[plugins.fzf-tab]
+github = "Aloxaf/fzf-tab"
+
 [plugins.zsh-autosuggestions]
 github = "zsh-users/zsh-autosuggestions"
+
+[plugins.compinit]
+inline = "compinit"
 
 [plugins.pure]
 github = "sindresorhus/pure"
@@ -11,3 +20,12 @@ use = ["async.zsh", "pure.zsh"]
 
 [plugins.zoxide]
 github = "ajeetdsouza/zoxide"
+
+[plugins.fast-syntax-highlighting]
+github = "zdharma/fast-syntax-highlighting"
+
+[plugins.history-search-multi-word]
+github = "zdharma/history-search-multi-word"
+
+[plugins.zoxide-init]
+inline = 'eval "$(zoxide init zsh)"'

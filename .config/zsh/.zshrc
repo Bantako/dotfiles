@@ -1,11 +1,6 @@
 # plugins
-eval "$(sheldon source)"
-eval "$(zoxide init zsh)"
 
-# theme
-fpath+=("$HOME/.local/share/sheldon/repos/github.com/sindresorhus/pure")
-autoload -U promptinit; promptinit
-prompt pure
+eval "$(sheldon source)"
 
 # yazi function
 function y() {
