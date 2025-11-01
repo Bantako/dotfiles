@@ -3,16 +3,13 @@ shell = "zsh"
 [plugins]
 
 [plugins.init]
-inline = "autoload -Uz compinit && promptinit"
+inline = "autoload -Uz compinit && compinit -i"
 
 [plugins.fzf-tab]
 github = "Aloxaf/fzf-tab"
 
 [plugins.zsh-autosuggestions]
 github = "zsh-users/zsh-autosuggestions"
-
-[plugins.compinit]
-inline = "compinit"
 
 [plugins.pure]
 github = "sindresorhus/pure"
