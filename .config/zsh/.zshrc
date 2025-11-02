@@ -9,6 +9,8 @@ select-word-style default
 # /も区切りと扱うので、^Wでディレクトリ１つ分を削除できる
 zstyle ':zle:*' word-chars " /=;@:{},|"
 zstyle ':zle:*' word-style unspecified
+# 大文字小文字を無視してマッチ
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
 # フローコントロールを無効にする
 setopt no_flow_control
 # Ctrl+Dでzshを終了しない
