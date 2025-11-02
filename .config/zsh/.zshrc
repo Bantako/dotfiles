@@ -44,6 +44,7 @@ function __prompt_precmd() {
 preexec_functions+=(__prompt_preexec)
 precmd_functions+=(__prompt_precmd)
 
+# functions
 # yazi function
 function y() {
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
@@ -53,6 +54,9 @@ function y() {
   fi
   rm -f -- "$tmp"
 }
+
+# secrets functions
+[ -f $XDG_CONFIG_HOME/scripts/bw-env.sh ] && source $XDG_CONFIG_HOME/scripts/bw-env.sh
 
 # alias
 # sudo のあとのコマンドでエイリアスを有効にする
