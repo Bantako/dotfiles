@@ -2,6 +2,7 @@ return {
   {
     "oflisback/obsidian-bridge.nvim",
     lazy = true,
+    enabled = false,
     opts = {
       scroll_sync = true,
       picker = "fzf_lua",
