@@ -1,0 +1,38 @@
+[opener]
+open = [
+  { run = 'xdg-open "$0"', block = false, desc = 'Browser'},
+]
+read = [
+  { run = 'zathura "$0"', block = false, desc = 'PDF Viewer'},
+]
+exif = [
+  { run = 'exif "$0"', block = true, desc = 'Show Exif'},
+]
+view = [
+  { run = 'vimiv "$0"', block = false, desc = 'View image with vimiv'}
+]
+
+unzip = [
+  { run = 'unzip -O cp932 "$0"', block = false, desc = 'Unzip with Shift-jis encoding'}
+]
+
+[open]
+prepend_rules = [
+  { name = "*.html", use = ["open", "edit"] },
+  { name = "*.pdf", use = ["read", "exif"] },
+  { name = "*.{jpg,jpeg,png,gif,webp,tiff}", use = ["view", "exif"] },
+]
+
+append_rules = [
+  { name = "*.zip", use = ["unzip"]}
+]
+
+[mgr]
+show_hidden = true
+show_symlink = true
+
+# [[plugin.prepend_fetchers]]
+# id   = "mime"
+# name = "*"
+# run  = "mime-ext"
+# prio = "high"

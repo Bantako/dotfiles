@@ -1,0 +1,31 @@
+[[mgr.prepend_keymap]]
+on = ["g", "D"]
+run = "cd ~/dotfiles"
+desc = "cd to ~/dotfiles"
+
+[[mgr.prepend_keymap]]
+on = ["g", "s"]
+run = "cd /mnt/Synology/"
+desc = "cd to /mnt/Synology/"
+
+[[mgr.prepend_keymap]]
+on = ["g", "p"]
+run = "cd ~/projects/"
+desc = "cd to ~/projects/"
+
+## plugins
+
+# [[manager.prepend_keymap]]
+# on   = "l"
+# run  = "plugin smart-enter"
+# desc = "Enter the child directory, or open the file"
+
+[[mgr.prepend_keymap]]
+on   = "F"
+run  = "plugin smart-filter"
+desc = "Smart filter"
+
+[[mgr.prepend_keymap]]
+on   = [ "c", "m" ]
+run  = "plugin chmod"
+desc = "Chmod on selected files"
