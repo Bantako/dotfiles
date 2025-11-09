@@ -1,1 +1,4 @@
 .zshrc_secrets
+.zcompdump*
+.zsh_history
+.python_history
