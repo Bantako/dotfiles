@@ -55,9 +55,6 @@ function y() {
   rm -f -- "$tmp"
 }
 
-# secrets functions
-[ -f $XDG_CONFIG_HOME/scripts/bw-env.sh ] && source $XDG_CONFIG_HOME/scripts/bw-env.sh
-
 # alias
 # sudo のあとのコマンドでエイリアスを有効にする
 alias sudo='sudo '
