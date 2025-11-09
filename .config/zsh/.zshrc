@@ -78,4 +78,5 @@ fi
 # variables
 export EDITOR=nvim
 export BROWSER=vivaldi
+export HISTFILE="$XDG_CACHE_HOME"/zsh/history
 export LESSHISTFILE="$XDG_STATE_HOME"/less/history
