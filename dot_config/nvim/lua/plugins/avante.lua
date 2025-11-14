@@ -48,6 +48,12 @@ return {
         "MeanderingProgrammer/render-markdown.nvim",
         opts = {
           file_types = { "markdown", "Avante" },
+          checkbox = {
+            enabled = true,
+            custom = {
+              doing = { raw = '[~]', rendered = '󰝦', highlight = 'RenderMarkdownTodo' },
+            }
+          }
         },
         ft = { "markdown", "Avante" },
       },

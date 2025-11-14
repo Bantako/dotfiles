@@ -21,7 +21,6 @@ require("lazy").setup({
     "nvim-tree/nvim-tree.lua",
     "nvim-treesitter/nvim-treesitter",
     "neoclide/coc.nvim",
-    "nvim-telescope/telescope.nvim",
 
     -- import/override with your plugins
     { import = "plugins" },

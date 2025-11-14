@@ -1,22 +1,20 @@
 return {
   {
-    "Mofiqul/dracula.nvim",
     lazy = false,
-    priority = 1000,
+    "Mofiqul/dracula.nvim",
     opts = {
-      colors = {
-        bg = "#282A36",
-        selection = "#44475A",
-      },
       overrides = {
-        CursorLine = { bg = "#3E4452" },
+        CursorLine = { bg = "#303341" },
       },
     },
   },
+
+  -- Configure LazyVim to load dracula
   {
     "LazyVim/LazyVim",
     opts = {
       colorscheme = "dracula-soft",
+      cursorline = false,
     },
   },
 }
