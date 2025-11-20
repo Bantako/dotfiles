@@ -16,6 +16,10 @@ unzip = [
   { run = 'unzip -O cp932 "$0"', block = false, desc = 'Unzip with Shift-jis encoding'}
 ]
 
+show_text = [
+  { run = 'bat --paging=always --pager="ov" "$0"', block = true, desc = 'Show Text with Syntax Highlighting'}
+]
+
 [open]
 prepend_rules = [
   { name = "*.html", use = ["open", "edit"] },
@@ -24,12 +28,17 @@ prepend_rules = [
 ]
 
 append_rules = [
-  { name = "*.zip", use = ["unzip"]}
+  { name = "*.zip", use = ["unzip"] },
+  { name = "*", use = ["show_text"] }
 ]
 
 [mgr]
 show_hidden = true
 show_symlink = true
+
+[[plugin.prepend_preloaders]]
+name = "/mnt/synology/**"
+run = "noop"
 
 # [[plugin.prepend_fetchers]]
 # id   = "mime"

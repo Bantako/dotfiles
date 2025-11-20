@@ -29,3 +29,23 @@ desc = "Smart filter"
 on   = [ "c", "m" ]
 run  = "plugin chmod"
 desc = "Chmod on selected files"
+
+[[mgr.prepend_keymap]]
+on = "b"
+run = "plugin bunny"
+desc = "Start bunny.yazi"
+
+# Optionally, add another keymap to immediately fuzzy search bookmarks
+[[mgr.prepend_keymap]]
+on = "'"
+run = "plugin bunny fuzzy"
+desc = "Start bunny.yazi fuzzy search"
+
+[[mgr.prepend_keymap]]
+on = "<C-y>"
+run = ["plugin system-clipboard"]
+
+[[mgr.prepend_keymap]]
+on = ["R","b"]
+run = "plugin recycle-bin"
+desc = "Open Recycle Bin menu"

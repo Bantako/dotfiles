@@ -13,10 +13,15 @@ use = "yazi-rs/plugins:chmod"
 rev = "2730199"
 hash = "2f1053f89d1a301a648ab181d0948e38"
 
-# [[plugin.deps]]
-# use = "yazi-rs/plugins:mime-ext"
-# rev = "2730199"
-# hash = "1f9fc0e55ff859a32e793833403ee7bd"
+[[plugin.deps]]
+use = "stelcodes/bunny"
+rev = "7137a44"
+hash = "58bfa473bcac8574400e573787954512"
+
+[[plugin.deps]]
+use = "orhnk/system-clipboard"
+rev = "888026c"
+hash = "9f82a544335a53d79e87ea315746caaa"
 
 [flavor]
 deps = []
