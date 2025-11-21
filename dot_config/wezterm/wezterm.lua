@@ -113,6 +113,11 @@ tabline.setup({
 			{ "cwd", padding = { left = 1, right = 0 } },
 			{ "zoomed", padding = 1 },
 		},
+    tabline_b = {},
+    tabline_c = {},
+    tabline_x = {},
+    tabline_y = {},
+    tabline_z = {},
 	},
 })
 return config
