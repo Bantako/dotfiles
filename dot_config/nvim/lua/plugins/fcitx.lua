@@ -10,6 +10,6 @@ return {
       ins = en,
       cmd = en,
     },
-    remember_prior = true,
+    remember_prior = false,
   },
 }
