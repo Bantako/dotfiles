@@ -32,6 +32,12 @@ setopt hist_reduce_blanks
 # 高機能なワイルドカード展開を使用する
 setopt extended_glob
 
+# メモリ上の履歴件数
+HISTSIZE=100000
+# ファイルに保存する履歴件数
+SAVEHIST=100000
+
+
 # scroll prompt
 function __prompt_preexec() {
   printf "\033]133;C;\007"
@@ -77,3 +83,4 @@ export EDITOR=nvim
 export BROWSER=vivaldi
 export HISTFILE="$XDG_CACHE_HOME"/zsh/history
 export LESSHISTFILE="$XDG_STATE_HOME"/less/history
+export PATH="$HOME/.cargo/bin:$PATH"
