@@ -50,6 +50,28 @@ return {
         folder = "01-Daily",
         date_format = "%Y/%Y-%m/%Y-%m-%d",
       },
+      -- front matterに作成日と更新日を追加
+      note_frontmatter_func = function(note)
+        local now = os.date("%Y-%m-%d")
+
+        -- 既存メタデータをベースにする
+        local out = vim.tbl_extend("force", {
+          id      = note.id,
+          aliases = note.aliases,
+          tags    = note.tags,
+        }, note.metadata or {})
+
+        -- created は既にあれば維持、無ければ今回付与
+        if not out.created then
+          out.created = now
+        end
+
+        -- updated は毎回現在時刻で上書き
+        out.updated = now
+
+        return out
+      end,
+
       legacy_commands = false,
       -- Optional, completion of wiki links, local markdown links, and tags using nvim-cmp.
       completion = {
@@ -93,6 +115,7 @@ return {
       { "<leader>oT", "<cmd>Obsidian tags<cr>", desc = "Open tags menu" },
       { "<leader>of", "<cmd>Obsidian follow_link<cr>", desc = "Open follow link" },
       { "<leader>op", "<cmd>Obsidian paste_img<cr>", desc = "Paste image from clipboard" },
+      { "<leader>oc", "<cmd>Obsidian toc<cr>", desc = "Show Table of Contents" },
       -- Visualモード専用。'<,'> のレンジをそのままコマンドへ渡す
       { "<leader>oe", ":'<,'>Obsidian extract_note<CR>", mode = "x", desc = "Extract selection to new note" },
     },

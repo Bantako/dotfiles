@@ -10,7 +10,6 @@ return {
     },
     picker = {
       enabled = true,
-      preview = { enabled = false, }
     },
   },
 }

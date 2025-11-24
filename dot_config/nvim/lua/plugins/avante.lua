@@ -6,14 +6,19 @@ return {
     version = false, -- set this if you want to always pull the latest change
     opts = {
       provider = "deepseek",
-      vendors = {
+      providers = {
+        openai = {
+          endpoint = "https://api.openai.com/v1",
+          model = "gpt-5-codex", -- your desired model (or use gpt-4o, etc.)
+          timeout = 30000, -- Timeout in milliseconds, increase this for reasoning models
+        },
         deepseek = {
           __inherited_from = "openai",
           api_key_name = "DEEPSEEK_API_KEY",
           endpoint = "https://api.deepseek.com",
           model = "deepseek-coder",
         },
-      },
+      }
     },
     -- if you want to build from source then do `make BUILD_FROM_SOURCE=true`
     build = "make",
