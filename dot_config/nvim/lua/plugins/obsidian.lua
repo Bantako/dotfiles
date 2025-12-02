@@ -68,6 +68,7 @@ return {
 
         -- updated は毎回現在時刻で上書き
         out.updated = now
+        out.draft = true
 
         return out
       end,
