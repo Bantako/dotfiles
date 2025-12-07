@@ -7,7 +7,7 @@ require("bunny"):setup({
     { key = "D",          path = "~/Documents",    desc = "Documents"    },
     { key = "c",          path = "~/.config",      desc = "Config files" },
     { key = "p",          path = "~/projects/",    desc = "projects"     },
-    { key = "s",          path = "/mnt/synology/", desc = "synology"     },
+    { key = "u",          path = "/mnt/ugreen/",   desc = "UGREEN Nas"   },
     { key = "o",          path = "~/Documents/obsidian/main-vault/", desc = "obsidian vault"},
     { key = { "l", "c" }, path = "~/.local/config",desc = "Local config" },
     { key = { "l", "s" }, path = "~/.local/share", desc = "Local share"  },
