@@ -14,5 +14,6 @@
     remmina # VNCクライアント
     slack
     spotify
+    prismlauncher # minecraft
   ];
 }

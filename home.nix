@@ -11,6 +11,7 @@
     ./zsh.nix
     ./apps.nix
     ./git.nix
+    ./browser.nix
   ];
 
   home.packages = with pkgs; [
