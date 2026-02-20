@@ -22,5 +22,6 @@
     httpie
     ripgrep
     zoxide
+    nixai
   ];
 }
