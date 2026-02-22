@@ -1,5 +1,5 @@
 
- {pkgs, ...}: {
+ {inputs, pkgs, ...}: {
   home = rec {
     username = "morikawa";
     homeDirectory = "/home/${username}";
@@ -12,6 +12,9 @@
     ./apps.nix
     ./git.nix
     ./browser.nix
+    inputs.niri.homeModules.niri
+    inputs.dms.homeModules.dank-material-shell
+    inputs.dms.homeModules.niri
   ];
 
   home.packages = with pkgs; [
@@ -22,6 +25,20 @@
     httpie
     ripgrep
     zoxide
-    nixai
+    # nixai
   ];
+
+  programs.niri = {
+    enable = true;
+    settings = {
+      # config = with inputs.niri.lib.kdl;
+    };
+  };
+  programs.dank-material-shell = {
+    enable = true;
+    niri = {
+      enableKeybinds = true;
+      enableSpawn = true;
+    };
+  };
 }
