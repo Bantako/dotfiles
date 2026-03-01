@@ -13,4 +13,10 @@
       editor = "nvim";
     };
   };
+
+  # Git client TUI
+  programs.lazygit = {
+    enable = true;
+  };
+
 }
