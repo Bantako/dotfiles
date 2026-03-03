@@ -36,6 +36,7 @@
 
   home.file.".config/wezterm/wezterm.lua".source = ./wezterm/wezterm.lua;
   home.file.".config/wezterm/keybinds.lua".source = ./wezterm/keybinds.lua;
+  home.file.".config/nvim".source = ./nvim;
 
   # Desktop Environment
   programs.niri = {
@@ -52,5 +53,12 @@
     };
   };
 
+  # nvim
+  programs.neovim = {
+    enable = true;
+    viAlias = true;
+    vimAlias = true;
+    defaultEditor = true;
+  };
 
 }
