@@ -28,10 +28,14 @@
     zoxide
     sheldon
     # nixai
+    wezterm
   ];
 
   # Shell
   home.file.".config/sheldon/plugins.toml".source = ./sheldon/plugins.toml;
+
+  home.file.".config/wezterm/wezterm.lua".source = ./wezterm/wezterm.lua;
+  home.file.".config/wezterm/keybinds.lua".source = ./wezterm/keybinds.lua;
 
   # Desktop Environment
   programs.niri = {
