@@ -26,9 +26,14 @@
     httpie
     ripgrep
     zoxide
+    sheldon
     # nixai
   ];
 
+  # Shell
+  home.file.".config/sheldon/plugins.toml".source = ./sheldon/plugins.toml;
+
+  # Desktop Environment
   programs.niri = {
     enable = true;
     settings = {
@@ -42,4 +47,6 @@
       enableSpawn = true;
     };
   };
+
+
 }
