@@ -3,7 +3,7 @@
   home = rec {
     username = "morikawa";
     homeDirectory = "/home/${username}";
-    stateVersion = "25.11";
+    stateVersion = "26.05";
   };
   programs.home-manager.enable = true;
 
@@ -29,6 +29,7 @@
     sheldon
     # nixai
     wezterm
+    alacritty
   ];
 
   # Shell
@@ -47,10 +48,16 @@
   };
   programs.dank-material-shell = {
     enable = true;
-    niri = {
-      enableKeybinds = true;
-      enableSpawn = true;
+
+    systemd = {
+      enable = true;
+      restartIfChanged = true;
     };
+    # うまく動作しないのでsystemdオプションを使用する
+    # niri = {
+    #   enableKeybinds = true;
+    #   enableSpawn = true;
+    # };
   };
 
   # nvim
