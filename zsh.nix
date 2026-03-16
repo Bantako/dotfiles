@@ -1,17 +1,72 @@
 {pkgs, ...}: {
   programs.zsh = {
     enable = true;
-    enableCompletion = true;
-    enableAutosuggestions = true; # 入力サジェスト
-    syntaxHighlighting.enable = true; # シンタックスハイライト
+    # 補完初期化はsheldonで管理する
+    enableCompletion = false;
+    autosuggestion.enable = false; # 入力サジェスト
+    syntaxHighlighting.enable = false; # シンタックスハイライト
+
+    # alias
     shellAliases = {
+      # sudo のあとのコマンドでエイリアスを有効にする
+      sudo = "sudo ";
       cat = "bat";
       grep = "rg";
       ls = "eza --icons always --classify always";
       la = "eza --icons always --classify always --all ";
       ll = "eza --icons always --long --all --git ";
       tree = "eza --icons always --classify always --tree";
+      lg = "lazygit";
     };
+
+    # setopt 相当
+    setOptions = [
+      # ディレクトリ名だけ打つと自動でcd
+      "AUTO_CD"
+      # cdしたら自動的にpushdする
+      "AUTO_PUSHD"
+      # フローコントロールを無効にする
+      "NO_FLOW_CONTROL"
+      # Ctrl+Dでzshを終了しない
+      "IGNORE_EOF"
+      # '#'をコメントとして扱う
+      "INTERACTIVE_COMMENTS"
+      # 重複したディレクトリを追加しない
+      "PUSHD_IGNORE_DUPS"
+      # 同じコマンドをヒストリに残さない
+      "HIST_IGNORE_ALL_DUPS"
+      # スペースから始まるコマンド行はヒストリに残さない
+      "HIST_IGNORE_SPACE"
+      # 同時に起動したzshの間でヒストリを共有する
+      "SHARE_HISTORY"
+      # ヒストリに保存するときに余分なスペースを削除する
+      "HIST_REDUCE_BLANKS"
+      # 高機能なワイルドカード展開を使用する
+      "EXTENDED_GLOB"
+    ];
+
+    # history
+    history = {
+      # メモリ上の履歴件数
+      size = 100000;
+      # ファイルに保存する履歴件数
+      save = 100000;
+      # 直前と同じコマンドはヒストリに追加しない
+      ignoreDups = true;
+      # 先頭がスペースのコマンドはヒストリに残さない
+      ignoreSpace = true;
+      # ヒストリファイルの保存パス
+      path = "$HOME/.local/share/zsh/history";
+    };
+
+    # export
+    sessionVariables = {
+      EDITOR = "nvim";
+      BROWSER = "vivaldi";
+      LESSHISTFILE = "$XDG_STATE_HOME/less/history";
+      PATH = "$HOME/.cargo/bin:$PATH";
+    };
+
     initContent = ''
 # plugins
 eval "$(sheldon source)"
@@ -26,31 +81,6 @@ zstyle ':zle:*' word-chars " /=;@:{},|"
 zstyle ':zle:*' word-style unspecified
 # 大文字小文字を無視してマッチ
 zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
-# フローコントロールを無効にする
-setopt no_flow_control
-# Ctrl+Dでzshを終了しない
-setopt ignore_eof
-# '#'をコメントして扱う
-setopt interactive_comments
-# cdしたら自動的にpushdする
-setopt auto_pushd
-# 重複したディレクトリを追加しない
-setopt pushd_ignore_dups
-# 同じコマンドをヒストリに残さない
-setopt hist_ignore_all_dups
-# スペースから始まるコマンド行はヒストリに残さない
-setopt hist_ignore_space
-# 同時に起動したzshの間でヒストリを共有する
-setopt share_history
-# ヒストリに保存するときに余分なスペースを削除する
-setopt hist_reduce_blanks
-# 高機能なワイルドカード展開を使用する
-setopt extended_glob
-
-# メモリ上の履歴件数
-HISTSIZE=100000
-# ファイルに保存する履歴件数
-SAVEHIST=100000
 
 
 # scroll prompt
@@ -76,29 +106,11 @@ function y() {
   rm -f -- "$tmp"
 }
 
-# alias
-# sudo のあとのコマンドでエイリアスを有効にする
-alias sudo='sudo '
-alias ls='eza --icons --color=auto'
-alias ls='eza -a --icons --color=auto'
-alias ll='eza -lah --git --icons --color=auto'
-alias lg='lazygit'
-
-# グローバルエイリアス
-alias -g L='| less'
-alias -g G='| grep'
-
 # Cで標準出力をクリップボードにコピーする
 if which xsel >/dev/null 2>&1 ; then
   alias -g C='| xsel --input --clipboard'
 fi
 
-# variables
-export EDITOR=nvim
-export BROWSER=vivaldi
-export HISTFILE="$XDG_CACHE_HOME"/zsh/history
-export LESSHISTFILE="$XDG_STATE_HOME"/less/history
-export PATH="$HOME/.cargo/bin:$PATH"
     '';
   };
 }
