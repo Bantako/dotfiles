@@ -15,5 +15,6 @@
     slack
     spotify
     prismlauncher # minecraft
+    mpv
   ];
 }
