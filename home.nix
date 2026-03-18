@@ -1,4 +1,4 @@
- {inputs, pkgs, ...}: {
+ {inputs, config, pkgs, ...}: {
   home = rec {
     username = "morikawa";
     homeDirectory = "/home/${username}";
@@ -28,6 +28,14 @@
     wezterm
     alacritty
     fuzzel
+    # builds
+    gcc
+    nodejs_22
+    lua-language-server
+    nodePackages.vscode-json-languageserver
+    shfmt
+    tree-sitter   # CLI
+    (vimPlugins.nvim-treesitter.withAllGrammars)
   ];
 
   # Shell
@@ -35,7 +43,7 @@
 
   home.file.".config/wezterm/wezterm.lua".source = ./wezterm/wezterm.lua;
   home.file.".config/wezterm/keybinds.lua".source = ./wezterm/keybinds.lua;
-  home.file.".config/nvim".source = ./nvim;
+  home.file.".config/nvim".source = config.lib.file.mkOutOfStoreSymlink "${config.home.homeDirectory}/.dotfiles/nvim";
 
   # nvim
   programs.neovim = {
@@ -44,5 +52,4 @@
     vimAlias = true;
     defaultEditor = true;
   };
-
 }
