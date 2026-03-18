@@ -73,7 +73,7 @@
         emoji = ["Noto Color Emoji"];
       };
       localConf = ''
-        <?xml version="1.0"?>
+<?xml version="1.0"?>
 	<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 	<fontconfig>
 	  <description>Change default fonts for Steam client</description>
