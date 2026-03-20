@@ -1,15 +1,21 @@
 {inputs, config, pkgs, ...}: {
   imports = [
     inputs.niri.homeModules.niri
-    inputs.dms.homeModules.dank-material-shell
-    inputs.dms.homeModules.niri
+    inputs.noctalia.homeModules.default
   ];
 
   programs.niri = {
     enable = true;
-    settings = 
+    settings =
     let na = config.lib.niri.actions;
     in {
+      spawn-at-startup = [
+        {
+          command = [
+            "noctalia-shell"
+          ];
+        }
+      ];
       input = {
         mod-key = "Alt";
       };
@@ -71,18 +77,9 @@
       # config = with inputs.niri.lib.kdl;
     };
   };
-  programs.dank-material-shell = {
-    enable = true;
 
-    systemd = {
-      enable = true;
-      restartIfChanged = true;
-    };
-    # うまく動作しないのでsystemdオプションを使用する
-    # niri = {
-    #   enableKeybinds = true;
-    #   enableSpawn = true;
-    # };
+  programs.noctalia-shell = {
+    enable = true;
   };
 
   # fuzzel
