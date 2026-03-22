@@ -1,4 +1,13 @@
- {inputs, config, pkgs, ...}: {
+{inputs, config, pkgs, ...}:
+let
+  terminal = pkgs.writeShellScriptBin "terminal" ''
+    exec ${pkgs.wezterm}/bin/wezterm "$@"
+  '';
+
+  browser = pkgs.writeShellScriptBin "browser" ''
+    exec ${pkgs.vivaldi}/bin/vivaldi "$@"
+  '';
+in {
   home = rec {
     username = "morikawa";
     homeDirectory = "/home/${username}";
@@ -79,6 +88,8 @@
     xwayland-satellite
     nemo
     zathura
+    terminal
+    browser
   ];
 
   # Shell

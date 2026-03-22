@@ -22,7 +22,9 @@
       prefer-no-csd = true;
       binds = {
         # 端末起動
-        "Mod+T".action.spawn = [ "Wezterm" ];
+        "Mod+T".action.spawn = [ "terminal" ];
+        # ブラウザ起動
+        "Mod+B".action.spawn = [ "browser" ];
         # ランチャー
         # "Mod+D".action.spawn = [ "fuzzel" ];
         "Mod+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
