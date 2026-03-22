@@ -29,6 +29,27 @@
       templates = "${config.home.homeDirectory}/Templates";
       videos    = "${config.home.homeDirectory}/Videos";
     };
+    mimeApps = {
+      enable = true;
+
+      defaultApplications = {
+        # browser
+        "x-scheme-handler/http"  = [ "vivaldi-stable.desktop" ];
+        "x-scheme-handler/https" = [ "vivaldi-stable.desktop" ];
+        "text/html"              = [ "vivaldi-stable.desktop" ];
+        # file manager
+        "inode/directory"   = [ "nemo.desktop" ];
+        "x-directory/normal" = [ "nemo.desktop" ];
+      };
+    };
+  };
+
+  gtk = {
+    enable = true;
+    theme = {
+      name = "Dracula";
+      package = pkgs.dracula-theme;
+    };
   };
 
   home.packages = with pkgs; [
@@ -53,6 +74,7 @@
     tree-sitter   # CLI
     (vimPlugins.nvim-treesitter.withAllGrammars)
     xwayland-satellite
+    nemo
   ];
 
   # Shell
