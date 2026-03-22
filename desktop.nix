@@ -19,6 +19,7 @@
       input = {
         mod-key = "Alt";
       };
+      prefer-no-csd = true;
       binds = {
         # 端末起動
         "Mod+T".action.spawn = [ "Wezterm" ];
