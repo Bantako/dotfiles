@@ -36,6 +36,7 @@
     shfmt
     tree-sitter   # CLI
     (vimPlugins.nvim-treesitter.withAllGrammars)
+    xwayland-satellite
   ];
 
   # Shell
