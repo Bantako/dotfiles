@@ -31,6 +31,9 @@
     };
     mimeApps = {
       enable = true;
+      associations.added = {
+        "application/pdf" = [ "org.pwmt.zathura.desktop" ];
+      };
 
       defaultApplications = {
         # browser
@@ -75,6 +78,7 @@
     (vimPlugins.nvim-treesitter.withAllGrammars)
     xwayland-satellite
     nemo
+    zathura
   ];
 
   # Shell
@@ -91,4 +95,5 @@
     vimAlias = true;
     defaultEditor = true;
   };
+
 }
