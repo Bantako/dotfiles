@@ -174,6 +174,9 @@
     firefox = {
       enable = true;
     };
+    kdeconnect = {
+      enable = true;
+    };
   };
 
   # List packages installed in system profile. To search, run:
@@ -228,10 +231,14 @@
 
   # tailscale(VPN)
   services.tailscale.enable = true;
-  networking.firewall = {
+  networking.firewall = rec {
     enable = true;
     trustedInterfaces = ["tailscale0"];
-    allowedUDPPorts = [config.services.tailscale.port];
+    allowedUDPPorts = [ config.services.tailscale.port ];
+
+    # kdeconnect
+    allowedTCPPortRanges = [ { from = 1714; to = 1764; } ];
+    allowedUDPPortRanges = allowedTCPPortRanges;
   };
 
   # flatpak
