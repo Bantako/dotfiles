@@ -52,12 +52,13 @@
   };
 
   i18n.inputMethod = {
-    enabled = "fcitx5";
+    enable = true;
+    type = "fcitx5";
     fcitx5.addons = [pkgs.fcitx5-mozc];
   };
 
   fonts = {
-    fonts = with pkgs; [
+    packages = with pkgs; [
       noto-fonts-cjk-serif
       noto-fonts-cjk-sans
       noto-fonts-color-emoji
@@ -102,7 +103,7 @@
   services.desktopManager.plasma6.enable = true;
 
   services.displayManager.sessionPackages = [
-    inputs.niri.packages.${pkgs.system}.niri-unstable
+    inputs.niri.packages.${pkgs.stdenv.hostPlatform.system}.niri-unstable
   ];
 
   # Configure keymap in X11
@@ -235,7 +236,10 @@
 
   # flatpak
   services.flatpak.enable = true;
-  xdg.portal.enable = true;
+  xdg.portal = {
+    enable = true;
+    config.common.default = "*";
+  };
   xdg.portal.wlr.enable = true;
 
   # steam 
