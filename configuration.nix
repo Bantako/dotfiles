@@ -236,6 +236,7 @@
   # flatpak
   services.flatpak.enable = true;
   xdg.portal.enable = true;
+  xdg.portal.wlr.enable = true;
 
   # steam 
   programs.steam = {
