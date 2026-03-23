@@ -7,6 +7,7 @@
 {
   imports = [
     ./hardware.nix
+    ../../modules/desktop/desktop.nix
   ]
   ++ [
     inputs.xremap.nixosModules.default
@@ -46,82 +47,6 @@
     type = "fcitx5";
     fcitx5.addons = [pkgs.fcitx5-mozc];
   };
-
-  fonts = {
-    packages = with pkgs; [
-      noto-fonts-cjk-serif
-      noto-fonts-cjk-sans
-      noto-fonts-color-emoji
-      nerd-fonts.jetbrains-mono
-      migu
-    ];
-    fontDir.enable = true;
-    fontconfig = {
-      defaultFonts = {
-        serif = ["Noto Serif CJK JP" "Noto Color Emoji"];
-        sansSerif = ["Noto Sans CJK JP" "Noto ColorEmoji"];
-        monospace = ["JetBrainsMono Nerd Font" "Noto Color Emoji"];
-        emoji = ["Noto Color Emoji"];
-      };
-      localConf = ''
-<?xml version="1.0"?>
-	<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-	<fontconfig>
-	  <description>Change default fonts for Steam client</description>
-	  <match>
-	    <test name="prgname">
-	      <string>steamwebhelper></string>
-	    </test>
-	    <test name="family" qual="any">
-	      <string>sans-serif</string>
-	    </test>
-	    <edit mode="prepend" name="family">
-	      <string>Migu 1P</string>
-	    </edit>
-	  </match>
-	</fontconfig>
-      '';
-    };
-  };
-
-  # Enable the X11 windowing system.
-  # You can disable this if you're only using the Wayland session.
-  services.xserver.enable = true;
-
-  # Enable the KDE Plasma Desktop Environment.
-  services.displayManager.sddm.enable = true;
-  services.desktopManager.plasma6.enable = true;
-
-  services.displayManager.sessionPackages = [
-    inputs.niri.packages.${pkgs.stdenv.hostPlatform.system}.niri-unstable
-  ];
-
-  # Configure keymap in X11
-  services.xserver.xkb = {
-    layout = "us";
-    variant = "";
-  };
-
-  # Enable CUPS to print documents.
-  services.printing.enable = true;
-
-  # Enable sound with pipewire.
-  services.pulseaudio.enable = false;
-  security.rtkit.enable = true;
-  services.pipewire = {
-    enable = true;
-    alsa.enable = true;
-    alsa.support32Bit = true;
-    pulse.enable = true;
-    jack.enable = true;
-
-    # use the example session manager (no others are packaged yet so this is enabled by default,
-    # no need to redefine it in your config for now)
-    #media-session.enable = true;
-  };
-
-  # Enable touchpad support (enabled default in most desktopManager).
-  # services.xserver.libinput.enable = true;
 
   services.xremap = {
     userName = "morikawa";
