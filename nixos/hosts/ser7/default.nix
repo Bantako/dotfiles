@@ -8,8 +8,11 @@
   imports = [
     ./hardware.nix
     ../../modules/desktop/desktop.nix
-    ../../modules/system/networking.nix
+    ../../modules/desktop/portal.nix
+    ../../modules/system/flatpak.nix
     ../../modules/system/locale.nix
+    ../../modules/system/networking.nix
+    ../../modules/system/users.nix
   ]
   ++ [
     inputs.xremap.nixosModules.default
@@ -32,36 +35,6 @@
           };
 	}
       ];
-    };
-  };
-
-  # Define a user account. Don't forget to set a password with ‘passwd’.
-  users.users.morikawa = {
-    isNormalUser = true;
-    description = "morikawa";
-    extraGroups = [ "networkmanager" "wheel" ];
-    packages = with pkgs; [
-      kdePackages.kate
-    #  thunderbird
-    ];
-    shell = pkgs.zsh;
-  };
-
-  programs = {
-    git = {
-      enable = true;
-    };
-    starship = {
-      enable = true;
-    };
-    zsh = {
-      enable = true;
-    };
-    firefox = {
-      enable = true;
-    };
-    kdeconnect = {
-      enable = true;
     };
   };
 
@@ -95,14 +68,6 @@
   };
 
   nixpkgs.config.allowUnfree = true;
-
-  # flatpak
-  services.flatpak.enable = true;
-  xdg.portal = {
-    enable = true;
-    config.common.default = "*";
-  };
-  xdg.portal.wlr.enable = true;
 
   # steam 
   programs.steam = {
