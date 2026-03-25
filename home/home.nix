@@ -31,6 +31,7 @@
     ripgrep
     zoxide
     sheldon
+    jq
     # nixai
     wezterm
     alacritty
