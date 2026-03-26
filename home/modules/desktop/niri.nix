@@ -21,12 +21,12 @@
       prefer-no-csd = true;
       binds = {
         # 端末起動
-        "Mod+T".action.spawn = [ "terminal" ];
+        "Mod+Ctrl+T".action.spawn = [ "terminal" ];
         # ブラウザ起動
-        "Mod+B".action.spawn = [ "browser" ];
+        "Mod+Ctrl+B".action.spawn = [ "browser" ];
         # ランチャー
         # "Mod+D".action.spawn = [ "fuzzel" ];
-        "Mod+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
+        "Mod+Ctrl+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
         # 終了
         # "Mod+Shift+E".action = "quit";
         # ロック
@@ -41,16 +41,24 @@
         "Mod+V".action = na.toggle-window-floating;
         # オーバービュー
         "Mod+O".action = na.toggle-overview;
+        # columnサイズ変更
+        "Mod+R".action = na.switch-preset-column-width;
 
         # フォーカス移動
         "Mod+H".action = na.focus-column-left;
         "Mod+L".action = na.focus-column-right;
-        # "Mod+K".action = "focus-up";
-        # "Mod+J".action = "focus-down";
+        "Mod+J".action = na.focus-workspace-down;
+        "Mod+K".action = na.focus-workspace-up;
+        "Mod+T".action = na.focus-monitor-left;
+        "Mod+Y".action = na.focus-monitor-right;
 
         # カラム移動
         "Mod+Shift+H".action = na.move-column-left;
         "Mod+Shift+L".action = na.move-column-right;
+        "Mod+Shift+J".action = na.move-column-to-workspace-down;
+        "Mod+Shift+K".action = na.move-column-to-workspace-up;
+        "Mod+Shift+T".action = na.move-column-to-monitor-left;
+        "Mod+Shift+Y".action = na.move-column-to-monitor-right;
 
         # ワークスペース移動
         "Mod+1".action.focus-workspace = [ 1 ];
