@@ -12,6 +12,7 @@
     ../../modules/system/flatpak.nix
     ../../modules/system/locale.nix
     ../../modules/system/networking.nix
+    ../../modules/system/sops.nix
     ../../modules/system/users.nix
   ]
   ++ [

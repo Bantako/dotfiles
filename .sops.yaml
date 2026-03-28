@@ -1,0 +1,4 @@
+creation_rules:
+  - path_regex: nixos/hosts/ser7/secrets/.*\.yaml$
+    age:
+      - age1ww5cqps3vpalyp04qn7q3kp5xsc8dpcudnax66tzns6dmwhry4ksmyr2nz
