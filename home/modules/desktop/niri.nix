@@ -20,13 +20,17 @@
       };
       prefer-no-csd = true;
       binds = {
+        # アプリ起動系
+        # バインド被りのため休止
+
         # 端末起動
-        "Mod+Ctrl+T".action.spawn = [ "terminal" ];
+        # "Mod+T".action.spawn = [ "terminal" ];
         # ブラウザ起動
-        "Mod+Ctrl+B".action.spawn = [ "browser" ];
+        # "Mod+B".action.spawn = [ "browser" ];
         # ランチャー
         # "Mod+D".action.spawn = [ "fuzzel" ];
-        "Mod+Ctrl+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
+        "Mod+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
+
         # 終了
         # "Mod+Shift+E".action = "quit";
         # ロック
