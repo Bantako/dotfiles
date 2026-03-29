@@ -1,4 +1,4 @@
-{pkgs, ...}: {
+{pkgs, config, ...}: {
   programs.zsh = {
     enable = true;
     # 補完初期化はsheldonで管理する
@@ -111,6 +111,13 @@ if which xsel >/dev/null 2>&1 ; then
   alias -g C='| xsel --input --clipboard'
 fi
 
+# sops
+if [ -r /run/secrets/openai_api_key ]; then
+  export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+fi
+if [ -r /run/secrets/deepseek_api_key ]; then
+  export DEEPSEEK_API_KEY="$(cat /run/secrets/deepseek_api_key)"
+fi
     '';
   };
 }
