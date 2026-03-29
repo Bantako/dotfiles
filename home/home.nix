@@ -17,6 +17,7 @@
     ./modules/desktop/niri.nix
     ./modules/desktop/noctalia.nix
     ./modules/desktop/wezterm.nix
+    ./modules/desktop/xremap.nix
     ./modules/programs/browser.nix
     ./modules/shell/zsh.nix
   ];

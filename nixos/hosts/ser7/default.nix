@@ -16,28 +16,11 @@
     ../../modules/system/users.nix
   ]
   ++ [
-    inputs.xremap.nixosModules.default
     inputs.niri.nixosModules.niri
   ];
 
   networking.hostName = "nixos";
   networking.wireless.enable = true;
-
-  services.xremap = {
-    userName = "morikawa";
-    serviceMode = "system";
-    config = {
-      modmap = [
-        {
-	  name = "swap mod";
-	  remap = {
-	    SUPER_L = "CTRL_L";
-	    CTRL_L = "SUPER_L";
-          };
-	}
-      ];
-    };
-  };
 
   # List packages installed in system profile. To search, run:
   # $ nix search wget

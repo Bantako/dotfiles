@@ -4,7 +4,7 @@
   users.users.morikawa = {
     isNormalUser = true;
     description = "morikawa";
-    extraGroups = [ "networkmanager" "wheel" ];
+    extraGroups = [ "networkmanager" "wheel" "input" ];
     packages = with pkgs; [
       kdePackages.kate
     ];
