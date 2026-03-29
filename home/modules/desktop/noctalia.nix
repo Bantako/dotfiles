@@ -5,6 +5,68 @@
   home.file.".config/noctalia/settings.json".source = ./noctalia/settings.json;
   programs.noctalia-shell = {
     enable = true;
+    plugins = {
+      sources = [
+        {
+          enabled = true;
+          name = "Official Noctalia Plugins";
+          url = "https://github.com/noctalia-dev/noctalia-plugins";
+        }
+      ];
+      states = {
+        kde-connect = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        privacy-indicator = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        video-wallpaper = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        screenshot = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        timer = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        custom-commands = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+        screen-recorder = {
+          enabled = true;
+          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
+        };
+      };
+      version = 2;
+    };
+    pluginSettings = {
+      kde-connect = {
+        hideIfNoDeviceConnected = true;
+      };
+      privacy-indicator = {
+        hideInactive = true;
+        enableToast = true;
+        iconSpacing = 4;
+        removeMargins = false;
+        activeColor = "primary";
+        inactiveColor = "none";
+        micFilterRegex = "";
+      };
+      video-wallpaper = {
+        thumbCacheReady = true;
+        enabled = true;
+        activeBackend = "qt6-multimedia";
+        monitorSpecific = false;
+        wallpapersFolder = "~/Pictures/Wallpapers";
+        mpvSocket = "/tmp/mpv-socket";
+      };
+    };
   };
 
   # fuzzel
