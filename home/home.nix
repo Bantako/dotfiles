@@ -8,6 +8,7 @@
   programs.home-manager.enable = true;
 
   imports = [
+    ./modules/ai/claude-code.nix
     ./modules/cli/git.nix
     ./modules/cli/neovim.nix
     ./modules/cli/sheldon.nix

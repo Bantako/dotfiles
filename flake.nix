@@ -5,6 +5,7 @@
     xremap.url = "github:xremap/nix-flake";
     niri.url = "github:sodiboo/niri-flake";
     niri.inputs.nixpkgs.follows = "nixpkgs";
+    claude-code.url = "github:sadjow/claude-code-nix";
 
     noctalia = {
       url = "github:noctalia-dev/noctalia-shell";

@@ -1,4 +1,4 @@
-{pkgs, config, ...}: {
+{pkgs, config, lib, claudeAliases ? {}, ...}: {
   programs.zsh = {
     enable = true;
     # 補完初期化はsheldonで管理する
@@ -7,17 +7,20 @@
     syntaxHighlighting.enable = false; # シンタックスハイライト
 
     # alias
-    shellAliases = {
-      # sudo のあとのコマンドでエイリアスを有効にする
-      sudo = "sudo ";
-      cat = "bat";
-      grep = "rg";
-      ls = "eza --icons always --classify always";
-      la = "eza --icons always --classify always --all ";
-      ll = "eza --icons always --long --all --git ";
-      tree = "eza --icons always --classify always --tree";
-      lg = "lazygit";
-    };
+    shellAliases = lib.mkMerge [
+      {
+        # sudo のあとのコマンドでエイリアスを有効にする
+        sudo = "sudo ";
+        cat = "bat";
+        grep = "rg";
+        ls = "eza --icons always --classify always";
+        la = "eza --icons always --classify always --all ";
+        ll = "eza --icons always --long --all --git ";
+        tree = "eza --icons always --classify always --tree";
+        lg = "lazygit";
+      }
+      claudeAliases
+    ];
 
     # setopt 相当
     setOptions = [
