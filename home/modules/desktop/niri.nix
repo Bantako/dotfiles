@@ -19,6 +19,7 @@
         mod-key = "Alt";
       };
       prefer-no-csd = true;
+      hotkey-overlay.skip-at-startup = true;
       binds = {
         # アプリ起動系
         # バインド被りのため休止
