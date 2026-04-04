@@ -43,7 +43,7 @@
     gcc
     nodejs_22
     lua-language-server
-    nodePackages.vscode-json-languageserver
+    vscode-json-languageserver
     shfmt
     tree-sitter   # CLI
     (vimPlugins.nvim-treesitter.withAllGrammars)
