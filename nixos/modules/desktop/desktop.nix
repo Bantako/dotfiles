@@ -2,14 +2,18 @@
 { inputs, config, pkgs, ... }:
 
 {
-  services.xserver.enable = true;
-
-  services.displayManager.sddm.enable = true;
-  services.desktopManager.plasma6.enable = true;
+  services.displayManager.sddm = {
+    enable = true;
+    wayland.enable = true;
+    theme = "sddm-astronaut-theme";
+    extraPackages = [ pkgs.sddm-astronaut ];
+  };
 
   services.displayManager.sessionPackages = [
     inputs.niri.packages.${pkgs.stdenv.hostPlatform.system}.niri-unstable
   ];
+
+  services.xserver.enable = true;
 
   services.xserver.xkb = {
     layout = "us";

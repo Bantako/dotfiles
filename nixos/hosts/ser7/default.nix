@@ -28,6 +28,7 @@
   environment.systemPackages = with pkgs; [
     sops
     age
+    sddm-astronaut
   ];
 
   # This value determines the NixOS release from which the default
