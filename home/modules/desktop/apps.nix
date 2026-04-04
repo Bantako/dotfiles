@@ -16,5 +16,6 @@
     spotify
     prismlauncher # minecraft
     mpv
+    featherpad # 軽量エディタ
   ];
 }
