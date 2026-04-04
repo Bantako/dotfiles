@@ -7,6 +7,7 @@
 {
   imports = [
     ./hardware.nix
+    ../../modules/desktop/commands.nix
     ../../modules/desktop/desktop.nix
     ../../modules/desktop/portal.nix
     ../../modules/system/flatpak.nix

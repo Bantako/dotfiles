@@ -1,4 +1,8 @@
 {pkgs, config, lib, claudeAliases ? {}, ...}: {
+  programs.nix-index = {
+    enable = true;
+    enableZshIntegration = true;
+  };
   programs.zsh = {
     enable = true;
     # 補完初期化はsheldonで管理する
