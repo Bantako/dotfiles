@@ -35,7 +35,7 @@
     serviceConfig = {
       Type = "oneshot";
       ExecStart = ''
-        /run/current-system/sw/bin/ethtool -K enp2s0 tso off gso off gro off
+        ${pkgs.ethtool}/bin/ethtool -K enp2s0 tso off gso off gro off
       '';
     };
   };
