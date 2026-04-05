@@ -37,7 +37,7 @@
       # Ctrl+Dでzshを終了しない
       "IGNORE_EOF"
       # '#'をコメントとして扱う
-      "INTERACTIVE_COMMENTS"
+      # "INTERACTIVE_COMMENTS"
       # 重複したディレクトリを追加しない
       "PUSHD_IGNORE_DUPS"
       # 同じコマンドをヒストリに残さない
