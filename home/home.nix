@@ -6,6 +6,10 @@
     stateVersion = "26.05";
   };
   programs.home-manager.enable = true;
+  programs.nh = {
+    enable = true;
+    flake = "/home/morikawa/.dotfiles";
+  };
 
   imports = [
     ./modules/ai/claude-code.nix
@@ -22,6 +26,7 @@
     ./modules/desktop/xremap.nix
     ./modules/desktop/zen-browser.nix
     ./modules/programs/browser.nix
+    ./modules/shell/direnv.nix
     ./modules/shell/zsh.nix
   ];
 
@@ -51,6 +56,7 @@
     xwayland-satellite
     nemo
     zathura
+    android-studio
   ];
 
   services.kdeconnect = {
