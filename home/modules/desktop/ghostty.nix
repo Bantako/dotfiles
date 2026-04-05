@@ -1,30 +1,62 @@
 { pkgs, ... }:
 
 {
+  xdg.configFile."ghostty/tab-style.css".text = ''
+    headerbar {
+      min-height: 20px;
+      padding: 0;
+      margin: 0;
+      background-color: #20222b;
+    }
+    tabbar tabbox {
+      margin: 0;
+      padding: 0;
+      min-height: 15px;
+      background-color: #21222c;
+    }
+
+    tabbar tabbox tab {
+      margin: 0;
+      padding: 2px 8px;
+      color: #f8f8f2;
+      background-color: #282a36;
+      border-right: 1px solid #44475a;
+    }
+
+    tabbar tabbox tab:checked {
+      background-color: #44475a;
+      color: #bd93f9;
+    }
+
+    tabbar tabbox tab:hover {
+      background-color: #44475a;
+    }
+
+    tabbar tabbox tab label {
+      font-size: 9pt;
+    }
+  '';
+
   programs.ghostty = {
     enable = true;
     package = pkgs.ghostty;
     settings = {
       # テーマ・外観
       theme = "Dracula";
-      background-opacity = 0.95;
+      # background-opacity = 0.95;
 
       # フォント
-      font-family = "JetBrains Mono";
-      font-family-bold = "JetBrains Mono";
-      font-family-italic = "JetBrains Mono";
-      font-family-bold-italic = "JetBrains Mono";
+      font-family = "JetBrainsMono Nerd Font Mono";
       font-size = 13;
-      font-feature = "zero";
+      # font-feature = "zero";
 
       # ウィンドウ
       window-padding-x = "8";
       window-padding-y = "0";
       window-padding-balance = true;
+      window-theme = "dark";
       gtk-titlebar = false;
-
-      # IME
-      gtk-im-module = "fcitx";
+      gtk-custom-css = "tab-style.css";
 
       # クリップボード
       clipboard-read = "allow";
