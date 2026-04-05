@@ -15,6 +15,7 @@
     ./modules/cli/yazi.nix
     ./modules/desktop/apps.nix
     ./modules/desktop/gtk.nix
+    ./modules/desktop/ghostty.nix
     ./modules/desktop/niri.nix
     ./modules/desktop/noctalia.nix
     ./modules/desktop/wezterm.nix

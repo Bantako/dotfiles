@@ -1,0 +1,93 @@
+{ pkgs, ... }:
+
+{
+  programs.ghostty = {
+    enable = true;
+    package = pkgs.ghostty;
+    settings = {
+      # テーマ・外観
+      theme = "Dracula";
+      background-opacity = 0.95;
+
+      # フォント
+      font-family = "JetBrains Mono";
+      font-family-bold = "JetBrains Mono";
+      font-family-italic = "JetBrains Mono";
+      font-family-bold-italic = "JetBrains Mono";
+      font-size = 13;
+      font-feature = "zero";
+
+      # ウィンドウ
+      window-padding-x = "8";
+      window-padding-y = "0";
+      window-padding-balance = true;
+      gtk-titlebar = false;
+
+      # IME
+      gtk-im-module = "fcitx";
+
+      # クリップボード
+      clipboard-read = "allow";
+      clipboard-write = "allow";
+      copy-on-select = "clipboard";
+
+      # その他
+      confirm-close-surface = true;
+      mouse-hide-while-typing = true;
+      scrollback-limit = 10000;
+
+      # キーバインド
+      keybind = [
+        # コピー・ペースト
+        "super+c=copy_to_clipboard"
+        "super+v=paste_from_clipboard"
+        "shift+insert=paste_from_selection"
+
+        # タブ操作
+        "super+t=new_tab"
+        "super+w=close_surface"
+        "super+tab=next_tab"
+        "super+shift+tab=previous_tab"
+        "super+one=goto_tab:1"
+        "super+two=goto_tab:2"
+        "super+three=goto_tab:3"
+        "super+four=goto_tab:4"
+        "super+five=goto_tab:5"
+        "super+six=goto_tab:6"
+        "super+seven=goto_tab:7"
+        "super+eight=goto_tab:8"
+        "super+nine=last_tab"
+
+        # ペイン分割・移動
+        "super+shift+alt+apostrophe=new_split:down"
+        "super+shift+alt+five=new_split:right"
+        "super+shift+left=goto_split:left"
+        "super+shift+right=goto_split:right"
+        "super+shift+up=goto_split:top"
+        "super+shift+down=goto_split:bottom"
+        "super+shift+alt+left=resize_split:left,10"
+        "super+shift+alt+right=resize_split:right,10"
+        "super+shift+alt+up=resize_split:up,10"
+        "super+shift+alt+down=resize_split:down,10"
+        "super+z=toggle_split_zoom"
+
+        # フォントサイズ
+        "super+plus=increase_font_size:1"
+        "super+minus=decrease_font_size:1"
+        "super+zero=reset_font_size"
+
+        # スクロール
+        "shift+page_up=scroll_page_up"
+        "shift+page_down=scroll_page_down"
+
+        # その他
+        "alt+enter=toggle_fullscreen"
+        "super+n=new_window"
+        "super+shift+q=quit"
+        "super+r=reload_config"
+        "super+k=clear_screen"
+        "super+f=text:search"
+      ];
+    };
+  };
+}

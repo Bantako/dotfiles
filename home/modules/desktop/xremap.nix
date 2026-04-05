@@ -3,9 +3,11 @@
 let
   xremapConfig = ''
     modmap:
-      - name: "swap ctrl/super in wezterm"
+      - name: "swap ctrl/super in terminals"
         application:
-          only: "org.wezfurlong.wezterm"
+          only:
+            - "org.wezfurlong.wezterm"
+            - "com.mitchellh.ghostty"
         remap:
           CTRL_L: SUPER_L
           SUPER_L: CTRL_L
