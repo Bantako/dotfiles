@@ -26,6 +26,7 @@
     tabbar tabbox tab:checked {
       background-color: #44475a;
       color: #bd93f9;
+      border-bottom: 2px solid #bd93f9;
     }
 
     tabbar tabbox tab:hover {
@@ -49,6 +50,18 @@
       font-family = "JetBrainsMono Nerd Font Mono";
       font-size = 13;
       # font-feature = "zero";
+      font-codepoint-map = "U+3000-U+9FFF=Source Han Code JP,U+FF00-U+FFEF=Source Han Code JP";
+      adjust-cell-height = "1";
+      bold-is-bright = false;
+
+      # カーソル
+      cursor-style = "bar";
+      cursor-style-blink = false;
+
+      # シェル統合
+      shell-integration = "zsh";
+      shell-integration-features = "cursor,sudo,title";
+
 
       # ウィンドウ
       window-padding-x = "8";
@@ -111,13 +124,19 @@
         # スクロール
         "shift+page_up=scroll_page_up"
         "shift+page_down=scroll_page_down"
+        "super+u=scroll_page_up"
+        "super+d=scroll_page_down"
+
+        # プロンプトジャンプ（シェル統合）
+        "super+k=jump_to_prompt:-1"
+        "super+j=jump_to_prompt:1"
 
         # その他
         "alt+enter=toggle_fullscreen"
         "super+n=new_window"
         "super+shift+q=quit"
         "super+r=reload_config"
-        "super+k=clear_screen"
+        "super+l=clear_screen"
         "super+f=text:search"
       ];
     };

@@ -39,6 +39,7 @@
       noto-fonts-cjk-sans
       noto-fonts-color-emoji
       nerd-fonts.jetbrains-mono
+      source-han-code-jp
       migu
     ];
     fontDir.enable = true;
