@@ -27,6 +27,9 @@
     calibre            # 電子書籍管理
     obsidian           # ノート
 
+    # Windows ゲーム
+    bottles            # Wine フロントエンド（フリーゲーム等の exe 実行用）
+
     # その他
     evince             # PDFビューアー（GNOME）
     featherpad         # 軽量エディタ

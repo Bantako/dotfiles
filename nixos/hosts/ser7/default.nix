@@ -59,10 +59,13 @@
 
   nixpkgs.config.allowUnfree = true;
 
-  # steam 
+  # steam
   programs.steam = {
     enable = true;
     remotePlay.openFirewall = true;
     dedicatedServer.openFirewall = true;
   };
+
+  # Wine / Bottles 用: 32-bit グラフィクスサポート（多くの Windows ゲームに必要）
+  hardware.graphics.enable32Bit = true;
 }
