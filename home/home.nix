@@ -23,6 +23,7 @@
     ./modules/desktop/apps.nix
     ./modules/desktop/gtk.nix
     ./modules/desktop/ghostty.nix
+    ./modules/desktop/jellyfin.nix
     ./modules/desktop/mpv.nix
     ./modules/desktop/niri.nix
     ./modules/desktop/noctalia.nix
