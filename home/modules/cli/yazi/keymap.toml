@@ -13,6 +13,11 @@ on = ["g", "p"]
 run = "cd ~/projects/"
 desc = "cd to ~/projects/"
 
+[[mgr.prepend_keymap]]
+on = "?"
+run = "help"
+desc = "Show keybinding hints"
+
 ## opener
 [[mgr.prepend_keymap]]
 on = "v"

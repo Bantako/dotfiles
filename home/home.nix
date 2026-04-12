@@ -13,6 +13,7 @@
 
   imports = [
     ./modules/ai/claude-code.nix
+    ./modules/cli/bat.nix
     ./modules/cli/git.nix
     ./modules/cli/neovim.nix
     ./modules/cli/sheldon.nix
@@ -22,12 +23,14 @@
     ./modules/desktop/apps.nix
     ./modules/desktop/gtk.nix
     ./modules/desktop/ghostty.nix
+    ./modules/desktop/mpv.nix
     ./modules/desktop/niri.nix
     ./modules/desktop/noctalia.nix
     ./modules/desktop/wezterm.nix
     ./modules/desktop/xdg.nix
     ./modules/desktop/xremap.nix
     ./modules/desktop/zen-browser.nix
+    ./modules/desktop/zathura.nix
     ./modules/programs/browser.nix
     ./modules/shell/direnv.nix
     ./modules/shell/zsh.nix

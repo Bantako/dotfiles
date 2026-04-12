@@ -11,12 +11,10 @@
     fuzzel             # アプリランチャー
     nemo               # ファイルマネージャー
     xwayland-satellite # XWayland統合
-    zathura            # PDFビューアー
 
     # エンタメ・コミュニケーション
     discord
     discord-ptb
-    mpv
     parsec-bin         # 超速いリモートデスクトップクライアント
     prismlauncher      # Minecraft
     remmina            # VNCクライアント

@@ -1,0 +1,110 @@
+General:
+  TabWidth: 4
+  WrapMode: true
+
+KeyBind:
+  exit:
+    - "q"
+    - "Escape"
+  write_exit:
+    - "Q"
+  help:
+    - "alt+h"
+    - "ctrl+F1"
+  sync:
+    - "ctrl+l"
+  reload:
+    - "R"
+    - "ctrl+r"
+  follow_mode:
+    - "F"
+  edit:
+    - "v"
+  down:
+    - "j"
+    - "Enter"
+    - "Down"
+    - "ctrl+n"
+  up:
+    - "k"
+    - "Up"
+    - "ctrl+p"
+  top:
+    - "g"
+    - "Home"
+  bottom:
+    - "G"
+    - "End"
+  left:
+    - "h"
+    - "Left"
+  right:
+    - "l"
+    - "Right"
+  half_left:
+    - "ctrl+Left"
+  half_right:
+    - "ctrl+Right"
+  page_up:
+    - "ctrl+b"
+    - "PageUp"
+    - "b"
+  page_down:
+    - "ctrl+f"
+    - "PageDown"
+    - "f"
+  page_half_up:
+    - "ctrl+u"
+    - "u"
+  page_half_down:
+    - "ctrl+d"
+    - "d"
+  search:
+    - "/"
+  backsearch:
+    - "?"
+  next_search:
+    - "n"
+  next_backsearch:
+    - "N"
+  goto:
+    - ":"
+  mark:
+    - "m"
+  remove_mark:
+    - "M"
+  next_mark:
+    - ">"
+  previous_mark:
+    - "<"
+  wrap_mode:
+    - "w"
+    - "W"
+  line_number_mode:
+    - "alt+n"
+  next_doc:
+    - "]"
+  previous_doc:
+    - "["
+  filter:
+    - "&"
+  save_buffer:
+    - "s"
+  cancel:
+    - "ctrl+c"
+  input_casesensitive:
+    - "alt+c"
+  input_smart_casesensitive:
+    - "alt+s"
+  input_incsearch:
+    - "alt+i"
+  input_regexp_search:
+    - "alt+r"
+  input_previous:
+    - "Up"
+  input_next:
+    - "Down"
+  input_copy:
+    - "ctrl+c"
+  input_paste:
+    - "ctrl+v"

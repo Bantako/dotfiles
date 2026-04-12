@@ -1,7 +1,8 @@
 {pkgs, ...}: {
+  xdg.configFile."ov/config.yaml".source = ./ov.yaml;
+
   home.packages = with pkgs; [
     # 基本CLIツール
-    bat
     bottom
     eza
     fzf
