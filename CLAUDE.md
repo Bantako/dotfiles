@@ -33,6 +33,23 @@ home-manager switch --flake /home/morikawa/.dotfiles#myHome
   - `modules/programs/` — ブラウザ
   - `modules/shell/` — Zshのエイリアス、ヒストリ設定
 
+## テスト
+
+設定を変更したあとは必ず以下を実行してビルドエラーがないか確認する。
+
+```bash
+# Flake全体の構文・依存関係チェック（ビルドは行わない）
+nix flake check /home/morikawa/.dotfiles
+
+# NixOSシステム設定のdry-run（実際には切り替えない）
+sudo nixos-rebuild dry-build --flake /home/morikawa/.dotfiles#myNixOS
+
+# Home Manager設定のdry-run
+home-manager build --flake /home/morikawa/.dotfiles#myHome
+```
+
+`nix flake check` はモジュールの型チェックや未定義オプションの検出もするため、`switch` 前に必ず通す。
+
 ## 重要なパターン
 
 **Neovimの設定**は `home/modules/cli/nvim/` に実ファイルとして置かれ、`mkOutOfStoreSymlink` で `~/.config/nvim` にシンボリックリンクされている（Nixストアにコピーされない）。そのため編集はリビルドなしに即反映される。
