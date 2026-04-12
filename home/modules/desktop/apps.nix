@@ -6,16 +6,31 @@
   programs.obs-studio.enable = true;
 
   home.packages = with pkgs; [
+    # デスクトップ基盤
+    alacritty          # サブターミナル
+    fuzzel             # アプリランチャー
+    nemo               # ファイルマネージャー
+    xwayland-satellite # XWayland統合
+    zathura            # PDFビューアー
+
+    # エンタメ・コミュニケーション
     discord
     discord-ptb
-    totem # ビデオプレーヤー
-    evince # PDFビューアー
-    parsec-bin # 超速いリモートデスクトップクライアント
-    remmina # VNCクライアント
+    mpv
+    parsec-bin         # 超速いリモートデスクトップクライアント
+    prismlauncher      # Minecraft
+    remmina            # VNCクライアント
     slack
     spotify
-    prismlauncher # minecraft
-    mpv
-    featherpad # 軽量エディタ
+    totem              # ビデオプレーヤー
+
+    # メディア・ノート
+    android-studio
+    calibre            # 電子書籍管理
+    obsidian           # ノート
+
+    # その他
+    evince             # PDFビューアー（GNOME）
+    featherpad         # 軽量エディタ
   ];
 }

@@ -16,6 +16,14 @@
       nixfmt-rfc-style
       tree-sitter # treesitterパーサーのビルドに必要
       gcc         # treesitterパーサーのコンパイラ
+      lua-language-server
+      vscode-json-languageserver
+      shfmt
+      nodejs_22
     ];
   };
+
+  home.packages = with pkgs; [
+    (vimPlugins.nvim-treesitter.withAllGrammars)
+  ];
 }

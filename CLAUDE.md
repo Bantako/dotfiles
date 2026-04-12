@@ -68,3 +68,13 @@ home-manager build --flake /home/morikawa/.dotfiles#morikawa@nixos
 **Flakeの依存関係**（nixpkgs-unstable、home-manager、niri-flake、noctalia-shell、sops-nix、claude-code-nix等）はすべてpinされている。更新は `nix flake update`。
 
 **シェルエイリアス**でよく使うコマンドを置き換えている：`cat`→`bat`、`grep`→`rg`、`ls`/`ll`/`la`→`eza`系、`cd`→`zoxide`。
+
+## キーバインド方針
+
+**物理キーボードに CapsLock キーはない**。CapsLock を修飾キーとして転用する手法は使わない。
+
+**目標**: macOS に近いキーバインド体系。具体的には「アプリショートカット用修飾キー」と「Unix Ctrl（シェル制御コード）用修飾キー」を分離すること。
+
+**現状の問題**: `xremap` で Ctrl↔Super をターミナルアプリ限定でスワップする設定を入れているが、Niri が `ext-foreign-toplevel-list-v1`（標準化プロトコル）を使うのに対し xremap は `wlr-foreign-toplevel-management`（wlroots 専用）でアプリ検出するため、`application.only` フィルタが機能せずスワップが全アプリに適用されてしまう。
+
+**未解決**。ターミナルエミュレータ側で完結させる案（アプリ検出不要）と、Niri IPC を使ったデーモンによる動的制御案がある。

@@ -16,6 +16,7 @@
     ./modules/cli/git.nix
     ./modules/cli/neovim.nix
     ./modules/cli/sheldon.nix
+    ./modules/cli/tools.nix
     ./modules/cli/vimiv.nix
     ./modules/cli/yazi.nix
     ./modules/desktop/apps.nix
@@ -32,45 +33,6 @@
     ./modules/shell/zsh.nix
   ];
 
-
-  home.packages = with pkgs; [
-    bat
-    bottom
-    eza
-    fzf
-    httpie
-    ripgrep
-    zoxide
-    sheldon
-    jq
-    # nixai
-    wezterm
-    alacritty
-    fuzzel
-    # builds
-    gcc
-    nodejs_22
-    lua-language-server
-    vscode-json-languageserver
-    shfmt
-    tree-sitter   # CLI
-    (vimPlugins.nvim-treesitter.withAllGrammars)
-    xwayland-satellite
-    nemo
-    zathura
-    android-studio
-    # ターミナルツール群
-    vimiv-qt      # 画像ビューアー（yaziから起動）
-    ov            # ページャー（yaziのbat連携）
-    htop          # プロセスモニター
-    gh            # GitHub CLI
-    bitwarden-cli # パスワード管理CLI
-    fio           # ディスクI/Oベンチマーク
-    atool         # アーカイブ展開（aunpack, yaziから使用）
-    # メディア・ノート
-    calibre       # 電子書籍管理
-    obsidian      # ノート
-  ];
 
   services.kdeconnect = {
     enable = true;

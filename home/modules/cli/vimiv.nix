@@ -1,4 +1,6 @@
 {pkgs, ...}: {
+  home.packages = [ pkgs.vimiv-qt ];
+
   xdg.configFile."vimiv/vimiv.conf".text = ''
     [GENERAL]
     monitor_filesystem = True
