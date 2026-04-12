@@ -27,10 +27,6 @@
           enabled = true;
           sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
         };
-        screenshot = {
-          enabled = true;
-          sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
-        };
         timer = {
           enabled = true;
           sourceUrl = "https://github.com/noctalia-dev/noctalia-plugins";
