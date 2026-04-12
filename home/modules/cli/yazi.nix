@@ -1,4 +1,8 @@
 {pkgs, ...}: {
+  home.packages = with pkgs; [
+    file  # mime-ext の fallback_file1 が使う file(1) コマンド
+  ];
+
   programs.yazi = {
     enable = true;
     package = pkgs.yazi;

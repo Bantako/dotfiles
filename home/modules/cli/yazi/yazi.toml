@@ -1,34 +1,60 @@
 [opener]
+# ブラウザで開く
 open = [
-  { run = 'xdg-open "$0"', block = false, desc = 'Browser'},
+  { run = 'xdg-open "$@"', block = false, desc = 'Browser'},
 ]
+# PDFビューアー
 read = [
-  { run = 'zathura "$0"', block = false, desc = 'PDF Viewer'},
+  { run = 'zathura "$@"', block = false, desc = 'PDF Viewer (zathura)'},
 ]
+# Exif情報表示
 exif = [
-  { run = 'exif "$0"', block = true, desc = 'Show Exif'},
+  { run = 'exif "$@"', block = true, desc = 'Show Exif'},
 ]
+# 画像ビューアー
 view = [
-  { run = 'vimiv "$0"', block = false, desc = 'View image with vimiv'}
+  { run = 'vimiv "$@"', block = false, desc = 'Image Viewer (vimiv)'}
 ]
-
-unzip = [
-  { run = 'unzip -O cp932 "$0"', block = false, desc = 'Unzip with Shift-jis encoding'}
+# 動画・音声プレーヤー
+play = [
+  { run = 'mpv "$@"', block = false, desc = 'Player (mpv)'},
 ]
-
+# テキスト表示（シンタックスハイライト）
 show_text = [
-  { run = 'bat --paging=always --pager="ov" "$0"', block = true, desc = 'Show Text with Syntax Highlighting'}
+  { run = 'bat --paging=always --pager="ov" "$@"', block = true, desc = 'View Text (bat)'}
+]
+# アーカイブ展開
+unzip = [
+  { run = 'unzip -O cp932 "$@"', block = false, desc = 'Unzip (Shift-JIS対応)'}
+]
+extract = [
+  { run = 'aunpack "$@"', block = false, desc = 'Extract archive'},
 ]
 
 [open]
 prepend_rules = [
-  { name = "*.html", use = ["open", "edit"] },
-  { name = "*.pdf", use = ["read", "exif"] },
-  { name = "*.{jpg,jpeg,png,gif,webp,tiff}", use = ["view", "exif"] },
+  # mime-ext fetcher が提供する MIME タイプで判定（name グロブより確実）
+  { mime = "image/*", use = ["view", "exif"] },
+  { mime = "video/*", use = ["play"] },
+  { mime = "audio/*", use = ["play"] },
+  { mime = "application/pdf", use = ["read"] },
+  { mime = "application/epub+zip", use = ["read"] },
+  # アーカイブ（MIME で判定）
+  { mime = "application/zip", use = ["unzip", "extract"] },
+  { mime = "application/x-tar", use = ["extract"] },
+  { mime = "application/gzip", use = ["extract"] },
+  { mime = "application/x-xz", use = ["extract"] },
+  { mime = "application/x-bzip2", use = ["extract"] },
+  { mime = "application/zstd", use = ["extract"] },
+  { mime = "application/x-7z-compressed", use = ["extract"] },
+  { mime = "application/x-rar", use = ["extract"] },
+  # HTML はブラウザ
+  { name = "*.html", use = ["open"] },
+  { name = "*.htm", use = ["open"] },
 ]
 
 append_rules = [
-  { name = "*.zip", use = ["unzip"] },
+  # 上記以外はすべてテキストとして表示
   { name = "*", use = ["show_text"] }
 ]
 

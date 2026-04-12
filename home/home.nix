@@ -65,6 +65,7 @@
     gh            # GitHub CLI
     bitwarden-cli # パスワード管理CLI
     fio           # ディスクI/Oベンチマーク
+    atool         # アーカイブ展開（aunpack, yaziから使用）
     # メディア・ノート
     calibre       # 電子書籍管理
     obsidian      # ノート
