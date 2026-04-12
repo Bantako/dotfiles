@@ -3,6 +3,11 @@
     inputs.noctalia.homeModules.default
   ];
 
+  home.packages = with pkgs; [
+    wl-clipboard  # クリップボード操作
+    cliphist      # クリップボード履歴
+  ];
+
   home.file.".config/noctalia/settings.json".source = ./noctalia/settings.json;
   programs.noctalia-shell = {
     enable = true;
