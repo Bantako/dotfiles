@@ -1,3 +1,14 @@
+# Noctalia Shell は以下の機能も担っている（外部デーモン不要）：
+#   - スクリーンロック・アイドル管理: settings.json の `idle` セクションで設定
+#       screenOffTimeout: 600s / lockTimeout: 660s / suspendTimeout: 1800s
+#   - 通知デーモン: `notifications` セクション（mako/dunst は不要）
+#   - クリップボード履歴: appLauncher.enableClipboardHistory + cliphist で管理
+#       wl-paste --watch cliphist store をランチャー内部で起動
+#   - 壁紙管理: `wallpaper` セクション（~/Pictures/Wallpapers からランダム）
+#
+# 日本語IME は Noctalia ではなく NixOS システム側で管理:
+#   nixos/modules/system/locale.nix: i18n.inputMethod (fcitx5 + fcitx5-mozc)
+
 {inputs, config, pkgs, ...}: {
   imports = [
     inputs.noctalia.homeModules.default

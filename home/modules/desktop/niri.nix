@@ -36,6 +36,9 @@
         # 終了
         # "Mod+Shift+E".action = "quit";
         # ロック
+        # → スクリーンロック・アイドル管理は Noctalia が担当（settings.json の idle セクション）
+        #   screenOff: 600s / lock: 660s / suspend: 1800s
+        #   手動ロックは Noctalia のセッションメニュー（lock action）から実行
         # "Mod+Shift+L".action.spawn = [ "swaylock" ];
         # ホットキー表示
         "Mod+slash".action = na.show-hotkey-overlay;
