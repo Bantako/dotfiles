@@ -1,6 +1,20 @@
 {pkgs, ...}: {
   programs.mpv = {
     enable = true;
+    config = {
+      # レンダリング（AMD / Wayland 向け）
+      vo = "gpu-next";
+      gpu-api = "vulkan";
+      hwdec = "vaapi";
+
+      # 視聴体験
+      save-position-on-quit = "yes";
+      keep-open = "yes";
+
+      # 音量
+      volume-max = 150;
+      af = "loudnorm";  # ラウドネス正規化（ファイル間の音量差をならす）
+    };
     bindings = {
       # シーク
       h = "seek -5";
