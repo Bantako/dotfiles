@@ -9,5 +9,11 @@
     viAlias = true;
     vimAlias = true;
     defaultEditor = true;
+    extraPackages = with pkgs; [
+      rust-analyzer
+      rustfmt
+      nil        # Nix LSP
+      nixfmt-rfc-style
+    ];
   };
 }

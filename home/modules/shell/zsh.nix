@@ -76,7 +76,6 @@
       EDITOR = "nvim";
       BROWSER = "vivaldi";
       LESSHISTFILE = "$XDG_STATE_HOME/less/history";
-      PATH = "$HOME/.cargo/bin:$PATH";
     };
 
     initContent = ''
