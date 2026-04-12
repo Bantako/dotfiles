@@ -22,6 +22,11 @@
         ll = "eza --icons always --long --all --git ";
         tree = "eza --icons always --classify always --tree";
         lg = "lazygit";
+        # nh (nix helper)
+        nos = "nh os switch";
+        nhs = "nh home switch";
+        nob = "nh os boot";
+        noc = "nh clean all";
       }
       claudeAliases
     ];

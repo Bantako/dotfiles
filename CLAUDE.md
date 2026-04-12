@@ -8,12 +8,21 @@ Nix Flakes で管理された NixOS + Home Manager のdotfilesリポジトリ。
 
 ## 設定の適用
 
+`nh` コマンドで適用する（`NH_FLAKE` は `programs.nh` で `/home/morikawa/.dotfiles` に設定済み）。
+
 ```bash
 # NixOSシステム設定を適用
-sudo nixos-rebuild switch --flake /home/morikawa/.dotfiles#myNixOS
+nh os switch        # または nos
 
 # Home Managerユーザー設定を適用
-home-manager switch --flake /home/morikawa/.dotfiles#myHome
+nh home switch      # または nhs
+```
+
+直接叩く場合（フォールバック用）：
+
+```bash
+sudo nixos-rebuild switch --flake /home/morikawa/.dotfiles#nixos
+home-manager switch --flake /home/morikawa/.dotfiles#morikawa@nixos
 ```
 
 ## アーキテクチャ
@@ -42,10 +51,10 @@ home-manager switch --flake /home/morikawa/.dotfiles#myHome
 nix flake check /home/morikawa/.dotfiles
 
 # NixOSシステム設定のdry-run（実際には切り替えない）
-sudo nixos-rebuild dry-build --flake /home/morikawa/.dotfiles#myNixOS
+nh os switch --dry   # または sudo nixos-rebuild dry-build --flake /home/morikawa/.dotfiles#nixos
 
 # Home Manager設定のdry-run
-home-manager build --flake /home/morikawa/.dotfiles#myHome
+home-manager build --flake /home/morikawa/.dotfiles#morikawa@nixos
 ```
 
 `nix flake check` はモジュールの型チェックや未定義オプションの検出もするため、`switch` 前に必ず通す。
