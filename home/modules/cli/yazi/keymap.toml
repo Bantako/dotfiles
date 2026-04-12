@@ -15,10 +15,10 @@ desc = "cd to ~/projects/"
 
 ## plugins
 
-# [[manager.prepend_keymap]]
-# on   = "l"
-# run  = "plugin smart-enter"
-# desc = "Enter the child directory, or open the file"
+[[mgr.prepend_keymap]]
+on   = "l"
+run  = "plugin smart-enter"
+desc = "Enter the child directory, or open the file"
 
 [[mgr.prepend_keymap]]
 on   = "F"
@@ -45,7 +45,8 @@ desc = "Start bunny.yazi fuzzy search"
 on = "<C-y>"
 run = ["plugin system-clipboard"]
 
-[[mgr.prepend_keymap]]
-on = ["R","b"]
-run = "plugin recycle-bin"
-desc = "Open Recycle Bin menu"
+# recycle-bin プラグインは未導入のため無効化
+# [[mgr.prepend_keymap]]
+# on = ["R","b"]
+# run = "plugin recycle-bin"
+# desc = "Open Recycle Bin menu"

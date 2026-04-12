@@ -9,11 +9,10 @@ require("bunny"):setup({
     { key = "p",          path = "~/projects/",    desc = "projects"     },
     { key = "u",          path = "/mnt/ugreen/",   desc = "UGREEN Nas"   },
     { key = "o",          path = "~/Documents/obsidian/main-vault/", desc = "obsidian vault"},
-    { key = { "l", "c" }, path = "~/.local/config",desc = "Local config" },
-    { key = { "l", "s" }, path = "~/.local/share", desc = "Local share"  },
-    { key = { "l", "b" }, path = "~/.local/bin",   desc = "Local bin"    },
-    { key = { "l", "t" }, path = "~/.local/state", desc = "Local state"  },
-    { key = { "l", "c" }, path = "~/.local/share/chezmoi/", desc = "chezmoi (dotfiles manager)"},
+    { key = { "l", "c" }, path = "~/.config",        desc = "Local config" },
+    { key = { "l", "s" }, path = "~/.local/share",   desc = "Local share"  },
+    { key = { "l", "b" }, path = "~/.local/bin",     desc = "Local bin"    },
+    { key = { "l", "t" }, path = "~/.local/state",   desc = "Local state"  },
     -- key and path attributes are required, desc is optional
   },
   desc_strategy = "path", -- If desc isn't present, use "path" or "filename", default is "path"

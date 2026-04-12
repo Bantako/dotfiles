@@ -40,8 +40,8 @@ show_symlink = true
 name = "/mnt/synology/**"
 run = "noop"
 
-# [[plugin.prepend_fetchers]]
-# id   = "mime"
-# name = "*"
-# run  = "mime-ext"
-# prio = "high"
+[[plugin.prepend_fetchers]]
+id   = "mime"
+name = "*"
+run  = "mime-ext"
+prio = "high"

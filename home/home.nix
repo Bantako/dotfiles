@@ -16,6 +16,7 @@
     ./modules/cli/git.nix
     ./modules/cli/neovim.nix
     ./modules/cli/sheldon.nix
+    ./modules/cli/vimiv.nix
     ./modules/cli/yazi.nix
     ./modules/desktop/apps.nix
     ./modules/desktop/gtk.nix
@@ -57,6 +58,16 @@
     nemo
     zathura
     android-studio
+    # ターミナルツール群
+    vimiv-qt      # 画像ビューアー（yaziから起動）
+    ov            # ページャー（yaziのbat連携）
+    htop          # プロセスモニター
+    gh            # GitHub CLI
+    bitwarden-cli # パスワード管理CLI
+    fio           # ディスクI/Oベンチマーク
+    # メディア・ノート
+    calibre       # 電子書籍管理
+    obsidian      # ノート
   ];
 
   services.kdeconnect = {
