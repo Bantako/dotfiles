@@ -14,6 +14,8 @@
       rustfmt
       nil        # Nix LSP
       nixfmt-rfc-style
+      tree-sitter # treesitterパーサーのビルドに必要
+      gcc         # treesitterパーサーのコンパイラ
     ];
   };
 }
