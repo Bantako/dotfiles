@@ -2,6 +2,7 @@
   imports = [
     inputs.noctalia.homeModules.default
   ];
+
   home.file.".config/noctalia/settings.json".source = ./noctalia/settings.json;
   programs.noctalia-shell = {
     enable = true;
@@ -46,6 +47,35 @@
       version = 2;
     };
     pluginSettings = {
+      custom-commands = {
+        commands = [
+          {
+            name = "フルスクリーン切り替え";
+            command = "niri msg action fullscreen-window";
+            icon = "arrows-maximize";
+          }
+          {
+            name = "仮フルスクリーン切り替え";
+            command = "niri msg action toggle-windowed-fullscreen";
+            icon = "window-maximize";
+          }
+          {
+            name = "スクリーンショット（範囲選択）";
+            command = "niri msg action screenshot";
+            icon = "camera";
+          }
+          {
+            name = "スクリーンショット（全画面）";
+            command = "niri msg action screenshot-screen";
+            icon = "device-desktop";
+          }
+          {
+            name = "スクリーンショット（ウィンドウ）";
+            command = "niri msg action screenshot-window";
+            icon = "app-window";
+          }
+        ];
+      };
       kde-connect = {
         hideIfNoDeviceConnected = true;
       };

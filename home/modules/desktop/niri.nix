@@ -31,6 +31,7 @@
         # ランチャー
         # "Mod+D".action.spawn = [ "fuzzel" ];
         "Mod+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
+        "Mod+C".action.spawn = [ "noctalia-shell" "ipc" "call" "plugin:custom-commands" "toggle" ];
 
         # 終了
         # "Mod+Shift+E".action = "quit";
