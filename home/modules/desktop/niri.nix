@@ -48,6 +48,14 @@
         "Mod+D".action.spawn = [ "noctalia-shell" "ipc" "call" "launcher" "toggle" ];
         "Mod+C".action.spawn = [ "noctalia-shell" "ipc" "call" "plugin:custom-commands" "toggle" ];
 
+        # スクリーンショット（macOS の Cmd+Shift+3/4 に合わせた配置）
+        "Ctrl+Shift+3".action.screenshot-screen = {};   # 全画面
+        "Ctrl+Shift+4".action.screenshot = {};           # 範囲選択
+        "Ctrl+Shift+5".action.screenshot-window = {};    # ウィンドウ
+
+        # メディアキー（XF86 系）は意図的にバインドしない
+        # → キーボードのハードウェアデフォルト動作に任せる
+
         # 終了
         # "Mod+Shift+E".action = "quit";
         # ロック

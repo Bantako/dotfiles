@@ -22,6 +22,12 @@
     };
   };
 
+  # Qt アプリのテーマを GTK3 テーマ（Dracula）に追従させる
+  qt = {
+    enable = true;
+    platformTheme.name = "gtk3";
+  };
+
   # Waylandアプリにもカーソルテーマを適用
   home.pointerCursor = {
     name = "Bibata-Modern-Classic";
