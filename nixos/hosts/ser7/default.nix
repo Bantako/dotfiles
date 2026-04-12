@@ -10,6 +10,7 @@
     ../../modules/desktop/commands.nix
     ../../modules/desktop/desktop.nix
     ../../modules/desktop/portal.nix
+    ../../modules/system/bluetooth.nix
     ../../modules/system/flatpak.nix
     ../../modules/system/locale.nix
     ../../modules/system/networking.nix

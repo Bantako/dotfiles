@@ -15,6 +15,11 @@
   boot.kernelModules = [ "iwlwifi" ]; # wi-fi
   hardware.enableRedistributableFirmware = true;
 
+  # 内蔵 Intel Bluetooth (8087:0029) を無効化し、USB 外付けアダプタ (TP-Link 2357:0604) のみ使用する
+  services.udev.extraRules = ''
+    SUBSYSTEM=="usb", ATTRS{idVendor}=="8087", ATTRS{idProduct}=="0029", ATTR{authorized}="0"
+  '';
+
   # Enable CUPS to print documents.
   services.printing.enable = true;
 
