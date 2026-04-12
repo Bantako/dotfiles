@@ -3,6 +3,10 @@
     inputs.niri.homeModules.niri
   ];
 
+  home.packages = with pkgs; [
+    lxqt.lxqt-policykit  # polkit 認証エージェント（sudo ダイアログ GUI）
+  ];
+
   programs.niri = {
     enable = true;
     settings =
@@ -12,6 +16,11 @@
         {
           command = [
             "noctalia-shell"
+          ];
+        }
+        {
+          command = [
+            "lxqt-policykit-agent"  # polkit 認証エージェント
           ];
         }
       ];
