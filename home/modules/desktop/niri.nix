@@ -20,6 +20,12 @@
       };
       prefer-no-csd = true;
       hotkey-overlay.skip-at-startup = true;
+      layout = {
+        gaps = 8;        # デフォルト: 16
+        border = {
+          width = 1;     # デフォルト: 4
+        };
+      };
       binds = {
         # アプリ起動系
         # バインド被りのため休止
