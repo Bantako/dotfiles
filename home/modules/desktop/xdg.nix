@@ -1,5 +1,9 @@
 { inputs, config, pkgs, ...}:
 {
+  # xdg-user-dirs-update がシステムロケール(ja_JP)を見てディレクトリ名を
+  # 日本語に上書きするのを防ぐ。en_US で作成済みと宣言しておく。
+  xdg.configFile."user-dirs.locale".text = "en_US";
+
   xdg = {
     enable = true;
     userDirs = {
