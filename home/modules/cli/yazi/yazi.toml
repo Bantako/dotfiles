@@ -1,7 +1,7 @@
 [opener]
-# ブラウザで開く
+# xdg-open でシステムのデフォルトアプリを使う
 open = [
-  { run = 'xdg-open "$@"', block = false, desc = 'Browser'},
+  { run = 'xdg-open "$@"', block = false, desc = 'Open with default app (xdg-open)'},
 ]
 # PDFビューアー
 read = [
@@ -48,9 +48,15 @@ prepend_rules = [
   { mime = "application/zstd", use = ["extract"] },
   { mime = "application/x-7z-compressed", use = ["extract"] },
   { mime = "application/x-rar", use = ["extract"] },
-  # HTML はブラウザ
-  { name = "*.html", use = ["open"] },
-  { name = "*.htm", use = ["open"] },
+  # HTML・XML はブラウザ
+  { mime = "text/html", use = ["open"] },
+  { mime = "application/xhtml+xml", use = ["open"] },
+  # オフィス文書は xdg-open（LibreOffice 等）
+  { mime = "application/vnd.oasis.opendocument.*", use = ["open"] },
+  { mime = "application/vnd.openxmlformats-officedocument.*", use = ["open"] },
+  { mime = "application/msword", use = ["open"] },
+  { mime = "application/vnd.ms-excel", use = ["open"] },
+  { mime = "application/vnd.ms-powerpoint", use = ["open"] },
 ]
 
 append_rules = [
