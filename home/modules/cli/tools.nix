@@ -18,5 +18,6 @@
     gh            # GitHub CLI
     htop          # プロセスモニター
     ov            # ページャー（yaziのbat連携）
+    unzip         # ZIP展開
   ];
 }
