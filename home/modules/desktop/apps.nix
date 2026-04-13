@@ -29,6 +29,7 @@
 
     # Windows ゲーム
     bottles            # Wine フロントエンド（フリーゲーム等の exe 実行用）
+    easyrpg-player     # RPG ツクール 2000/2003 のネイティブ Linux 実装
 
     # その他
     evince             # PDFビューアー（GNOME）
