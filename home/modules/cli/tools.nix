@@ -18,6 +18,8 @@
     gh            # GitHub CLI
     htop          # プロセスモニター
     ov            # ページャー（yaziのbat連携）
+    python3       # Pythonインタープリター
     unzip         # ZIP展開
+    uv            # Pythonパッケージマネージャー
   ];
 }

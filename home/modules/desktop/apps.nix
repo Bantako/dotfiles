@@ -25,6 +25,7 @@
     # メディア・ノート
     android-studio
     calibre            # 電子書籍管理
+    electron           # Obsidian CLI の実行に必要
     obsidian           # ノート
 
     # Windows ゲーム
