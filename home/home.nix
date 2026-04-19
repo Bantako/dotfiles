@@ -12,6 +12,7 @@
   };
 
   imports = [
+    ./modules/ai/bonsai.nix
     ./modules/ai/claude-code.nix
     ./modules/cli/bat.nix
     ./modules/cli/git.nix
