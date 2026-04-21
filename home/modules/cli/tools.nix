@@ -1,7 +1,14 @@
-{pkgs, ...}: {
+{pkgs, config, ...}: let
+  raindrop-to-daily = pkgs.writeShellScriptBin "raindrop-to-daily" ''
+    exec ${pkgs.python3}/bin/python3 \
+      ${config.home.homeDirectory}/.dotfiles/home/modules/cli/scripts/raindrop-to-daily.py \
+      "$@"
+  '';
+in {
   xdg.configFile."ov/config.yaml".source = ./ov.yaml;
 
   home.packages = with pkgs; [
+    raindrop-to-daily
     # 基本CLIツール
     bottom
     eza
