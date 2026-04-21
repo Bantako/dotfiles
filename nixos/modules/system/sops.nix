@@ -14,6 +14,7 @@ in {
     secrets = {
       openai_api_key = userReadable // { };
       deepseek_api_key = userReadable // { };
+      raindrop_token = userReadable // { };
     };
   };
 }

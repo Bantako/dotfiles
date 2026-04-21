@@ -129,6 +129,9 @@ fi
 if [ -r /run/secrets/deepseek_api_key ]; then
   export DEEPSEEK_API_KEY="$(cat /run/secrets/deepseek_api_key)"
 fi
+if [ -r /run/secrets/raindrop_token ]; then
+  export RAINDROP_TOKEN="$(cat /run/secrets/raindrop_token)"
+fi
     '';
   };
 }
