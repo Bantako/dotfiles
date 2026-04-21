@@ -28,15 +28,4 @@
     allowedTCPPortRanges = [ { from = 1714; to = 1764; } ];
     allowedUDPPortRanges = allowedTCPPortRanges;
   };
-
-  systemd.services."NetworkManager-wait-online".enable = false;
-  systemd.services.disable-offload = {
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      ExecStart = ''
-        ${pkgs.ethtool}/bin/ethtool -K enp2s0 tso off gso off gro off
-      '';
-    };
-  };
 }
