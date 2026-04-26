@@ -15,6 +15,7 @@
   imports = [
     ./modules/ai/bonsai.nix
     ./modules/ai/claude-code.nix
+    ./modules/ai/rtk.nix
     ./modules/cli/bat.nix
     ./modules/cli/git.nix
     ./modules/cli/neovim.nix
