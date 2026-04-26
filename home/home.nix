@@ -4,6 +4,7 @@
     username = "morikawa";
     homeDirectory = "/home/${username}";
     stateVersion = "26.05";
+    sessionPath = [ "${homeDirectory}/.local/bin" ];
   };
   programs.home-manager.enable = true;
   programs.nh = {
