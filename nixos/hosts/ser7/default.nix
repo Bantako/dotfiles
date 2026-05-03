@@ -15,6 +15,7 @@
     ../../modules/system/locale.nix
     ../../modules/system/networking.nix
     ../../modules/system/sops.nix
+    ../../modules/system/podman.nix
     ../../modules/system/users.nix
   ]
   ++ [
