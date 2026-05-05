@@ -19,6 +19,15 @@
   # services.openssh.enable = true;
 
   services.tailscale.enable = true;
+
+  services.syncthing = {
+    enable = true;
+    user = "morikawa";
+    dataDir = "/home/morikawa";
+    configDir = "/home/morikawa/.config/syncthing";
+    openDefaultPorts = true;  # 22000/TCP+UDP, 21027/UDP
+  };
+
   networking.firewall = rec {
     enable = true;
     trustedInterfaces = ["tailscale0"];
