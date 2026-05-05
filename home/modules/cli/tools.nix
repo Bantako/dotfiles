@@ -26,6 +26,7 @@ in {
     htop          # プロセスモニター
     ov            # ページャー（yaziのbat連携）
     python3       # Pythonインタープリター
+    nodejs        # Node.js（npx経由のMCPサーバー用）
     unzip         # ZIP展開
     uv            # Pythonパッケージマネージャー
   ];
