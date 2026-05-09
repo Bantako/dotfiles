@@ -39,6 +39,7 @@
       "iocharset=utf8"
       "_netdev"
       "nofail"
+      "nobrl"
     ];
   };
 }
