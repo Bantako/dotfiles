@@ -1,7 +1,15 @@
-{inputs, config, pkgs, ...}:
+{inputs, config, pkgs, lib, ...}:
 {
-  # dotfilesのコピーではなくsymlinkにして変更可能にする
-  home.file.".config/nvim".source = config.lib.file.mkOutOfStoreSymlink "${config.home.homeDirectory}/.dotfiles/home/modules/cli/nvim";
+  # dotfilesのnvim設定をsymlinkにして変更可能にする
+  # home.file からは除外し activation script で作成する（programs.neovim と競合するため）
+  home.activation.nvimSymlink = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    target="${config.home.homeDirectory}/.dotfiles/home/modules/cli/nvim"
+    link="${config.home.homeDirectory}/.config/nvim"
+    if [ "$(readlink "$link" 2>/dev/null)" != "$target" ]; then
+      $DRY_RUN_CMD rm -rf "$link"
+      $DRY_RUN_CMD ln -sfn "$target" "$link"
+    fi
+  '';
 
   # nvim
   programs.neovim = {

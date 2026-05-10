@@ -14,11 +14,6 @@ let
       rev = "e2d67422cc70535166101051f1ddf988045d8570";
       hash = "sha256-OxdxTUq6njqwkFPYY0/qg3rthmMVtjaVxhFnQQRsCsM=";
       fetchSubmodules = true;
-      leaveDotGit = true;
-      postFetch = ''
-        git -C "$out" rev-parse --short HEAD > $out/COMMIT
-        find "$out" -name .git -print0 | xargs -0 rm -rf
-      '';
     };
     patches = [];
     # PrismMLフォークのwebui用npm依存のhash

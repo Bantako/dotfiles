@@ -1,4 +1,10 @@
-{pkgs, ...}: {
+{pkgs, lib, ...}: {
+  # openldap-2.6.13 のテストがタイムアウトで失敗する（nixpkgs-unstable の一時的な問題）
+  nixpkgs.overlays = [
+    (final: prev: {
+      openldap = prev.openldap.overrideAttrs (_: { doCheck = false; });
+    })
+  ];
   # Spotify TUI
   programs.ncspot.enable = true;
 

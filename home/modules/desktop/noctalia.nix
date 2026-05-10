@@ -9,10 +9,17 @@
 # 日本語IME は Noctalia ではなく NixOS システム側で管理:
 #   nixos/modules/system/locale.nix: i18n.inputMethod (fcitx5 + fcitx5-mozc)
 
-{inputs, config, pkgs, ...}: {
+{inputs, config, pkgs, lib, ...}: {
   imports = [
-    inputs.noctalia.homeModules.default
+    # homeModules.default は self.packages を参照し noctalia-qs（llama.cpp）を引き込むため
+    # home-module.nix（オプション定義のみ）を直接インポートする
+    (inputs.noctalia + "/nix/home-module.nix")
   ];
+
+  # nixpkgs の quickshell を使って noctalia-shell をビルド（noctalia-qs に依存しない）
+  programs.noctalia-shell.package = pkgs.callPackage (inputs.noctalia + "/nix/package.nix") {
+    quickshell = pkgs.quickshell;
+  };
 
   home.packages = with pkgs; [
     wl-clipboard  # クリップボード操作
