@@ -14,5 +14,6 @@ in {
 
   _module.args.claudeAliases = {
     ccode = "claude;";
+    cld = "claude;";
   };
 }
