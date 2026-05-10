@@ -13,7 +13,7 @@
       rust-analyzer
       rustfmt
       nil        # Nix LSP
-      nixfmt-rfc-style
+      nixfmt
       tree-sitter # treesitterパーサーのビルドに必要
       gcc         # treesitterパーサーのコンパイラ
       lua-language-server
