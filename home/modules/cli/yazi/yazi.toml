@@ -28,7 +28,7 @@ unzip = [
   { run = 'unzip -O cp932 "$@"', block = false, desc = 'Unzip (Shift-JIS対応)'}
 ]
 extract = [
-  { run = 'aunpack "$@"', block = false, desc = 'Extract archive'},
+  { run = 'for f in "$@"; do ouch decompress -y -d "${f%%.*}" "$f"; done', block = true, desc = 'Extract archive (ouch)'},
 ]
 
 [open]

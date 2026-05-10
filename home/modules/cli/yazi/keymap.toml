@@ -18,12 +18,6 @@ on = "?"
 run = "help"
 desc = "Show keybinding hints"
 
-## opener
-[[mgr.prepend_keymap]]
-on = "v"
-run = "open --interactive"
-desc = "Open with picker (viewer選択)"
-
 ## plugins
 
 [[mgr.prepend_keymap]]
