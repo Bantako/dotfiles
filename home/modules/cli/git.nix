@@ -5,8 +5,9 @@
     settings.user.email = "morimoriyuki552@gmail.com";
   };
 
-  programs.git.delta = {
+  programs.delta = {
     enable = true;
+    enableGitIntegration = true;
     options = {
       navigate = true;    # n/N でdiff間を移動
       side-by-side = true;
