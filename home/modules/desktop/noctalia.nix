@@ -16,10 +16,10 @@
     (inputs.noctalia + "/nix/home-module.nix")
   ];
 
-  # nixpkgs の quickshell を使って noctalia-shell をビルド（noctalia-qs に依存しない）
-  programs.noctalia-shell.package = pkgs.callPackage (inputs.noctalia + "/nix/package.nix") {
-    quickshell = pkgs.quickshell;
-  };
+  # noctalia 自身の packages.default を使う（noctalia-qs の正しい quickshell でビルド済み）
+  # pkgs.quickshell は別バージョンで動作しないため使わない
+  # noctalia のピン済み noctalia-qs を使うので我々の flake 側にハッシュ不一致が起きない
+  programs.noctalia-shell.package = inputs.noctalia.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
   home.packages = with pkgs; [
     wl-clipboard  # クリップボード操作
