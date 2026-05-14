@@ -31,8 +31,7 @@
     ./modules/desktop/mpv.nix
     ./modules/desktop/niri.nix
     ./modules/desktop/noctalia.nix
-    ./modules/desktop/wezterm.nix
-    ./modules/desktop/xdg.nix
+./modules/desktop/xdg.nix
     ./modules/desktop/xremap.nix
     ./modules/desktop/zen-browser.nix
     ./modules/desktop/zathura.nix

@@ -6,7 +6,6 @@ let
       - name: "swap ctrl/super in terminals"
         application:
           only:
-            - "org.wezfurlong.wezterm"
             - "com.mitchellh.ghostty"
         remap:
           CTRL_L: SUPER_L

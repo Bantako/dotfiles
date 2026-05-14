@@ -1,6 +1,10 @@
 { pkgs, ... }:
 
-{
+let
+  terminal = pkgs.writeShellScriptBin "terminal" ''
+    exec ${pkgs.ghostty}/bin/ghostty "$@"
+  '';
+in {
   xdg.configFile."ghostty/tab-style.css".text = ''
     headerbar {
       min-height: 20px;
@@ -38,6 +42,8 @@
     }
   '';
 
+  home.packages = [ terminal ];
+
   programs.ghostty = {
     enable = true;
     package = pkgs.ghostty;
@@ -49,7 +55,7 @@
       # フォント
       font-family = "JetBrainsMono Nerd Font Mono";
       font-size = 13;
-      # font-feature = "zero";
+      font-feature = "zero";
       font-codepoint-map = "U+3000-U+9FFF=Source Han Code JP,U+FF00-U+FFEF=Source Han Code JP";
       adjust-cell-height = "1";
       bold-is-bright = false;

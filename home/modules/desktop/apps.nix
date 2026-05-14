@@ -13,7 +13,7 @@
 
   home.packages = with pkgs; [
     # デスクトップ基盤
-    alacritty          # サブターミナル
+    alacritty          # フォールバックターミナル (ghostty障害時)
     fuzzel             # アプリランチャー
     nemo               # ファイルマネージャー
     xwayland-satellite # XWayland統合

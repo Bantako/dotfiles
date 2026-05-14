@@ -38,7 +38,7 @@ home-manager switch --flake /home/morikawa/.dotfiles#morikawa@nixos
   - `home.nix` — エントリーポイント。全homeモジュールをimport
   - `modules/ai/` — Claude Code の設定
   - `modules/cli/` — Git、Neovim（LazyVim）、sheldon（zshプラグイン）、yazi
-  - `modules/desktop/` — Niri（Wayland WM）、WezTerm、GTK、アプリ設定
+  - `modules/desktop/` — Niri（Wayland WM）、Ghostty、GTK、アプリ設定
   - `modules/programs/` — ブラウザ
   - `modules/shell/` — Zshのエイリアス、ヒストリ設定
 
