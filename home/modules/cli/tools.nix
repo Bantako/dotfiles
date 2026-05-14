@@ -48,6 +48,16 @@ in {
     # メディア・メタデータ
     exiftool      # EXIF/メタデータ管理
     gallery-dl    # 画像ギャラリーサイトの一括ダウンロード
+
+    # モダン診断・調査 CLI
+    dust          # du のツリー型モダン版
+    procs         # ps のカラー・ツリー表示版
+    hexyl         # xxd の bat 風カラー hex ビューア
+    dog           # dig のカラー代替
+
+    # ドキュメント・録画
+    vhs           # ターミナル操作を GIF/MP4 録画 (.tape DSL)
+    frogmouth     # Markdown TUI ブラウザ (glow より高機能・リンクジャンプ可)
   ];
 
   programs.atuin = {
