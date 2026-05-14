@@ -12,7 +12,6 @@
 
   programs = {
     git.enable = true;
-    starship.enable = true;
     zsh.enable = true;
     firefox.enable = true;
     kdeconnect.enable = true;

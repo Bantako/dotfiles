@@ -20,11 +20,8 @@ in {
     jq
 
     # ターミナルツール群
-    atool         # アーカイブ展開（aunpack、yaziから使用）
-    bitwarden-cli # パスワード管理CLI
     fio           # ディスクI/Oベンチマーク
     gh            # GitHub CLI
-    htop          # プロセスモニター
     ov            # ページャー（yaziのbat連携）
     python3       # Pythonインタープリター
     nodejs        # Node.js（npx経由のMCPサーバー用）
@@ -37,6 +34,20 @@ in {
     yt-dlp        # YouTube等の動画ダウンロード
     imagemagick   # 画像変換・リサイズ・バッチ処理
     ffmpeg        # 動画・音声変換
+
+    # Rust CLI 追加
+    fd            # find の Rust 代替
+    sd            # sed の Rust 代替
+    xh            # httpie の Rust 版
+    navi          # 対話型コマンドチートシート
+    hyperfine     # ベンチマーク
+
+    # ドキュメント変換
+    pandoc        # MD↔HTML/PDF/docx 等の文書変換
+
+    # メディア・メタデータ
+    exiftool      # EXIF/メタデータ管理
+    gallery-dl    # 画像ギャラリーサイトの一括ダウンロード
   ];
 
   programs.atuin = {
