@@ -56,7 +56,8 @@ in {
     comma                 # `nix run` 不要の即席パッケージ実行 (`, cowsay hi`)
 
     # モダン診断・調査 CLI
-    dust          # du のツリー型モダン版
+    dust          # du のツリー型モダン版（概要把握）
+    ncdu          # du のインタラクティブ TUI（j/k で掘っていける）
     procs         # ps のカラー・ツリー表示版
     hexyl         # xxd の bat 風カラー hex ビューア
     dog           # dig のカラー代替
