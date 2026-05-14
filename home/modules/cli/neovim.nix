@@ -1,5 +1,9 @@
 {inputs, config, pkgs, lib, ...}:
 {
+  # programs.neovim が生成する init.lua を抑制する
+  # 実際の init.lua は nvimSymlink 経由の dotfiles 版を使う
+  xdg.configFile."nvim/init.lua" = lib.mkForce { enable = false; };
+
   # dotfilesのnvim設定をsymlinkにして変更可能にする
   # home.file からは除外し activation script で作成する（programs.neovim と競合するため）
   home.activation.nvimSymlink = lib.hm.dag.entryAfter ["writeBoundary"] ''
