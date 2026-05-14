@@ -49,6 +49,12 @@ in {
     exiftool      # EXIF/メタデータ管理
     gallery-dl    # 画像ギャラリーサイトの一括ダウンロード
 
+    # Nix 管理
+    nix-tree              # Nix store 依存ツリーを TUI 探検
+    nix-output-monitor    # nh ビルド進捗をリッチ表示
+    nvd                   # switch 前後のパッケージ差分表示
+    comma                 # `nix run` 不要の即席パッケージ実行 (`, cowsay hi`)
+
     # モダン診断・調査 CLI
     dust          # du のツリー型モダン版
     procs         # ps のカラー・ツリー表示版
