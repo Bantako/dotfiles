@@ -15,14 +15,14 @@
 | **D** | parsec-bin / remmina 削除 |
 | **E** | evince / totem 削除 |
 | **F** | 死コード sheldon プラグイン2本削除 |
-| **G** | atool / htop 削除 + fd / sd / xh / navi / hyperfine 追加 |
+| **G** | atool / htop 削除 + fd / sd / xh / hyperfine 追加、navi は tealdeer で代替のため削除 |
 | **I** | bottles / easyrpg-player 削除 + gamemode / gamescope / corectrl / mangohud / protonup-qt / protontricks 追加 |
 | **J** | bitwarden-cli 削除 |
 | **L** | pandoc 追加 |
 | **N** | exiftool / gallery-dl 追加 |
 | **A** | wezterm 撤去・Ghostty 主軸化・terminal ラッパー移管 |
 | **P0** | nix-ld / zramSwap / systemd-oomd / fwupd 追加 |
-| **CLI+** | fastfetch / dust / procs / hexyl / dog / vhs / frogmouth / nix-tree / nom / nvd / comma 追加 |
+| **CLI+** | fastfetch / dust / ncdu / procs / hexyl / dog / vhs / nix-tree / nom / nvd / comma 追加（frogmouth は d/u 未対応で削除） |
 
 ### 未着手（優先度順）
 
