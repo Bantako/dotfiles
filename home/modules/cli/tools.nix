@@ -39,7 +39,6 @@ in {
     fd            # find の Rust 代替
     sd            # sed の Rust 代替
     xh            # httpie の Rust 版
-    navi          # 対話型コマンドチートシート
     hyperfine     # ベンチマーク
 
     # ドキュメント変換
