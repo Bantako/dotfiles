@@ -31,6 +31,11 @@
     electron           # Obsidian CLI の実行に必要
     obsidian           # ノート
 
+    # ゲーミング
+    mangohud           # FPS/温度/CPU使用率オーバーレイ
+    protonup-qt        # GE-Proton等カスタムProton導入GUI
+    protontricks       # Proton prefixにwinetricksを当てる
+
     # その他
     featherpad         # 軽量エディタ
   ];

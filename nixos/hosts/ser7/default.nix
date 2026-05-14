@@ -79,9 +79,19 @@
   programs.steam = {
     enable = true;
     remotePlay.openFirewall = true;
-    dedicatedServer.openFirewall = true;
+    gamescopeSession.enable = true;
   };
 
-  # Wine / Bottles 用: 32-bit グラフィクスサポート（多くの Windows ゲームに必要）
+  programs.gamemode.enable = true;
+
+  programs.gamescope = {
+    enable = true;
+    capSysNice = true;
+  };
+
+  programs.corectrl.enable = true;
+  hardware.amdgpu.overdrive.enable = true;
+
+  # Wine / Proton 用: 32-bit グラフィクスサポート
   hardware.graphics.enable32Bit = true;
 }

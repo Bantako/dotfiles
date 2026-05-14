@@ -4,7 +4,7 @@
   users.users.morikawa = {
     isNormalUser = true;
     description = "morikawa";
-    extraGroups = [ "networkmanager" "wheel" "input" ];
+    extraGroups = [ "networkmanager" "wheel" "input" "corectrl" ];
     packages = with pkgs; [
     ];
     shell = pkgs.zsh;
