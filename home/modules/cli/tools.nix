@@ -63,7 +63,6 @@ in {
 
     # ドキュメント・録画
     vhs           # ターミナル操作を GIF/MP4 録画 (.tape DSL)
-    frogmouth     # Markdown TUI ブラウザ (glow より高機能・リンクジャンプ可)
   ];
 
   programs.atuin = {
