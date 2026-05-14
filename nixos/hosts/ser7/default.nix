@@ -17,6 +17,10 @@
     ../../modules/system/sops.nix
     ../../modules/system/podman.nix
     ../../modules/system/users.nix
+    ../../modules/system/nix-ld.nix
+    ../../modules/system/zram.nix
+    ../../modules/system/oom.nix
+    ../../modules/system/fwupd.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri
