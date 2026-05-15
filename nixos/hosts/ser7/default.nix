@@ -34,7 +34,6 @@
   environment.systemPackages = with pkgs; [
     sops
     age
-    sddm-astronaut
   ];
 
   # This value determines the NixOS release from which the default
@@ -44,11 +43,6 @@
   # Before changing this value read the documentation for this option
   # (e.g. man configuration.nix or on https://nixos.org/nixos/options.html).
   system.stateVersion = "25.11"; # Did you read the comment?
-
-  programs.nh = {
-    enable = true;
-    flake = "/home/morikawa/.dotfiles";
-  };
 
   nix = {
     settings = {
