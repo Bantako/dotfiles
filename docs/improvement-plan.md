@@ -31,11 +31,18 @@
 | 項目 | 内容 | 規模 |
 |---|---|---|
 | **D1** | `networking.wireless.enable` 削除（NetworkManager と競合、無線事故発生済み） | 小 |
+| **M3** | `tools.nix` の `nodejs` → `nodejs_22`（H Step1 先取り、独立コミット可） | 小 |
+| **M5** | stateVersion ズレ修正（NixOS: 25.11 / HM: 26.05、unstable 追跡なら 26.05 統一） | 小・要判断 |
 | **openssh** | Tailscale 経由 SSH | 小 |
+| **fail2ban** | openssh 投入後の SSH 攻撃対策（openssh とセットで） | 小 |
 | **M** | aider 追加 | 小 |
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
+| **観測性まとめ** | smartmontools / iotop / iftop / deadnix / trash-cli / lm_sensors 等（まとめ日） | 小粒 |
+| **browser統合** | programs/browser.nix → desktop/browsers.nix 統合 + firefox 撤去 | 小 |
+| **小粒整理** | electron 撤去テスト / jellyfin-mpv-shim 削除 / featherpad コメント更新 | 小粒 |
+| **NAS連携** | home/modules/nas/immich.nix 新設 + immich-go 追加 | 小 |
 | **P1 Wayland** | satty / hyprpicker / gammastep / udiskie 等 | 小粒 |
 | **K** | xremap キーリマップ設計 | 保留中 |
 | **stylix** | base16 テーマ全アプリ統一 | 大 |
@@ -159,6 +166,29 @@ LAN 内別端末や Tailscale 経由で Mac/iPhone から作業できる。
 ```
 
 **検証**: Tailscale同一テナント内の端末から `ssh morikawa@<tailscale-ip>` で入れる。
+
+---
+
+### [ ] fail2ban — SSH ブルートフォース対策
+
+`services.openssh` を有効にした後にセットで入れる。Tailscale 経由のみ受ける運用でも念のため。
+
+**追加場所**: `nixos/modules/system/fail2ban.nix`
+
+```nix
+{ ... }:
+{
+  services.fail2ban = {
+    enable = true;
+    maxretry = 5;
+    ignoreIP = [
+      "100.64.0.0/10"  # Tailscale アドレス帯は除外
+    ];
+  };
+}
+```
+
+**検証**: `systemctl status fail2ban`、`fail2ban-client status sshd`
 
 ---
 
@@ -474,6 +504,38 @@ Node/Go/Python/Ruby/JDK のバージョン管理を一元化。
 ```nix
 home.packages = [ pkgs.git-absorb ];
 ```
+
+---
+
+### [ ] 観測性ツールまとめ日
+
+`analysis.md 5.4.2` で整理した「dotfiles 衛生 + 観測性」テーマ。1日に個別コミットでまとめて入れる。
+
+```nix
+# home/modules/cli/tools.nix の home.packages に追加
+smartmontools  # SSD/HDD の SMART 監視
+iotop-c        # リアルタイム disk I/O 内訳
+iftop          # リアルタイム帯域
+deadnix        # Nix dead code 検出
+trash-cli      # rm の代わりに trash-put でゴミ箱送り
+lm_sensors     # CPU/GPU/M.2 温度 (`sensors` コマンド)
+playerctl      # Spotify/mpv をキーやスクリプトから制御
+statix         # Nix lint (deadnix の相補)
+```
+
+システム側 (SMART デーモン):
+```nix
+# nixos/modules/system/ に追加または既存ファイルに
+services.smartd.enable = true;
+```
+
+**deadnix + statix の運用**:
+```bash
+deadnix .       # dead binding / unused imports を検出
+statix check .  # Nix のアンチパターンを lint
+```
+
+**yazi の削除を trash 経由に**: `yazi/keymap.toml` の `remove` アクションを `trash` に変更。
 
 ---
 
@@ -1660,6 +1722,42 @@ feat(ai): aider を追加
 
 ---
 
+## M3. nodejs 重複解消（H Step1 先取り）
+
+Mason 完全停止（H）を待たずに先取り可能な 1 行修正。
+
+```nix
+# home/modules/cli/tools.nix
+nodejs     # → nodejs_22 に変更
+
+# home/modules/cli/neovim.nix の extraPackages から削除:
+#   nodejs_22   # tools.nix と重複
+#   tree-sitter # withAllGrammars があれば不要
+#   gcc         # 同上
+```
+
+**コミット**: `refactor(nvim): nodejs 重複解消（H Step1 先取り）`
+
+---
+
+## M5. stateVersion ズレ修正
+
+NixOS 側 `25.11` と Home Manager 側 `26.05` で世代がずれている。
+unstable チャンネル追跡なら両方 `26.05` に統一が正しい。
+
+```nix
+# nixos/hosts/ser7/default.nix
+system.stateVersion = "26.05";  # 25.11 → 26.05
+
+# home/home.nix は既に 26.05 のため変更不要
+```
+
+**注意**: 変更後は `nh os switch` して起動確認。stateful なデータ（DB 等）のマイグレーションが走る場合があるが、個人デスクトップ用途では通常問題ない。
+
+**コミット**: `fix(nixos): stateVersion を 26.05 に統一`
+
+---
+
 ## N. メディア変換 → exiftool + gallery-dl 追加
 
 **決定**: ffmpeg / imagemagick / yt-dlp は維持。immich → Obsidian ワークフロー支援に exiftool、画像ギャラリー収集に gallery-dl を追加。
@@ -1759,6 +1857,114 @@ sansSerif = ["Noto Sans CJK JP" "Noto Color Emoji"];  # 半角スペース付き
 
 - **UDEV Gothic NF** / **PlemolJP NF** — JetBrainsMono + CJK 合成フォント。導入すれば Ghostty の `font-codepoint-map` 行が不要になる (設定スッキリ化)
 - ただし現状の Ghostty CJK 表示で困っていないなら無理に乗り換える必要なし
+
+---
+
+## P. browser.nix 統合・Firefox 撤去
+
+`programs/` が `browser.nix` 1 本だけで構造が歪。`desktop/zen-browser.nix` と統合して解消する。
+
+### 作業手順
+
+```bash
+# 1. home/modules/desktop/browsers.nix を新規作成
+#    programs/browser.nix (Vivaldi) + zen-browser.nix の内容を統合
+
+# 2. home/home.nix の imports を更新
+#    ./modules/programs/browser.nix → 削除
+#    ./modules/desktop/zen-browser.nix → 削除
+#    ./modules/desktop/browsers.nix → 追加
+
+# 3. 旧ファイルを削除
+git rm home/modules/programs/browser.nix
+git rm home/modules/desktop/zen-browser.nix
+
+# 4. nixos/modules/system/users.nix の programs.firefox.enable を確認
+#    Vivaldi/Zen が主役なら削除
+
+nix flake check ~/.dotfiles
+nh home switch
+```
+
+### コミットメッセージ案
+
+```
+refactor(desktop): browser.nix を desktop/browsers.nix に統合
+
+programs/ が browser.nix 1本のみで構造が歪だった。
+Vivaldi + Zen を desktop/browsers.nix に集約し programs/ を解消。
+```
+
+---
+
+## Q. NAS 連携（home/modules/nas/）
+
+`analysis.md 5.5.3` 整理。`programs/` の歪みを繰り返さないよう最初から専用ディレクトリを切る。
+
+```nix
+# home/modules/nas/immich.nix（新規）
+{ pkgs, ... }: {
+  home.packages = with pkgs; [
+    immich-go     # ローカル → NAS Immich への bulk upload（並列強い・速い）
+    # immich-cli  # 公式が必要になった日に追加
+  ];
+}
+```
+
+```bash
+# home/home.nix の imports に追加
+#   ./modules/nas/immich.nix
+
+nix flake check ~/.dotfiles
+nh home switch
+immich-go --help
+```
+
+### 将来追加候補（nas/ に乗せる）
+
+| ツール | 用途 |
+|---|---|
+| rclone | NAS ↔ クラウド (B2/S3) のオフサイトミラー |
+| kopia | borgbackup 系モダン backup CLI |
+| ntfy-cli | NAS の push 通知をターミナルで受ける |
+
+**コミット**: `feat(nas): home/modules/nas/ を新設し immich-go を追加`
+
+---
+
+## R. 小粒整理（electron / jellyfin-mpv-shim / featherpad）
+
+`analysis.md 5.3` 整理。個別コミットで一気に片付ける。
+
+### electron 撤去テスト
+
+`home/modules/desktop/apps.nix` の `electron` 行を削除 → `nh home switch` → Obsidian が動くか確認。
+動けば撤去確定。動かなければ revert してコメントに「obsidian 同梱でない理由」を明記。
+
+### jellyfin-mpv-shim 削除
+
+NAS の Jellyfin は Web UI / モバイルアプリ主体で shim 経由視聴はほぼ未使用（確認済み）。
+
+```bash
+git rm home/modules/desktop/jellyfin.nix
+# home/home.nix から ./modules/desktop/jellyfin.nix を削除
+nh home switch
+```
+
+### featherpad コメント更新
+
+```nix
+# apps.nix の該当行
+featherpad  # 汎用GUIテキストエディタ（コード=nvim/VSCode、ノート=Obsidian の枠外用）
+```
+
+### コミット分割案
+
+```
+chore(apps): electron を撤去（Obsidian 同梱確認済み）
+chore(desktop): jellyfin-mpv-shim を削除（Web UI 主体運用のため）
+chore(apps): featherpad コメントを用途明記に更新
+```
 
 ---
 
