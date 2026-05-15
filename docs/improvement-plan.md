@@ -23,11 +23,14 @@
 | **A** | wezterm 撤去・Ghostty 主軸化・terminal ラッパー移管 |
 | **P0** | nix-ld / zramSwap / systemd-oomd / fwupd 追加 |
 | **CLI+** | fastfetch / dust / ncdu / procs / hexyl / dog / vhs / nix-tree / nom / nvd / comma 追加（frogmouth は d/u 未対応で削除） |
+| **バグ修正** | D2 fontconfig タイポ / D3 noctalia カラー値 / D4 claude エイリアス末尾 `;` / D5 xsel→wl-copy / M2 nh 重複削除 / M4 xdg 重複削除 / M6 gc コメント追加 |
+| **5.6** | `.claude/settings.json` に PostToolUse hook 追加（.nix 編集後に `nix flake check --no-build` 自動実行） |
 
 ### 未着手（優先度順）
 
 | 項目 | 内容 | 規模 |
 |---|---|---|
+| **D1** | `networking.wireless.enable` 削除（NetworkManager と競合、無線事故発生済み） | 小 |
 | **openssh** | Tailscale 経由 SSH | 小 |
 | **M** | aider 追加 | 小 |
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
@@ -637,177 +640,6 @@ xremap によるアプリ別 Ctrl⇔Super スワップは Niri (ext-foreign-topl
 
 ---
 
-# 次に試す枠 (実装スニペット決定済み)
-
-「気になる」と判断した4本。家で即追加できる形にしてある。
-
-## [ ] nix-tree — Nix store 依存ツリーを TUI 探検
-
-`/run/current-system` を食わせると「何がなぜ入っているか」を全部追える。
-flake.lock の input 由来や、間接依存で引き込まれてる謎パッケージの正体を掴むのに最強。
-
-```nix
-# home/modules/cli/tools.nix の home.packages に追加
-nix-tree
-```
-
-**使い方**:
-```bash
-nix-tree                                # カレント home-manager profile
-nix-tree /run/current-system            # NixOS システム全体
-nix-tree --derivation                   # ビルド時依存も含めて
-nix-tree $(nix path-info -r /run/current-system | head -1)
-```
-
-TUI内で:
-- `/` 検索 / `?` ヘルプ / `Enter` 子に潜る / `h` 親へ / `y` whyを表示
-
----
-
-## [ ] vhs — `.tape` DSL でターミナル操作を GIF/MP4 録画
-
-dotfiles READMEや Obsidian の手順メモに動画が貼れるようになる。
-ttyd を内部で起動するので無人実行可能。
-
-```nix
-# home/modules/cli/tools.nix の home.packages に追加
-vhs
-ttyd     # vhs が内部で使う (依存になってるはずだが念のため)
-# ffmpeg は既存
-```
-
-**最小サンプル** (`~/scratch/demo.tape`):
-```
-Output demo.gif
-Set FontSize 16
-Set Width 1200
-Set Height 700
-Set Theme "Dracula"
-
-Type "ls -la"
-Enter
-Sleep 1s
-
-Type "nix-tree"
-Enter
-Sleep 3s
-```
-
-```bash
-vhs ~/scratch/demo.tape    # demo.gif が生成される
-vhs new mydemo.tape        # テンプレ生成
-```
-
-**応用**: dotfiles リポジトリの `docs/demos/*.tape` に置いて、CI または手動で `vhs *.tape` を回すと README が華やかになる。
-
----
-
-## [ ] fastfetch — neofetch の Rust/C 後継
-
-起動が速く、JSON で完全に layout を定義できる。zsh 起動時に毎回出しても重くない。
-home-manager に専用モジュールがあるので JSON 直書きせずに済む。
-
-**新規ファイル** `home/modules/cli/fastfetch.nix`:
-
-```nix
-{ ... }:
-{
-  programs.fastfetch = {
-    enable = true;
-    settings = {
-      logo = {
-        type = "small";       # 大きい AA が嫌なら small / または "none"
-        padding = { right = 2; };
-      };
-      display = {
-        separator = "  ";
-      };
-      modules = [
-        "title"
-        "separator"
-        "os"
-        "host"
-        "kernel"
-        "uptime"
-        "packages"
-        "shell"
-        "wm"
-        "terminal"
-        "cpu"
-        "gpu"
-        "memory"
-        "swap"
-        "disk"
-        "localip"
-        "battery"
-        "break"
-        "colors"
-      ];
-    };
-  };
-}
-```
-
-`home/home.nix` の imports に `./modules/cli/fastfetch.nix` を追加。
-
-**起動時に毎回出したい場合** (zsh.nix の `initContent` 末尾に):
-```bash
-# fastfetch を初回ログインのみ表示
-if [[ -z "$FASTFETCH_SHOWN" ]] && [[ -o interactive ]]; then
-  export FASTFETCH_SHOWN=1
-  fastfetch
-fi
-```
-
----
-
-## [ ] frogmouth — Markdown TUI ブラウザ
-
-URL も食える。Obsidian ノートや GitHub の README をターミナルで快適に読める。
-`glow` よりインタラクティブ (リンクをジャンプできる)。
-
-```nix
-# home/modules/cli/tools.nix の home.packages に追加
-frogmouth
-```
-
-**使い方**:
-```bash
-frogmouth README.md
-frogmouth https://raw.githubusercontent.com/Textualize/frogmouth/main/README.md
-frogmouth ~/obsidian_valut/mainValut/04-Permanent/NixOS\ dotfiles\ 改善プラン.md
-```
-
-TUI 内で:
-- `t` Table of Contents / `b` ブックマーク / `m` history / `/` 検索 / `q` quit
-
-**Obsidian 連携アイデア**: yazi の Markdown プレビューを frogmouth に差し替えると Vault がターミナルから読みやすくなる。
-
----
-
-## 4本まとめて適用する手順
-
-```bash
-# 1. tools.nix と新規 fastfetch.nix を編集
-# 2. home.nix の imports に fastfetch.nix を追加
-# 3. flake check
-nix flake check ~/.dotfiles
-
-# 4. dry-run
-home-manager build --flake ~/.dotfiles#morikawa@nixos
-
-# 5. 適用
-nh home switch
-
-# 6. 動作確認
-nix-tree /run/current-system
-vhs new test.tape && vhs test.tape
-fastfetch
-frogmouth ~/.dotfiles/docs/improvement-plan.md
-```
-
----
-
 # 嗜好分析と追加候補
 
 既存パッケージから検出した嗜好パターンと、それに刺さりそうな未導入ツール。
@@ -848,20 +680,6 @@ yazi/lazygit/atuin と完全に同じ系譜。
     };
   };
 }
-```
-
-### [ ] fd, sd, hexyl, xh
-
-ripgrep/delta を持ってる人が無いのが不自然な定番群。
-
-```nix
-# home/modules/cli/tools.nix の home.packages に追加
-fd          # find のRust代替
-sd          # sed のRust代替 (`s/old/new/` シンプル構文)
-hexyl       # xxd の bat 風カラー版
-xh          # httpie の Rust 版 (起動速い)
-dog         # dig のカラー代替
-navi        # 対話型コマンドチートシート (tealdeer の能動版)
 ```
 
 ### [ ] easyeffects + helvum
