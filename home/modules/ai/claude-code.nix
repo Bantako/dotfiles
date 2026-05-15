@@ -13,7 +13,7 @@ in {
   ];
 
   _module.args.claudeAliases = {
-    ccode = "claude;";
-    cld = "claude;";
+    ccode = "claude";
+    cld = "claude";
   };
 }

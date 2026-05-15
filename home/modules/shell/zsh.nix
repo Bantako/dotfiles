@@ -118,8 +118,8 @@ function y() {
 }
 
 # Cで標準出力をクリップボードにコピーする
-if which xsel >/dev/null 2>&1 ; then
-  alias -g C='| xsel --input --clipboard'
+if command -v wl-copy >/dev/null 2>&1 ; then
+  alias -g C='| wl-copy'
 fi
 
 # sops

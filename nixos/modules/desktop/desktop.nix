@@ -57,7 +57,7 @@
 	  <description>Change default fonts for Steam client</description>
 	  <match>
 	    <test name="prgname">
-	      <string>steamwebhelper></string>
+	      <string>steamwebhelper</string>
 	    </test>
 	    <test name="family" qual="any">
 	      <string>sans-serif</string>

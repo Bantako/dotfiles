@@ -20,11 +20,6 @@
     };
     mimeApps = {
       enable = true;
-      associations.added = {
-        "application/pdf"      = [ "org.pwmt.zathura-pdf-mupdf.desktop" ];
-        "application/epub+zip" = [ "org.pwmt.zathura-pdf-mupdf.desktop" ];
-      };
-
       defaultApplications = {
         # Claude Code URL ハンドラ
         "x-scheme-handler/claude-cli"  = [ "claude-code-url-handler.desktop" ];
