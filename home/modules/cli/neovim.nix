@@ -26,12 +26,9 @@
       rustfmt
       nil        # Nix LSP
       nixfmt
-      tree-sitter # treesitterパーサーのビルドに必要
-      gcc         # treesitterパーサーのコンパイラ
       lua-language-server
       vscode-json-languageserver
       shfmt
-      nodejs_22
     ];
   };
 

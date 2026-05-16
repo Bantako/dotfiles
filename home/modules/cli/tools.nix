@@ -24,7 +24,7 @@ in {
     gh            # GitHub CLI
     ov            # ページャー（yaziのbat連携）
     python3       # Pythonインタープリター
-    nodejs        # Node.js（npx経由のMCPサーバー用）
+    nodejs_22     # Node.js（npx経由のMCPサーバー用）
     unzip         # ZIP展開
     uv            # Pythonパッケージマネージャー
     ouch          # 統合アーカイブツール（tar/zip/zst等を統一コマンドで）
