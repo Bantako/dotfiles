@@ -32,6 +32,7 @@
 | **R** | electron 撤去 / jellyfin-mpv-shim 削除 / featherpad コメント更新 |
 | **観測性まとめ** | smartmontools / lm_sensors / iotop-c / iftop / trash-cli / playerctl / deadnix / statix 追加 + monitoring.nix 新設 |
 | **M** | aider を home/modules/ai/aider.nix に追加 |
+| **P1 Wayland** | satty/grim/slurp/hyprpicker 追加、Ctrl+Shift+4 を satty フローに変更、gammastep/udiskie 追加 |
 
 ### 未着手（優先度順）
 
@@ -43,7 +44,6 @@
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
 | **browser統合** | programs/browser.nix → desktop/browsers.nix 統合 + firefox 撤去 | 小 |
-| **P1 Wayland** | satty / hyprpicker / gammastep / udiskie 等 | 小粒 |
 | **K** | xremap キーリマップ設計 | 保留中 |
 | **stylix** | base16 テーマ全アプリ統一 | 大 |
 
