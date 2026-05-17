@@ -32,6 +32,7 @@ in {
     visidata      # CSV/JSON/TSVをTUIで探索・編集
     glow          # ターミナルでMarkdownをレンダリング
     yt-dlp        # YouTube等の動画ダウンロード
+    ytfzf         # YouTube TUI検索 → mpv 再生
     imagemagick   # 画像変換・リサイズ・バッチ処理
     ffmpeg        # 動画・音声変換
 
