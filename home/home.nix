@@ -36,6 +36,7 @@
     ./modules/desktop/xremap.nix
     ./modules/desktop/zen-browser.nix
     ./modules/desktop/zathura.nix
+    ./modules/nas/immich.nix
     ./modules/programs/browser.nix
     ./modules/shell/direnv.nix
     ./modules/shell/zsh.nix
