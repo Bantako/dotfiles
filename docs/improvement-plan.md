@@ -25,14 +25,16 @@
 | **CLI+** | fastfetch / dust / ncdu / procs / hexyl / dog / vhs / nix-tree / nom / nvd / comma 追加（frogmouth は d/u 未対応で削除） |
 | **バグ修正** | D2 fontconfig タイポ / D3 noctalia カラー値 / D4 claude エイリアス末尾 `;` / D5 xsel→wl-copy / M2 nh 重複削除 / M4 xdg 重複削除 / M6 gc コメント追加 |
 | **5.6** | `.claude/settings.json` に PostToolUse hook 追加（.nix 編集後に `nix flake check --no-build` 自動実行） |
+| **D1** | `networking.wireless.enable` 削除（NetworkManager 競合・無線事故が発生していた） |
+| **M3** | `tools.nix` の `nodejs` → `nodejs_22` + neovim.nix の重複削除 |
+| **M5** | stateVersion を 26.05 に統一（NixOS 25.11 → 26.05、HM と揃えた） |
+| **Q** | `home/modules/nas/` 新設 + immich-go 追加 |
+| **R** | electron 撤去 / jellyfin-mpv-shim 削除 / featherpad コメント更新 |
 
 ### 未着手（優先度順）
 
 | 項目 | 内容 | 規模 |
 |---|---|---|
-| **D1** | `networking.wireless.enable` 削除（NetworkManager と競合、無線事故発生済み） | 小 |
-| **M3** | `tools.nix` の `nodejs` → `nodejs_22`（H Step1 先取り、独立コミット可） | 小 |
-| **M5** | stateVersion ズレ修正（NixOS: 25.11 / HM: 26.05、unstable 追跡なら 26.05 統一） | 小・要判断 |
 | **openssh** | Tailscale 経由 SSH | 小 |
 | **fail2ban** | openssh 投入後の SSH 攻撃対策（openssh とセットで） | 小 |
 | **M** | aider 追加 | 小 |
@@ -41,8 +43,6 @@
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
 | **観測性まとめ** | smartmontools / iotop / iftop / deadnix / trash-cli / lm_sensors 等（まとめ日） | 小粒 |
 | **browser統合** | programs/browser.nix → desktop/browsers.nix 統合 + firefox 撤去 | 小 |
-| **小粒整理** | electron 撤去テスト / jellyfin-mpv-shim 削除 / featherpad コメント更新 | 小粒 |
-| **NAS連携** | home/modules/nas/immich.nix 新設 + immich-go 追加 | 小 |
 | **P1 Wayland** | satty / hyprpicker / gammastep / udiskie 等 | 小粒 |
 | **K** | xremap キーリマップ設計 | 保留中 |
 | **stylix** | base16 テーマ全アプリ統一 | 大 |
