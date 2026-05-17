@@ -28,7 +28,6 @@
     # メディア・ノート
     android-studio
     calibre            # 電子書籍管理
-    electron           # Obsidian CLI の実行に必要
     obsidian           # ノート
 
     # ゲーミング
@@ -37,6 +36,6 @@
     protontricks       # Proton prefixにwinetricksを当てる
 
     # その他
-    featherpad         # 軽量エディタ
+    featherpad         # 汎用GUIテキストエディタ（コード=nvim、ノート=Obsidian の枠外用）
   ];
 }
