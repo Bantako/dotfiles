@@ -63,6 +63,18 @@ in {
 
     # ドキュメント・録画
     vhs           # ターミナル操作を GIF/MP4 録画 (.tape DSL)
+
+    # 観測性・監視
+    smartmontools  # SSD/HDD の SMART 監視 (smartctl)
+    lm_sensors     # CPU/GPU/M.2 温度 (sensors コマンド)
+    iotop-c        # リアルタイム disk I/O 内訳
+    iftop          # リアルタイム帯域モニター
+    trash-cli      # trash-put でゴミ箱送り (rm の安全版)
+    playerctl      # Spotify/mpv をスクリプト・キーから制御
+
+    # Nix lint
+    deadnix        # 未使用バインディング検出
+    statix         # Nix アンチパターン lint (deadnix の相補)
   ];
 
   programs.atuin = {

@@ -21,6 +21,7 @@
     ../../modules/system/zram.nix
     ../../modules/system/oom.nix
     ../../modules/system/fwupd.nix
+    ../../modules/system/monitoring.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri
