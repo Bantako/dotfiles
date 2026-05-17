@@ -31,6 +31,7 @@
 | **Q** | `home/modules/nas/` 新設 + immich-go 追加 |
 | **R** | electron 撤去 / jellyfin-mpv-shim 削除 / featherpad コメント更新 |
 | **観測性まとめ** | smartmontools / lm_sensors / iotop-c / iftop / trash-cli / playerctl / deadnix / statix 追加 + monitoring.nix 新設 |
+| **M** | aider を home/modules/ai/aider.nix に追加 |
 
 ### 未着手（優先度順）
 
@@ -38,7 +39,6 @@
 |---|---|---|
 | **openssh** | Tailscale 経由 SSH | 小 |
 | **fail2ban** | openssh 投入後の SSH 攻撃対策（openssh とセットで） | 小 |
-| **M** | aider 追加 | 小 |
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
