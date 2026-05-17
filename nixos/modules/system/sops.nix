@@ -16,6 +16,7 @@ in {
       deepseek_api_key = userReadable // { };
       raindrop_token = userReadable // { };
       todoist_api_token = userReadable // { path = "/run/secrets/todoist-api-token"; };
+      paperless_token = userReadable // { };
     };
   };
 }

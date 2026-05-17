@@ -39,6 +39,7 @@ home-manager switch --flake /home/morikawa/.dotfiles#morikawa@nixos
   - `modules/ai/` — Claude Code の設定
   - `modules/cli/` — Git、Neovim（LazyVim）、sheldon（zshプラグイン）、yazi
   - `modules/desktop/` — Niri（Wayland WM）、Ghostty、GTK、アプリ設定
+  - `modules/nas/` — Ugreen NAS 連携クライアントツール（immich-go など）
   - `modules/programs/` — ブラウザ
   - `modules/shell/` — Zshのエイリアス、ヒストリ設定
 

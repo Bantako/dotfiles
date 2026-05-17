@@ -76,6 +76,7 @@
       EDITOR = "nvim";
       BROWSER = "vivaldi";
       LESSHISTFILE = "$XDG_STATE_HOME/less/history";
+      PAPERLESS_URL = "http://192.168.0.222:8010";
     };
 
     initContent = ''
@@ -131,6 +132,9 @@ if [ -r /run/secrets/deepseek_api_key ]; then
 fi
 if [ -r /run/secrets/raindrop_token ]; then
   export RAINDROP_TOKEN="$(cat /run/secrets/raindrop_token)"
+fi
+if [ -r /run/secrets/paperless_token ]; then
+  export PAPERLESS_TOKEN="$(cat /run/secrets/paperless_token)"
 fi
     '';
   };

@@ -38,6 +38,7 @@
     ./modules/desktop/zen-browser.nix
     ./modules/desktop/zathura.nix
     ./modules/nas/immich.nix
+    ./modules/nas/paperless.nix
     ./modules/programs/browser.nix
     ./modules/shell/direnv.nix
     ./modules/shell/zsh.nix
