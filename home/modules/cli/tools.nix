@@ -41,6 +41,7 @@ in {
     sd            # sed の Rust 代替
     xh            # httpie の Rust 版
     hyperfine     # ベンチマーク
+    numbat        # 単位変換つき高精度計算機（bc の代替）
 
     # ドキュメント変換
     pandoc        # MD↔HTML/PDF/docx 等の文書変換
