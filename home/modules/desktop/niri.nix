@@ -50,8 +50,14 @@
 
         # スクリーンショット（macOS の Cmd+Shift+3/4 に合わせた配置）
         "Ctrl+Shift+3".action.screenshot-screen = {};   # 全画面
-        "Ctrl+Shift+4".action.screenshot = {};           # 範囲選択
-        "Ctrl+Shift+5".action.screenshot-window = {};    # ウィンドウ
+        "Ctrl+Shift+4".action.spawn = [                 # 範囲選択 → satty で加筆
+          "sh" "-c"
+          "grim -g \"$(slurp)\" - | satty -f - --copy-command wl-copy"
+        ];
+        "Ctrl+Shift+5".action.screenshot-window = {};   # ウィンドウ
+
+        # カラーピッカー
+        "Mod+Shift+P".action.spawn = [ "sh" "-c" "hyprpicker -a -f hex" ];
 
         # メディアキー（XF86 系）は意図的にバインドしない
         # → キーボードのハードウェアデフォルト動作に任せる

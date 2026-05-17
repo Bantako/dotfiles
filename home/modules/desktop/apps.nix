@@ -18,6 +18,12 @@
     nemo               # ファイルマネージャー
     xwayland-satellite # XWayland統合
 
+    # Wayland ユーティリティ
+    satty              # スクショ加筆ツール（grim | satty でパイプ）
+    grim               # Wayland スクリーンショット取得
+    slurp              # 範囲選択（grim と組み合わせ）
+    hyprpicker         # カラーピッカー（HEX を wl-copy）
+
     # エンタメ・コミュニケーション
     discord
     discord-ptb
