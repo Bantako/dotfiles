@@ -30,6 +30,7 @@
 | **M5** | stateVersion を 26.05 に統一（NixOS 25.11 → 26.05、HM と揃えた） |
 | **Q** | `home/modules/nas/` 新設 + immich-go 追加 |
 | **R** | electron 撤去 / jellyfin-mpv-shim 削除 / featherpad コメント更新 |
+| **観測性まとめ** | smartmontools / lm_sensors / iotop-c / iftop / trash-cli / playerctl / deadnix / statix 追加 + monitoring.nix 新設 |
 
 ### 未着手（優先度順）
 
@@ -41,7 +42,6 @@
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
-| **観測性まとめ** | smartmontools / iotop / iftop / deadnix / trash-cli / lm_sensors 等（まとめ日） | 小粒 |
 | **browser統合** | programs/browser.nix → desktop/browsers.nix 統合 + firefox 撤去 | 小 |
 | **P1 Wayland** | satty / hyprpicker / gammastep / udiskie 等 | 小粒 |
 | **K** | xremap キーリマップ設計 | 保留中 |
