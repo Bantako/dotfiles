@@ -41,13 +41,13 @@
 | **carapace** | 500+ コマンド引数補完ブリッジ。sheldon で fzf-tab より前に init し競合回避 |
 | **fclones** | 重複ファイル検出・削除（Rust 製） |
 | **GPG agent** | コミット署名・pinentry-gnome3、キャッシュ TTL 1h/8h |
+| **borgbackup** | `~/.ssh` `~/.gnupg` `~/.config/sops` `~/Obsidian` `~/Documents` `~/Pictures` `~/.local/share/atuin` を NAS にスナップショット（日次、7日/4週/6ヶ月保持） |
 
 ### 未着手（優先度順）
 
 | 項目 | 内容 | 規模 |
 |---|---|---|
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
-| **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
 | **K** | xremap キーリマップ設計 | 保留中 |
 | **stylix** | base16 テーマ全アプリ統一 | 大 |
 

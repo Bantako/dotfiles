@@ -17,6 +17,7 @@ in {
       raindrop_token = userReadable // { };
       todoist_api_token = userReadable // { path = "/run/secrets/todoist-api-token"; };
       paperless_token = userReadable // { };
+      borg_passphrase = { mode = "0400"; };
     };
   };
 }
