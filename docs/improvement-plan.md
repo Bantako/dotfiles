@@ -38,6 +38,7 @@
 | **openssh** | Tailscale 経由 SSH（パスワード認証無効、openFirewall = false、authorized_keys を Nix 管理） |
 | **fail2ban** | SSH ブルートフォース対策（maxretry=5、Tailscale 帯 100.64.0.0/10 を除外） |
 | **browser統合** | programs/browser.nix + desktop/zen-browser.nix → desktop/browsers.nix に統合 |
+| **carapace** | 500+ コマンド引数補完ブリッジ。sheldon で fzf-tab より前に init し競合回避 |
 
 ### 未着手（優先度順）
 

@@ -39,6 +39,9 @@ in {
     imagemagick   # 画像変換・リサイズ・バッチ処理
     ffmpeg        # 動画・音声変換
 
+    # 補完エンジン
+    carapace      # 500+ コマンドの引数補完ブリッジ（sheldon 経由で fzf-tab より前に init）
+
     # Rust CLI 追加
     fd            # find の Rust 代替
     sd            # sed の Rust 代替

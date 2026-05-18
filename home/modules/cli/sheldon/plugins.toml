@@ -11,6 +11,9 @@ github = "zsh-users/zsh-autosuggestions"
 [plugins.fast-syntax-highlighting]
 github = "zdharma/fast-syntax-highlighting"
 
+[plugins.carapace-init]
+inline = 'source <(carapace _carapace zsh)'
+
 [plugins.fzf-tab]
 github = "Aloxaf/fzf-tab"
 
