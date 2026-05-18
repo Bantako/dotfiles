@@ -7,12 +7,11 @@ let
 in {
   home.packages = [
     browser
+    inputs.zen-browser.packages.${pkgs.stdenv.hostPlatform.system}.default
   ];
-  programs = {
-    vivaldi = {
-      enable = true;
-      package = vivaldi;
-      commandLineArgs = ["--enable-features=WebUIDarkMode" "--force-dark-mode"];
-    };
+  programs.vivaldi = {
+    enable = true;
+    package = vivaldi;
+    commandLineArgs = ["--enable-features=WebUIDarkMode" "--force-dark-mode"];
   };
 }

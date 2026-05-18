@@ -35,11 +35,10 @@
     ./modules/desktop/noctalia.nix
 ./modules/desktop/xdg.nix
     ./modules/desktop/xremap.nix
-    ./modules/desktop/zen-browser.nix
+    ./modules/desktop/browsers.nix
     ./modules/desktop/zathura.nix
     ./modules/nas/immich.nix
     ./modules/nas/paperless.nix
-    ./modules/programs/browser.nix
     ./modules/shell/direnv.nix
     ./modules/shell/zsh.nix
   ];

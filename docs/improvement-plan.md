@@ -37,6 +37,7 @@
 | **numbat** | bc 代替・単位変換つき計算機（plan 外、モダン CLI 置換ポリシー範疇） |
 | **openssh** | Tailscale 経由 SSH（パスワード認証無効、openFirewall = false、authorized_keys を Nix 管理） |
 | **fail2ban** | SSH ブルートフォース対策（maxretry=5、Tailscale 帯 100.64.0.0/10 を除外） |
+| **browser統合** | programs/browser.nix + desktop/zen-browser.nix → desktop/browsers.nix に統合 |
 
 ### 未着手（優先度順）
 
@@ -45,7 +46,6 @@
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
-| **browser統合** | programs/browser.nix → desktop/browsers.nix 統合 + firefox 撤去 | 小 |
 | **K** | xremap キーリマップ設計 | 保留中 |
 | **stylix** | base16 テーマ全アプリ統一 | 大 |
 
