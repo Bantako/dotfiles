@@ -35,12 +35,12 @@
 | **P1 Wayland** | satty/grim/slurp/hyprpicker 追加、Ctrl+Shift+4 を satty フローに変更、gammastep/udiskie 追加 |
 | **ytfzf** | YouTube TUI 検索 → mpv（plan 外、追加） |
 | **numbat** | bc 代替・単位変換つき計算機（plan 外、モダン CLI 置換ポリシー範疇） |
+| **openssh** | Tailscale 経由 SSH（パスワード認証無効、openFirewall = false、authorized_keys を Nix 管理） |
 
 ### 未着手（優先度順）
 
 | 項目 | 内容 | 規模 |
 |---|---|---|
-| **openssh** | Tailscale 経由 SSH | 小 |
 | **fail2ban** | openssh 投入後の SSH 攻撃対策（openssh とセットで） | 小 |
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |

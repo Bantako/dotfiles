@@ -22,6 +22,7 @@
     ../../modules/system/oom.nix
     ../../modules/system/fwupd.nix
     ../../modules/system/monitoring.nix
+    ../../modules/system/ssh.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri

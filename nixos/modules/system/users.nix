@@ -8,6 +8,9 @@
     packages = with pkgs; [
     ];
     shell = pkgs.zsh;
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBR65MwTU4cCzMnnALIIZubcUF+/uH1m37eD0fdvMoB"
+    ];
   };
 
   programs = {
