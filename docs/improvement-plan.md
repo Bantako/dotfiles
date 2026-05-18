@@ -28,11 +28,13 @@
 | **D1** | `networking.wireless.enable` 削除（NetworkManager 競合・無線事故が発生していた） |
 | **M3** | `tools.nix` の `nodejs` → `nodejs_22` + neovim.nix の重複削除 |
 | **M5** | stateVersion を 26.05 に統一（NixOS 25.11 → 26.05、HM と揃えた） |
-| **Q** | `home/modules/nas/` 新設 + immich-go 追加 |
+| **Q** | `home/modules/nas/` 新設 + immich-go 追加・paperless-browse 実装 |
 | **R** | electron 撤去 / jellyfin-mpv-shim 削除 / featherpad コメント更新 |
 | **観測性まとめ** | smartmontools / lm_sensors / iotop-c / iftop / trash-cli / playerctl / deadnix / statix 追加 + monitoring.nix 新設 |
 | **M** | aider を home/modules/ai/aider.nix に追加 |
 | **P1 Wayland** | satty/grim/slurp/hyprpicker 追加、Ctrl+Shift+4 を satty フローに変更、gammastep/udiskie 追加 |
+| **ytfzf** | YouTube TUI 検索 → mpv（plan 外、追加） |
+| **numbat** | bc 代替・単位変換つき計算機（plan 外、モダン CLI 置換ポリシー範疇） |
 
 ### 未着手（優先度順）
 
@@ -50,6 +52,19 @@
 ---
 
 各 PR/コミット単位で 1 項目ずつ進めると安全 (`nh os switch --dry` で必ず確認)。
+
+---
+
+## ポリシー: モダン CLI 置換
+
+`cat`/`grep`/`ls`/`cd` 等を `bat`/`rg`/`eza`/`zoxide` に置き換えている延長で、
+以下を満たすものは plan に明示せずとも `home/modules/cli/tools.nix` へ追加してよい:
+
+- 既存標準ツールの上位互換または特殊用途版
+- 単独パッケージで完結（依存スタック・サービス不要）
+- 1ヶ月使ってみて定着しなければ削除する自己制御を前提
+
+該当例: `numbat` (bc), `xh` (curl), `dust` (du), `procs` (ps), `fd` (find), `sd` (sed) 等
 
 ---
 
@@ -1897,38 +1912,52 @@ Vivaldi + Zen を desktop/browsers.nix に集約し programs/ を解消。
 
 ---
 
-## Q. NAS 連携（home/modules/nas/）
+## Q. NAS 連携 TUI フロントエンド基盤（home/modules/nas/）
 
-`analysis.md 5.5.3` 整理。`programs/` の歪みを繰り返さないよう最初から専用ディレクトリを切る。
+### スコープ
 
-```nix
-# home/modules/nas/immich.nix（新規）
-{ pkgs, ... }: {
-  home.packages = with pkgs; [
-    immich-go     # ローカル → NAS Immich への bulk upload（並列強い・速い）
-    # immich-cli  # 公式が必要になった日に追加
-  ];
-}
-```
+NAS 上の各種コンテナサービス（Immich, Paperless-ngx, Jellyfin 等）に対して、
+Web UI を開かずにターミナルから操作する TUI フロントエンドを提供する基盤。
 
-```bash
-# home/home.nix の imports に追加
-#   ./modules/nas/immich.nix
+### 完了済み
 
-nix flake check ~/.dotfiles
-nh home switch
-immich-go --help
-```
-
-### 将来追加候補（nas/ に乗せる）
-
-| ツール | 用途 |
+| モジュール | 内容 |
 |---|---|
-| rclone | NAS ↔ クラウド (B2/S3) のオフサイトミラー |
-| kopia | borgbackup 系モダン backup CLI |
-| ntfy-cli | NAS の push 通知をターミナルで受ける |
+| `nas/immich.nix` | `immich-go` 薄いラップ（ローカル → Immich への bulk upload） |
+| `nas/paperless.nix` | `paperless-browse` — Paperless-ngx TUI ランチャ（sops + xh + fzf + zathura） |
 
-**コミット**: `feat(nas): home/modules/nas/ を新設し immich-go を追加`
+### 命名・実装規約
+
+| 項目 | 規約 |
+|---|---|
+| ファイル | `home/modules/nas/<service>.nix`（1サービス 1ファイル） |
+| スクリプト名 | `<service>-<verb>`（`browse` / `upload` / `send` 等） |
+| URL env var | `<SERVICE>_URL` を zsh `sessionVariables` で固定 |
+| トークン env var | `<SERVICE>_TOKEN` を sops 経由で zsh init で export |
+| sops 鍵名 | snake_case で `<service>_token` |
+| HTTP | xh（curl と混在させない） |
+| JSON | jq |
+| 選択 UI | fzf + tab 区切り + `--with-nth` + preview |
+| 一時ファイル | `mktemp /tmp/<service>-XXXXXX.*` + `trap rm EXIT` |
+
+### 抽象化タイミング
+
+3個目のスクリプトを書く時点で共通項を抽出する。それまでは copy-paste で OK。
+
+シグナル:
+- fzf の `--delimiter=$'\t' --with-nth='2,3'` を 3 回コピペした
+- `Authorization:Token` ヘッダ組み立てが 3 サービスで同じ形
+- `mktemp` + `trap` パターンが繰り返された
+
+到達時に `home/modules/nas/lib.nix` で `mkApiLauncher { service, listEndpoint, downloadEndpoint, previewQuery, viewer }` 等を切る。
+
+### 次の probe 候補（優先順）
+
+| サービス | 推奨度 | 理由 |
+|---|---|---|
+| **immich-browse** | ◎ | paperless と性質が近く規約のテストになる。immich-go の対称（ダウンロード方向）。PKM 価値高い |
+| **ntfy-send** | ○ | 送信側は trivial。HTTP POST 1 発 |
+| jellyfin-cli | △ | Web UI で十分な可能性あり |
 
 ---
 
