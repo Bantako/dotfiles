@@ -21,6 +21,7 @@
     ./modules/cli/bat.nix
     ./modules/cli/fastfetch.nix
     ./modules/cli/git.nix
+    ./modules/cli/gpg.nix
     ./modules/cli/neovim.nix
     ./modules/cli/sheldon.nix
     ./modules/cli/tools.nix
