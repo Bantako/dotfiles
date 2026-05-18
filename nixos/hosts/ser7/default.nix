@@ -23,6 +23,7 @@
     ../../modules/system/fwupd.nix
     ../../modules/system/monitoring.nix
     ../../modules/system/ssh.nix
+    ../../modules/system/fail2ban.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri

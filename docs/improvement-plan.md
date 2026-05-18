@@ -36,12 +36,12 @@
 | **ytfzf** | YouTube TUI 検索 → mpv（plan 外、追加） |
 | **numbat** | bc 代替・単位変換つき計算機（plan 外、モダン CLI 置換ポリシー範疇） |
 | **openssh** | Tailscale 経由 SSH（パスワード認証無効、openFirewall = false、authorized_keys を Nix 管理） |
+| **fail2ban** | SSH ブルートフォース対策（maxretry=5、Tailscale 帯 100.64.0.0/10 を除外） |
 
 ### 未着手（優先度順）
 
 | 項目 | 内容 | 規模 |
 |---|---|---|
-| **fail2ban** | openssh 投入後の SSH 攻撃対策（openssh とセットで） | 小 |
 | **H** | Mason 完全停止 + Nix LSP 完全管理 | 大（集中1〜2h） |
 | **GPG agent** | コミット署名・pinentry | 小 |
 | **borgbackup** | NAS へのスナップショットバックアップ | 中（sops 鍵追加が必要） |
