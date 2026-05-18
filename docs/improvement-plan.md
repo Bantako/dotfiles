@@ -708,17 +708,6 @@ xremap によるアプリ別 Ctrl⇔Super スワップは Niri (ext-foreign-topl
 
 ---
 
-## 着手順 推奨
-
-1. **P0 (`nix-ld`, `zramSwap`, `oomd`, `fwupd`)** — 1ファイル追加、リスク低、即効性高
-2. **`openssh`** — 他端末からの作業が一気に楽になる
-3. **gaming スタック (`gamemode`, `gamescope`, `mangohud`)** — Steam の体感アップ
-4. **`backup`** — sops に passphrase 追加 → borg init → 自動化
-5. **`stylix`** — 設定が縮む。後の追加で効いてくる (1モジュールずつ移行)
-6. **その他 P1/P2** は欲しいタイミングで個別に
-
----
-
 # 嗜好分析と追加候補
 
 既存パッケージから検出した嗜好パターンと、それに刺さりそうな未導入ツール。
