@@ -41,6 +41,7 @@ in {
 
     # 補完エンジン
     carapace      # 500+ コマンドの引数補完ブリッジ（sheldon 経由で fzf-tab より前に init）
+    fclones       # 重複ファイル検出・削除（Rust 製、~/Pictures 等の整理用）
 
     # Rust CLI 追加
     fd            # find の Rust 代替

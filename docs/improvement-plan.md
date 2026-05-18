@@ -39,6 +39,7 @@
 | **fail2ban** | SSH ブルートフォース対策（maxretry=5、Tailscale 帯 100.64.0.0/10 を除外） |
 | **browser統合** | programs/browser.nix + desktop/zen-browser.nix → desktop/browsers.nix に統合 |
 | **carapace** | 500+ コマンド引数補完ブリッジ。sheldon で fzf-tab より前に init し競合回避 |
+| **fclones** | 重複ファイル検出・削除（Rust 製） |
 
 ### 未着手（優先度順）
 
