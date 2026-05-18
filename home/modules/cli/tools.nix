@@ -7,6 +7,9 @@ let
   '';
 in {
   xdg.configFile."ov/config.yaml".source = ./ov.yaml;
+  xdg.configFile."yt-dlp/config".text = ''
+    --cookies-from-browser "firefox:/home/morikawa/.config/zen/y6m6mt88.Default Profile"
+  '';
 
   home.packages = with pkgs; [
     raindrop-to-daily
