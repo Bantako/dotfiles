@@ -50,7 +50,6 @@ in {
     settings = {
       # テーマ・外観
       theme = "Dracula";
-      # background-opacity = 0.95;
 
       # フォント
       font-family = "JetBrainsMono Nerd Font Mono";

@@ -123,7 +123,6 @@
         "Mod+Shift+2".action.move-column-to-workspace = [ 9 ];
         "Mod+Shift+backslash".action.move-column-to-workspace = [ 10 ];
       };
-      # config = with inputs.niri.lib.kdl;
     };
   };
 }

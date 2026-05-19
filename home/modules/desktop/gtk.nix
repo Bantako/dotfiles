@@ -15,11 +15,6 @@
         paths = [ pkgs.papirus-icon-theme pkgs.kdePackages.breeze-icons ];
       };
     };
-    cursorTheme = {
-      name = "Bibata-Modern-Classic";
-      package = pkgs.bibata-cursors;
-      size = 24;
-    };
   };
 
   # Qt アプリのテーマを GTK3 テーマ（Dracula）に追従させる
