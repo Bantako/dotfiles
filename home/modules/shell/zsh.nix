@@ -55,17 +55,11 @@
       "EXTENDED_GLOB"
     ];
 
-    # history
     history = {
-      # メモリ上の履歴件数
       size = 100000;
-      # ファイルに保存する履歴件数
       save = 100000;
-      # 直前と同じコマンドはヒストリに追加しない
       ignoreDups = true;
-      # 先頭がスペースのコマンドはヒストリに残さない
       ignoreSpace = true;
-      # ヒストリファイルの保存パス
       path = "$HOME/.local/share/zsh/history";
     };
 
