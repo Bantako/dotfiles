@@ -6,6 +6,7 @@ let
     DEEPSEEK_API_KEY = "/run/secrets/deepseek_api_key";
     RAINDROP_TOKEN   = "/run/secrets/raindrop_token";
     PAPERLESS_TOKEN  = "/run/secrets/paperless_token";
+    IMMICH_TOKEN     = "/run/secrets/immich_token";
   };
 in {
   home.packages = [ pkgs.sheldon ];
@@ -81,6 +82,7 @@ in {
       BROWSER = "vivaldi";
       LESSHISTFILE = "$XDG_STATE_HOME/less/history";
       PAPERLESS_URL = "http://192.168.0.222:8010";
+      IMMICH_URL    = "http://192.168.0.222:2283";
     };
 
     initContent =
