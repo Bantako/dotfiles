@@ -23,7 +23,6 @@
     ./modules/cli/git.nix
     ./modules/cli/gpg.nix
     ./modules/cli/neovim.nix
-    ./modules/cli/sheldon.nix
     ./modules/cli/tools.nix
     ./modules/cli/vimiv.nix
     ./modules/cli/yazi.nix

@@ -1,4 +1,7 @@
 {pkgs, config, lib, claudeAliases ? {}, ...}: {
+  home.packages = [ pkgs.sheldon ];
+  home.file.".config/sheldon/plugins.toml".source = ../cli/sheldon/plugins.toml;
+
   programs.nix-index = {
     enable = true;
     enableZshIntegration = true;

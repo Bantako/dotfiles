@@ -5,42 +5,7 @@ let
     exec ${pkgs.ghostty}/bin/ghostty "$@"
   '';
 in {
-  xdg.configFile."ghostty/tab-style.css".text = ''
-    headerbar {
-      min-height: 20px;
-      padding: 0;
-      margin: 0;
-      background-color: #20222b;
-    }
-    tabbar tabbox {
-      margin: 0;
-      padding: 0;
-      min-height: 15px;
-      background-color: #21222c;
-    }
-
-    tabbar tabbox tab {
-      margin: 0;
-      padding: 2px 8px;
-      color: #f8f8f2;
-      background-color: #282a36;
-      border-right: 1px solid #44475a;
-    }
-
-    tabbar tabbox tab:checked {
-      background-color: #44475a;
-      color: #bd93f9;
-      border-bottom: 2px solid #bd93f9;
-    }
-
-    tabbar tabbox tab:hover {
-      background-color: #44475a;
-    }
-
-    tabbar tabbox tab label {
-      font-size: 9pt;
-    }
-  '';
+  xdg.configFile."ghostty/tab-style.css".source = ./ghostty/tab-style.css;
 
   home.packages = [ terminal ];
 
