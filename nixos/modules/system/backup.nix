@@ -1,4 +1,4 @@
-{ config, ... }:
+{ config, pkgs, ... }:
 
 {
   services.borgbackup.jobs.home = {
@@ -33,5 +33,14 @@
   systemd.services.borgbackup-job-home = {
     requires = [ "mnt-ugreen.mount" ];
     after = [ "mnt-ugreen.mount" ];
+    unitConfig.OnFailure = [ "borg-notify-failure.service" ];
+  };
+
+  systemd.services.borg-notify-failure = {
+    description = "Notify desktop session of borg failure";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user --collect ${pkgs.libnotify}/bin/notify-send -u critical 'borgbackup failed' 'home バックアップが失敗しました'";
+    };
   };
 }
