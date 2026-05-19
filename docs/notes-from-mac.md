@@ -387,3 +387,308 @@ chart-stats                     # 月別練習時間・クリア推移
 ```
 
 完全に**個人専用音ゲー OS**。世界で何人やってるか不明。日本語圏で公開してる人はほぼいなさそう。
+
+---
+
+## 6. jless 追加候補
+
+### 動機
+
+現状 JSON 系の装備が `jq` (テキスト操作) + `visidata` (CSV/TSV) のみで、**JSON だけ navigate-first 軸の対応ツールが空いてる**。
+yazi / zoxide / fzf-tab / atuin / vimiv / zathura で「眼で歩く」をやってる横で、`gh api ... | less` の結果だけがプレーンテキストなのは不整合。
+
+### jless の位置付け
+
+- パイプ / ファイル両対応（`gh api ... | jless` も `jless data.json` も可）
+- JSON / YAML 自動判別 → `sops -d secrets.yaml | jless` でも読める
+- j/k で navigate、キーパス検索、型ハイライト
+- 速い / ハイライト / オプション分かりやすい — 選定軸 3 つ全部 fit
+
+### fx は外す
+
+fx は「対話的に jq 式を組む」方向の TUI。目的が違う（jless = 読む / fx = 探る）。
+**jq 式は AI に書かせている** ので、対話的な式組み立ては不要。fx は候補から外す。
+
+### 二段運用の典型
+
+```bash
+jq '.results[]' raw.json | jless       # jq で絞る → jless で歩く
+sops -d secrets.yaml | jless           # 秘密も TUI で navigate（一時表示のみ）
+gh pr view 123 --json title,body,reviews | jless
+```
+
+`jq` の出力が長いときに従来 `less` だと構造が消える問題を解決する。
+jq 抜きでも `gh api ... | jless` だけで生の API response を歩ける。
+
+### pruning phase 中の追加是非
+
+`project_pruning_phase` memory（2026-05〜 追加抑制）に逆らう追加だが、
+- navigate-first 軸の**真の穴**を埋める（既存装備の論理的な続き）
+- 単独パッケージで完結（依存なし）
+- 1ヶ月使って定着しなければ削除する自己制御を前提
+- improvement-plan の「ポリシー: モダン CLI 置換」枠に該当（既存標準ツールの上位互換 + 特殊用途版）
+
+→ **pruning phase の例外として承認**。
+
+### 追加場所
+
+`home/modules/cli/tools.nix` の **「モダン診断・調査 CLI」セクション**（dust / ncdu / procs / hexyl / dog の隣）に：
+
+```nix
+jless         # JSON/YAML を TUI で navigate（jq の出力先・API response の閲覧）
+```
+
+### improvement-plan.md 完了済テーブルへの追記候補
+
+```markdown
+| **jless** | JSON/YAML TUI navigate（モダン CLI 置換ポリシー範疇、fx は AI で jq 書ける前提から不要） |
+```
+
+---
+
+## 7. yazi プラグイン・opener 拡充候補
+
+### 動機
+
+`user_app_style_preference` の 4 軸（vim/plugin-based/fast/minimal UI）を完全に満たす yazi は最頻 TUI。**新規 TUI を追加するより、yazi 拡張で機能を吸収する方針**が memory 統合運用と整合する。
+
+現状の yazi 配下：
+- plugins: `bunny` / `chmod` / `mime-ext` / `smart-enter` / `smart-filter` / `system-clipboard`
+- flavor: `dracula`
+- opener: zathura / vimiv / mpv / bat+ov / ouch (extract のみ) / exif / xdg-open
+
+→ **git 状態表示・圧縮対称・安全削除・markdown レンダ・メディア情報**が未カバー。
+
+### 候補一覧
+
+#### A. `git.yazi`（プラグインのみ、新規パッケージなし）
+
+ファイルリスト横に git ステータス記号（M/A/?/!/✓ 等）を表示。
+- dotfiles / projects 配下で yazi 開いた時に常時恩恵
+- ranger の `--git-status` 相当
+- minimal UI を壊さない
+
+#### B. `glow` を opener に追加（パッケージ既存、config 追加のみ）
+
+`glow` は `home/modules/cli/tools.nix` に**既存**。yazi の opener として markdown 用エントリを追加。
+
+```toml
+# yazi.toml [opener] セクション
+show_md = [
+  { run = 'glow -p "$@"', block = true, desc = 'View Markdown (glow)' }
+]
+```
+
+```toml
+# yazi.toml [open] prepend_rules に追加
+{ mime = "text/markdown", use = ["show_md"] },
+```
+
+Obsidian ノートを yazi 経由で TUI レンダ表示できる動線が綺麗になる。
+
+#### C. `compress.yazi`（プラグインのみ、新規パッケージなし）
+
+選択中のファイルを ouch で圧縮するプラグイン。`ouch` は既存。
+- 現状 opener に `extract` だけある（片肺）
+- 圧縮側も yazi 内から呼べるようになる
+- 対称性が取れる
+
+#### D. `restore.yazi` + 既存 `trash-cli`（プラグインのみ、新規パッケージなし）
+
+`trash-cli` は既に `home/modules/cli/tools.nix` にある。`restore.yazi` プラグインで yazi 内から復元 UI。
+
+- 削除キーを `trash-put` 経由に置き換える設定が前提（yazi.toml で削除動作を再定義）
+- ranger の `:trash` 文化を yazi に持ち込む
+
+#### E. `mediainfo.yazi` + `mediainfo` パッケージ（**唯一の新規追加**）
+
+動画・音声ファイルプレビューで codec / bitrate / duration / 解像度 を表示。
+- 現状の opener `exif` は画像 EXIF のみ
+- NAS の動画整理時、yazi 内で属性が見える
+- mediainfo はパッケージ追加が必要
+
+### pruning phase との整合
+
+新規パッケージ追加は **`mediainfo` 1 つだけ**。残り 4 つは plugin/config 追加で済むので pruning 制約に**触れない**。
+
+`mediainfo` についても：
+- 用途明確（NAS の動画整理）
+- ffmpeg 一族の枯れた CLI、ロックインなし
+- yazi 内で活きるという具体使用文脈
+
+→ 例外承認の閾値を超えてる。
+
+### 推奨着手順
+
+| 順 | 項目 | 内容 |
+|---|---|---|
+| 1 | `git.yazi` | プラグインインストール（最も恩恵大） |
+| 2 | `glow` opener | yazi.toml に entry + mime rule 追加 |
+| 3 | `compress.yazi` | プラグインインストール、`c` キーバインド |
+| 4 | `restore.yazi` | プラグイン + 削除キー再定義 |
+| 5 | `mediainfo.yazi` + `mediainfo` パッケージ | tools.nix に追加 + プラグイン |
+
+1〜3 は同時に着手可能（パッケージ追加なし）。4 は削除動作変更があるので慎重に。5 は最後。
+
+### improvement-plan.md 完了済テーブル候補
+
+```markdown
+| **yazi プラグイン拡充** | git/compress/restore/mediainfo の 4 プラグイン + glow opener + mediainfo pkg |
+```
+
+### 確認事項（家側で）
+
+- `zoxide.yazi` 相当（`gz` で z jump）が bunny に統合されてるかどうか
+- 現状の `Y`（削除）の実体（即 unlink か trash-put か）
+
+---
+
+## 8. TUI メーラー / RSS リーダー（評価候補メモ）
+
+### 位置付け
+
+即時導入候補ではなく、**用途が立った時に評価する候補**。`user_app_style_preference` の 4 軸（vim / plugin-based / fast / minimal UI）に完全 fit するため、yazi 民の自然な拡張先になりうる。
+
+### 候補
+
+#### `aerc`（メーラー）
+
+- vim 風 TUI メールクライアント
+- IMAP / JMAP / maildir / SMTP 対応
+- Lua plugin、キーバインド完全カスタム
+- `[ ]` でアカウント切替、`v` でビジュアル選択、`d` で削除 → yazi 文法と一致
+- 4 軸完全 fit
+
+**評価が立つ条件**:
+- メールを TUI で読みたい動機が出る
+  - Thunderbird / ブラウザのウェブメール疲れ
+  - 複数アカウント横断を高速化したい
+  - notmuch などのインデクサと組み合わせたい
+- 現状そういう不満が出てない or 出ても許容範囲なら**保留で良い**
+
+#### `newsboat`（RSS リーダー）
+
+- vim 風 TUI RSS リーダー
+- フィード grouping、`j/k` で読み進める
+- マクロで外部ブラウザ起動、podcast 対応
+- 4 軸完全 fit
+
+**評価が立つ条件**:
+- RSS を読む習慣 / 復活させる動機が立つ
+  - GitHub release 追跡を自動化したい
+  - ブログ巡回を集約したい
+  - YouTube の RSS 機能で動画追跡したい（Vivaldi の代替）
+- 現状 RSS を使ってないなら**そもそも候補に上らない**
+
+### 共通注意
+
+両方とも**「読書フロー」自体の変更**を伴う。パッケージ単体追加で済まず、メールサーバー設定 / フィード収集 / バックアップ方針まで波及する。
+
+→ pruning phase の例外承認には**用途立証が前提**。「便利そう」だけでは入れない。
+
+### 関連候補（同類、紹介止まり）
+
+- `ncmpcpp` — MPD frontend、ローカル音楽を TUI で。ncspot（Spotify）と用途違い
+- `iamb` — Matrix TUI クライアント（Matrix アカウント持ちなら）
+- `weechat` — IRC / Matrix 兼用、古典で枯れてる
+
+これらも 4 軸 fit だが**用途立証**が前提条件。
+
+### improvement-plan.md 上の扱い
+
+- 現時点では「**保留候補リスト**」に置く（完了済テーブルには入れない）
+- 採用時は jless / yazi 拡充と同じく**pruning phase 例外承認**プロセスを通す
+
+---
+
+## 9. NAS 拡張候補（3 軸戦略）
+
+### 戦略 framing（本人明言）
+
+> コンテンツ + 制御 + PKM (ナレッジ) を育てていきたい
+
+| 軸 | 既存装備 |
+|---|---|
+| コンテンツ | Jellyfin / Stash / LANraragi / Calibre / Immich |
+| 制御 | borg / syncthing / tailscale / NixOS monitoring |
+| PKM | Paperless / Obsidian (local) + Quartz → Cloudflare Pages（**公開 Wiki 確立済み**、SilverBullet 等の Wiki 系は不要） |
+
+### 承認候補
+
+#### A. `ntfy`（制御軸）
+
+**通知ハブ**。self-host な push 通知サービス。
+- Web/モバイル/CLI から POST するだけで購読端末に push
+- borg-notify-plan の自然な延長：noctalia 通知に加えて **ntfy 経由でスマホにも push**
+- healthchecks.io の self-host 代替にもなり得る（heartbeat 失敗時に ntfy 通知）
+- 配置: Ugreen NAS、Docker / Podman で立てる
+- borg postHook で `curl -d "completed" https://ntfy.local/borg` の 1 行で連携
+
+**統合の自然さ**:
+- 既存 borg-notify-plan の "C. healthchecks 系" を ntfy 自前 push に置換可
+- 計画ファイル `docs/borg-notify-plan.md` の **Phase 2 を ntfy ベースで書き直す価値**あり
+
+#### B. `Navidrome`（コンテンツ軸）
+
+**Subsonic API 互換の音楽サーバー**。
+- ローカル音楽（FLAC/MP3）を NAS から streaming
+- Subsonic API なので**クライアント選択肢が広い**：
+  - **TUI**: `sublime-music-cli`、`stmps`、`supersonic`
+  - **GUI**: `feishin`（4 軸 fit、Electron だが軽量）、`tauon`
+  - **モバイル**: Symfonium / DSub / play:Sub 等
+- ncspot との役割分担：**ncspot = Spotify、Navidrome = ローカル所有音楽**
+
+**コンテンツ軸での位置**:
+- 「自分の音源を Spotify に依存せず聴く」枠
+- Jellyfin の音楽機能と被るが、Subsonic API 連携でクライアント生態系が圧倒的に厚い
+
+#### C. `Homepage`（制御軸）
+
+**サービスダッシュボード**（yaml 設定、minimal UI、4 軸寄り）。
+- ブックマーク + サービス生存ステータス + 簡易メトリクスを 1 画面に
+- yaml で全部宣言、Web UI で編集する設定 UI を持たない（**minimal UI / Niri 民の感性と整合**）
+- 既存サービスへの導線：Jellyfin / Immich / Paperless / Stash / LANraragi / Calibre / Navidrome / ntfy 全部を 1 ページに
+
+**配置タイミング**:
+- サービスが 7 個以上になった今が**ちょうど価値が立つ**タイミング
+- ntfy / Navidrome 追加後だと**10 個近く**になるのでなおさら有用
+
+### 保留候補
+
+#### D. `FreshRSS` + `newsboat`（PKM 軸、保留）
+
+- §8 で書いた `newsboat` のサーバー側として `FreshRSS` を NAS で立てる
+- newsboat は FreshRSS の API 経由でフィード同期可能 → **スマホからも同じフィード読める**
+- 候補としてメモ、**用途立証は保留**（RSS 習慣が復活するかどうか）
+
+### 共通注意
+
+- 全部 self-hosted、**Microsoft / Google 距離スタンスと整合**
+- パッケージ追加ではなく NAS 上の service なので **pruning phase の package 制約には触れない**（ただし service の安易な追加も歓迎ではないので、軸への寄与を明示してから入れる）
+- 配置・運用形態（Docker / Podman / NixOS module）は家側で決める
+
+### 推奨着手順
+
+| 順 | 項目 | 理由 |
+|---|---|---|
+| 1 | **ntfy** | borg-notify-plan の延長で動機明確、計画文書既存 |
+| 2 | **Navidrome** | コンテンツ軸最大の穴、独立サービスで影響範囲狭い |
+| 3 | **Homepage** | 上 2 つ追加後に「目次」として最大効用 |
+
+### improvement-plan.md への追記候補
+
+```markdown
+## NAS 育成（3 軸戦略）
+
+### 軸定義
+- コンテンツ + 制御 + PKM の 3 軸で育成
+
+### 着手候補
+| サービス | 軸 | 状態 |
+|---|---|---|
+| ntfy | 制御 | 着手予定（borg-notify-plan Phase 2 と統合） |
+| Navidrome | コンテンツ | 着手予定 |
+| Homepage | 制御 | 着手予定 |
+| FreshRSS + newsboat | PKM | 保留（用途立証待ち） |
+```
+
