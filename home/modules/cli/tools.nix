@@ -21,6 +21,7 @@ in {
     ripgrep
     zoxide
     jq
+    jless         # JSON/YAML を navigate-first で歩く TUI
 
     # ターミナルツール群
     fio           # ディスクI/Oベンチマーク

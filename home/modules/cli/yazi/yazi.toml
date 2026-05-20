@@ -77,3 +77,8 @@ id   = "mime"
 name = "*"
 run  = "mime-ext"
 prio = "high"
+
+[[plugin.prepend_fetchers]]
+id   = "git"
+name = "*"
+run  = "git"
