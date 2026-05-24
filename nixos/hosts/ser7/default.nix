@@ -33,6 +33,7 @@
     age
     sddm-astronaut
     appimage-run
+    gsettings-desktop-schemas
   ];
 
   system.stateVersion = "26.05";

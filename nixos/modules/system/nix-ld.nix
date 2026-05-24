@@ -26,6 +26,7 @@
       libxfixes
       libxrandr
       libgbm
+      libGL
       expat
       libxcb
       systemd

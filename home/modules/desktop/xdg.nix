@@ -6,7 +6,7 @@
 
   xdg.desktopEntries.voicevox = {
     name = "VOICEVOX";
-    exec = "/home/morikawa/.local/share/voicevox/voicevox";
+    exec = "/home/morikawa/.local/share/voicevox/voicevox.sh";
     icon = "audio-x-generic";
     categories = [ "AudioVideo" "Audio" ];
   };
