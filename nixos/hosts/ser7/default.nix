@@ -32,6 +32,7 @@
     sops
     age
     sddm-astronaut
+    appimage-run
   ];
 
   system.stateVersion = "26.05";

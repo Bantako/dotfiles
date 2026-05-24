@@ -4,6 +4,13 @@
   # 日本語に上書きするのを防ぐ。en_US で作成済みと宣言しておく。
   xdg.configFile."user-dirs.locale".text = "en_US";
 
+  xdg.desktopEntries.voicevox = {
+    name = "VOICEVOX";
+    exec = "/home/morikawa/.local/share/voicevox/voicevox";
+    icon = "audio-x-generic";
+    categories = [ "AudioVideo" "Audio" ];
+  };
+
   xdg = {
     enable = true;
     userDirs = {
