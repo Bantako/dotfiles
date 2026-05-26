@@ -1,39 +1,49 @@
 [opener]
 # xdg-open でシステムのデフォルトアプリを使う
 open = [
-  { run = 'xdg-open "$@"', block = false, desc = 'Open with default app (xdg-open)'},
+  { run = 'xdg-open %s', block = false, desc = 'Open with default app (xdg-open)'},
 ]
 # PDFビューアー
 read = [
-  { run = 'zathura "$@"', block = false, desc = 'PDF Viewer (zathura)'},
+  { run = 'zathura %s', block = false, desc = 'PDF Viewer (zathura)'},
 ]
 # Exif情報表示
 exif = [
-  { run = 'exif "$@"', block = true, desc = 'Show Exif'},
+  { run = 'exif %s', block = true, desc = 'Show Exif'},
 ]
 # 画像ビューアー
 view = [
-  { run = 'vimiv "$@"', block = false, desc = 'Image Viewer (vimiv)'}
+  { run = 'vimiv %s', block = false, desc = 'Image Viewer (vimiv)'}
 ]
 # 動画・音声プレーヤー
 play = [
-  { run = 'mpv "$@"', block = false, desc = 'Player (mpv)'},
+  { run = 'mpv %s', block = false, desc = 'Player (mpv)'},
 ]
 # テキスト表示（シンタックスハイライト）
 show_text = [
-  { run = 'bat --paging=always --pager="ov" "$@"', block = true, desc = 'View Text (bat)'}
+  { run = 'bat --paging=always --pager="ov" %s', block = true, desc = 'View Text (bat)'}
+]
+# Markdownレンダリング
+show_md = [
+  { run = 'glow -p %s', block = true, desc = 'View Markdown (glow)' }
+]
+# エディタで編集
+edit = [
+  { run = '$EDITOR %s', block = true, desc = 'Edit ($EDITOR)' }
 ]
 # アーカイブ展開
 unzip = [
-  { run = 'unzip -O cp932 "$@"', block = false, desc = 'Unzip (Shift-JIS対応)'}
+  { run = 'unzip -O cp932 %s', block = false, desc = 'Unzip (Shift-JIS対応)'}
 ]
 extract = [
-  { run = 'for f in "$@"; do ouch decompress -y -d "${f%%.*}" "$f"; done', block = true, desc = 'Extract archive (ouch)'},
+  { run = 'ouch decompress -y %s', block = true, desc = 'Extract archive (ouch)'},
 ]
 
 [open]
 prepend_rules = [
-  # mime-ext fetcher が提供する MIME タイプで判定（name グロブより確実）
+  { url = "*.md",  use = ["show_md", "edit"] },
+  { url = "*.mdx", use = ["show_md", "edit"] },
+  { mime = "text/markdown", use = ["show_md"] },
   { mime = "image/*", use = ["view", "exif"] },
   { mime = "video/*", use = ["play"] },
   { mime = "audio/*", use = ["play"] },
@@ -61,7 +71,7 @@ prepend_rules = [
 
 append_rules = [
   # 上記以外はすべてテキストとして表示
-  { name = "*", use = ["show_text"] }
+  { url = "*", use = ["show_text"] }
 ]
 
 [mgr]

@@ -36,6 +36,11 @@ run  = "plugin chmod"
 desc = "Chmod on selected files"
 
 [[mgr.prepend_keymap]]
+on   = [ "c", "z" ]
+run  = "plugin compress"
+desc = "Compress selected files"
+
+[[mgr.prepend_keymap]]
 on = "b"
 run = "plugin bunny"
 desc = "Start bunny.yazi"
