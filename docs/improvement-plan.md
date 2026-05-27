@@ -42,6 +42,14 @@
 | **fclones** | 重複ファイル検出・削除（Rust 製） |
 | **GPG agent** | コミット署名・pinentry-gnome3、キャッシュ TTL 1h/8h |
 | **borgbackup** | `~/.ssh` `~/.gnupg` `~/.config/sops` `~/Obsidian` `~/Documents` `~/Pictures` `~/.local/share/atuin` を NAS にスナップショット（日次、7日/4週/6ヶ月保持） |
+| **simplification P0** | 死コード / 死コメント / コメント密度調整 |
+| **simplification P1** | vimiv 外出し / ghostty CSS 外出し / sheldon→zsh 統合 / zshrc 外出し / sops 共通属性化 / openldap overlay 削除 |
+| **borg Phase 1** | OnFailure → noctalia 通知 + linger=true |
+| **NAS TUI** | immich-browse + immich_token sops 化 |
+| **NAS ファイル管理** | Paperless-ngx 導入・既存ドキュメント取り込み |
+| **NAS 制御** | ntfy 導入・borg postHook 成功通知 + OnFailure 失敗通知 |
+| **yazi拡充** | git.yazi / glow opener / compress.yazi / restore.yazi (`R`) / mediainfo.yazi (`mi`) |
+| **jless** | JSON/YAML navigate-first ビューア追加 |
 
 ### 未着手（優先度順）
 
