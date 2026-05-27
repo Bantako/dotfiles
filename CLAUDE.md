@@ -60,6 +60,14 @@ home-manager build --flake /home/morikawa/.dotfiles#morikawa@nixos
 
 `nix flake check` はモジュールの型チェックや未定義オプションの検出もするため、`switch` 前に必ず通す。
 
+## yazi プラグイン開発ルール
+
+新しい yazi plugin を書くときは必ず既存プラグイン（`chmod.yazi/main.lua` 等）と公式ドキュメントを先に読む。
+
+- `cx.active` は `ya.sync(function() ... end)` の中でしか使えない
+- blocking TUI（pager等）は `Command.INHERIT` では動かない。`ya.mgr_emit("shell", { cmd, block = true })` を使う
+- 新しい Lua ファイルは `git add` しないと Nix store に入らない（flake はgit-tracked のみ対象）
+
 ## 重要なパターン
 
 **Neovimの設定**は `home/modules/cli/nvim/` に実ファイルとして置かれ、`mkOutOfStoreSymlink` で `~/.config/nvim` にシンボリックリンクされている（Nixストアにコピーされない）。そのため編集はリビルドなしに即反映される。
