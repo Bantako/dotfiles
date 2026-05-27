@@ -1,7 +1,6 @@
 local M = {}
 
 local function parse_trash_line(line)
-	-- trash-list format: "2024-01-15 10:30:00 /path/to/file"
 	local date, time, path = line:match("^(%d%d%d%d%-%d%d%-%d%d) (%d%d:%d%d:%d%d) (.+)$")
 	if path then
 		return { datetime = date .. " " .. time, path = path }
@@ -27,7 +26,6 @@ local function find_trash_entry(original_path)
 				for line in f:lines() do
 					local p = line:match("^Path=(.+)$")
 					if p then
-						-- URL decode %XX sequences
 						p = p:gsub("%%(%x%x)", function(h)
 							return string.char(tonumber(h, 16))
 						end)
@@ -74,29 +72,31 @@ function M:entry()
 		return
 	end
 
-	-- fzf reads keyboard from /dev/tty directly; stderr=INHERIT lets it draw its UI
-	local child = Command("sh")
-		:args({
-			"-c",
-			"trash-list | fzf --multi --prompt='Restore from trash> ' --reverse --height=40%",
-		})
-		:stdin(Command.NULL)
-		:stdout(Command.PIPED)
-		:stderr(Command.INHERIT)
-		:spawn()
+	-- fzf の選択結果を tmpfile 経由で受け取る（ya.mgr_emit shell で terminal 制御を渡す）
+	local tmpfile = os.tmpname()
+	ya.mgr_emit("shell", {
+		"trash-list | fzf --multi --prompt='Restore from trash> ' --reverse > " .. ya.quote(tmpfile),
+		block = true,
+	})
 
-	if not child then
-		ya.notify({ title = "Restore", content = "Failed to open selector", level = "error", timeout = 3 })
+	local f = io.open(tmpfile, "r")
+	os.remove(tmpfile)
+	if not f then
 		return
 	end
 
-	local output = child:wait_with_output()
-	if not output or output.stdout:match("^%s*$") then
+	local lines = {}
+	for line in f:lines() do
+		lines[#lines + 1] = line
+	end
+	f:close()
+
+	if #lines == 0 then
 		return
 	end
 
 	local restored, failed = 0, 0
-	for line in output.stdout:gmatch("[^\n]+") do
+	for _, line in ipairs(lines) do
 		local entry = parse_trash_line(line)
 		if entry then
 			local ok, err = restore_file(entry.path)
@@ -121,7 +121,6 @@ function M:entry()
 			level = "info",
 			timeout = 3,
 		})
-		ya.emit("reload", { id = cx.active.id })
 	end
 end
 
