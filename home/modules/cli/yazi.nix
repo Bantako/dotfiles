@@ -1,6 +1,7 @@
 {pkgs, ...}: {
   home.packages = with pkgs; [
-    file  # mime-ext の fallback_file1 が使う file(1) コマンド
+    file      # mime-ext の fallback_file1 が使う file(1) コマンド
+    mediainfo # video/audio ファイルのメタデータ表示
   ];
 
   programs.yazi = {

@@ -18,6 +18,18 @@ on = "?"
 run = "help"
 desc = "Show keybinding hints"
 
+## delete / restore
+
+[[mgr.prepend_keymap]]
+on  = "d"
+run = "trash"
+desc = "Move selected files to trash"
+
+[[mgr.prepend_keymap]]
+on  = "R"
+run = "plugin restore"
+desc = "Restore files from trash"
+
 ## plugins
 
 [[mgr.prepend_keymap]]
