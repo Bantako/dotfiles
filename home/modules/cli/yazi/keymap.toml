@@ -18,12 +18,7 @@ on = "?"
 run = "help"
 desc = "Show keybinding hints"
 
-## delete / restore
-
-[[mgr.prepend_keymap]]
-on  = "d"
-run = "trash"
-desc = "Move selected files to trash"
+## restore
 
 [[mgr.prepend_keymap]]
 on  = "R"
