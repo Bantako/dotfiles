@@ -12,15 +12,9 @@ return {
 			return ya.notify { title = "mediainfo", content = "No file selected", level = "warn", timeout = 3 }
 		end
 
-		local child = Command("sh")
-			:args({ "-c", "mediainfo " .. ya.quote(url) .. " | bat --paging=always --style=plain" })
-			:stdin(Command.INHERIT)
-			:stdout(Command.INHERIT)
-			:stderr(Command.INHERIT)
-			:spawn()
-
-		if child then
-			child:wait()
-		end
+		ya.mgr_emit("shell", {
+			"mediainfo " .. ya.quote(url) .. " | bat --paging=always --style=plain",
+			block = true,
+		})
 	end,
 }
