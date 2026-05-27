@@ -92,11 +92,3 @@ prio = "high"
 id   = "git"
 name = "*"
 run  = "git"
-
-[[plugin.prepend_previewers]]
-mime = "video/*"
-run  = "mediainfo"
-
-[[plugin.prepend_previewers]]
-mime = "audio/*"
-run  = "mediainfo"

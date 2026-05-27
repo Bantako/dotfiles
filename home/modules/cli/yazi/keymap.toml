@@ -18,12 +18,17 @@ on = "?"
 run = "help"
 desc = "Show keybinding hints"
 
-## restore
+## restore / media
 
 [[mgr.prepend_keymap]]
 on  = "R"
 run = "plugin restore"
 desc = "Restore files from trash"
+
+[[mgr.prepend_keymap]]
+on  = ["m", "i"]
+run = "plugin mediainfo"
+desc = "Show mediainfo for selected file"
 
 ## plugins
 

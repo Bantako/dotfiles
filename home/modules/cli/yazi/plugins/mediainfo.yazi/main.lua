@@ -1,33 +1,22 @@
 local M = {}
 
-function M:peek(job)
-	local output, err = Command("mediainfo"):arg(tostring(job.file.url)):stdout(Command.PIPED):output()
-	if not output then
-		ya.preview_widgets(job, {
-			ui.Text({ ui.Line("mediainfo error: " .. tostring(err)) }):area(job.area),
-		})
+function M:entry(job)
+	local file = cx.active.current.hovered
+	if not file then
+		ya.notify({ title = "mediainfo", content = "No file selected", level = "warn", timeout = 3 })
 		return
 	end
 
-	local lines = {}
-	local skip = job.skip
-	local i = 0
-	for line in output.stdout:gmatch("[^\n]+") do
-		i = i + 1
-		if i > skip then
-			lines[#lines + 1] = ui.Line(line)
-		end
-		if #lines >= job.area.h then
-			break
-		end
+	local child = Command("sh")
+		:args({ "-c", "mediainfo " .. ya.quote(tostring(file.url)) .. " | bat --paging=always --style=plain" })
+		:stdin(Command.INHERIT)
+		:stdout(Command.INHERIT)
+		:stderr(Command.INHERIT)
+		:spawn()
+
+	if child then
+		child:wait()
 	end
-
-	ya.preview_widgets(job, { ui.Text(lines):area(job.area) })
-end
-
-function M:seek(job)
-	local h = cx.active.preview.skip + job.units
-	ya.preview_code({ skip = math.max(0, h) })
 end
 
 return M
