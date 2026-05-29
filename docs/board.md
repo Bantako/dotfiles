@@ -84,7 +84,7 @@ yaml 設定の minimal UI ダッシュボード。port 3001。
 - **Homarr 不採用** — web ドラッグ&ドロップ + DB の可変状態モデルは「設定はファイルで宣言・状態を持たない」志向と逆。人気だが後退。
 - **Glance** — さらに軽量 yaml だが強みが service 統計より RSS/市況等の情報フィード。用途違い → 将来 personal start page / PKM フィード用の**補完候補**（置換ではない）。
 
-**ウィジェット拡充 `[次]`**: 全サービスの service widget をゴリ盛り → 実際に視線が行くものだけ残す方針。設定は [notes-from-mac.md §10 ④](./notes-from-mac.md)。キーは NAS 側 env（`.env` gitignore）。
+**ウィジェット拡充 `[完了]`**: Immich / Paperless / Navidrome / Calibre-web / ntfy の widget 有効。Stash・Jellyfin は API キー未取得で保留（取得後 `.env` に追記するだけ）。
 
 #### NAS ディレクトリ整理 (`~/data` / `~/services`) `[次]` (ser7/NAS 側実行)
 
