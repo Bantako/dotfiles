@@ -84,23 +84,17 @@ yaml 設定の minimal UI ダッシュボード。port 3001。
 - **Homarr 不採用** — web ドラッグ&ドロップ + DB の可変状態モデルは「設定はファイルで宣言・状態を持たない」志向と逆。人気だが後退。
 - **Glance** — さらに軽量 yaml だが強みが service 統計より RSS/市況等の情報フィード。用途違い → 将来 personal start page / PKM フィード用の**補完候補**（置換ではない）。
 
-**ウィジェット拡充 `[完了]`**: Immich / Paperless / Navidrome / Calibre-web / ntfy widget 有効。Google Calendar・天気・CPU温度・ブックマーク追加済み。Stash・Jellyfin は API キー取得後 `.env` に追記するだけ。
+**ウィジェット拡充 `[完了]`**: Immich / Paperless / Navidrome / Calibre-web / ntfy / Stash widget 有効。Google Calendar・天気（openmeteo）・CPU温度・ブックマーク・glances・RSS（yazi/niri/lazygit/ghostty releases）・stocks（Finnhub: AAPL/NVDA/MSFT/SONY）追加済み。Jellyfin は API キー取得後 `.env` に追記するだけ。homepage config は `nas-git` で `~/services` 管理。
 
-#### NAS ディレクトリ整理 (`~/data` / `~/services`) `[次]` (ser7/NAS 側実行)
+#### NAS ディレクトリ整理 (`~/data` / `~/services`) `[完了]`
 
-NAS のディレクトリを `~/data`（コンテンツ）/ `~/services`（compose スタック）に分離（NAS 上で実施済）。
-**残作業（Mac から NAS を触れないため ser7/NAS で実行）**:
-1. **reorg 後のパス検証** — borg include / compose volume mount / Homepage 参照が新パスを指すか。移動で静かに壊れていないか確認（新ツールより先）。
-2. **compose のローカル git 管理** — `~/services` を **monorepo ルート**に（各サービスは別 compose のまま。git 粒度とコンテナ起動範囲は独立で、個別 compose に `up -d` すれば他は無停止）。**allowlist な `.gitignore`**（全無視 → compose と必要設定だけ許可、`.env` 実体は混入不可）+ `core.fileMode false`。git は **ser7 のマウント越しに直接**（エージェント/nvim が native に触れて SSH レス。遅ければ `--separate-git-dir` で `.git` だけ ser7 ローカルへ）、`docker compose up -d` のみ NAS 側。**cross-machine パイプラインは却下**、ローカル git のみ。borg が include していれば `.git` ごと保全＝外部 remote 不要。
+- reorg 後パス検証済み（compose volume mount・Homepage 参照問題なし）
+- `~/services` を git monorepo 化（allowlist `.gitignore`、`nas-git` 関数で ser7 から操作）
+- compose + homepage/config/*.yaml を管理対象に追加済み
 
-詳細手順: [notes-from-mac.md §10](./notes-from-mac.md)
+#### lazydocker (コンテナ運用 TUI) `[完了]`
 
-#### lazydocker (コンテナ運用 TUI) `[次]`
-
-Homepage=閲覧の補完。ターミナルから NAS コンテナの logs/restart/exec/prune。**4 軸 fit**（TUI / vim 操作 / fast / minimal）+ navigate-first + 思考非中断。
-`tools.nix` に追加済（Mac 編集）。`DOCKER_HOST=ssh://<user>@192.168.0.222` でリモート接続。
-**ser7 側で要確認**: ser7→NAS の ssh 鍵認証 / Ugreen NAS の docker CLI 有無 / ssh ユーザー名。
-詳細手順: [notes-from-mac.md §10 ③](./notes-from-mac.md)
+`lzd` エイリアス（`DOCKER_HOST=ssh://nas lazydocker`）で NAS コンテナを TUI 管理。ssh 鍵認証済み。
 
 ### コンテンツ軸
 
