@@ -39,3 +39,12 @@ function y() {
 if command -v wl-copy >/dev/null 2>&1 ; then
   alias -g C='| wl-copy'
 fi
+
+# NAS ~/services の git 操作（NAS に git 未インストールのため Docker 経由）
+# 使い方: nas-git status / nas-git log --oneline / nas-git diff
+nas-git() {
+  ssh nas "docker run --rm --user \$(id -u):\$(id -g) \
+    --entrypoint sh \
+    -v /home/morikawa/services:/repo -w /repo \
+    alpine/git -c 'git $(printf "%s " "$@")'"
+}
