@@ -72,6 +72,34 @@ home-manager build --flake /home/morikawa/.dotfiles#morikawa@nixos
 
 **yazi プラグイン**を追加・編集するときは既存プラグイン（`chmod.yazi/main.lua` 等）と公式ドキュメントを先に読む。`cx.active` は `ya.sync()` 内でしか使えない。blocking TUI は `ya.mgr_emit("shell", { cmd, block = true })`。新しい Lua ファイルは `git add` しないと Nix store に入らない。
 
+## NAS 操作
+
+**接続**: `ssh nas`（`192.168.0.222`、ユーザー `morikawa`、鍵認証済み）
+
+**ディレクトリ構造**（NAS 上 `~/`）:
+- `~/data/` — コンテンツ（music / photos / adult / books / documents / games / media / pictures / projects）
+- `~/services/` — compose スタック（calibre / homepage / immich / lanraragi / navidrome / ntfy / paperless / stash）
+
+**コンテナ管理**:
+```bash
+lzd   # DOCKER_HOST=ssh://nas lazydocker（NAS コンテナの TUI 管理）
+```
+
+**compose の git 管理**（NAS に git が未インストールのため Docker 経由）:
+```bash
+nas-git status
+nas-git log --oneline
+nas-git diff
+# commit はメッセージに空白が入るため ssh 直接入力を推奨
+ssh nas "docker run --rm --user \$(id -u):\$(id -g) --entrypoint sh \
+  -v /home/morikawa/services:/repo -w /repo alpine/git \
+  -c 'git commit -m \"message\"'"
+```
+
+`.gitignore` は allowlist 方式（全無視 → compose ファイルのみ許可）。`.env` は原理的に追跡されない。
+
+**重要**: ser7 の CIFS マウント `/mnt/ugreen` は `personal_folder` 共有で、SSH の `~/services` / `~/data` とは**別パス**。ser7 からマウント越しに `~/services` は触れない。NAS 上のファイル操作は必ず `ssh nas` 経由。
+
 ## キーバインド方針
 
 **物理キーボードに CapsLock キーはない**。CapsLock を修飾キーとして転用する手法は使わない。
