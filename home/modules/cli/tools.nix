@@ -45,6 +45,8 @@ in {
     fclones       # 重複ファイル検出・削除（Rust 製、~/Pictures 等の整理用）
 
     # Rust CLI 追加
+    lazydocker    # Docker コンテナ TUI (logs/restart/exec/prune)
+    serpl         # ripgrep+sed の対話 TUI（複数ファイル横断 find&replace）
     fd            # find の Rust 代替
     sd            # sed の Rust 代替
     xh            # httpie の Rust 版
