@@ -35,6 +35,7 @@ in {
         ll = "eza --icons always --long --all --git ";
         tree = "eza --icons always --classify always --tree";
         lg = "lazygit";
+        lzd = "DOCKER_HOST=ssh://nas lazydocker";
         # nh (nix helper)
         nos = "nh os switch";
         nhs = "nh home switch";
