@@ -41,6 +41,7 @@
     ./modules/nas/immich.nix
     ./modules/nas/paperless.nix
     ./modules/shell/direnv.nix
+    ./modules/shell/ssh.nix
     ./modules/shell/zsh.nix
   ];
 
