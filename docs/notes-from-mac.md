@@ -692,3 +692,278 @@ Obsidian ノートを yazi 経由で TUI レンダ表示できる動線が綺麗
 | FreshRSS + newsboat | PKM | 保留（用途立証待ち） |
 ```
 
+---
+
+## 10. NAS reorg 後始末 + lazydocker（ser7/NAS 側で実行）
+
+Homepage 導入と `~/data` / `~/services` へのディレクトリ整理が完了した直後の handoff。
+**Mac からは NAS（`192.168.0.222`）も ser7 も触れない**ため、以下は ser7 にログインして実行する。
+結果は board の該当項目にチェックを入れて記録する。
+
+### ① reorg 後のパス検証（最優先・新ツールより先）
+
+ディレクトリを移動したので、旧パスを掴んだまま静かに壊れている箇所を潰す。
+
+- **borg バックアップ対象**: `backup.nix` の include が `~/data` / `~/services` を指しているか。
+  旧パスのままだと移動したデータがバックアップから外れる（ntfy 成功通知が来ても中身が空はあり得る）。
+  ```sh
+  # ser7 側
+  grep -rn 'paths\|include\|data\|services' /home/morikawa/.dotfiles/nixos/**/backup.nix
+  # 直近バックアップに新パスが含まれるか
+  borg list <repo>::<latest-archive> | grep -E 'data|services' | head
+  ```
+- **compose の volume bind mount**: NAS 上の各 compose（immich / paperless / navidrome / homepage）の
+  `volumes:` が旧パスを指していないか。再 up で旧パスを掴み直す可能性。
+  ```sh
+  # NAS 側
+  grep -rn 'volumes\|/data\|/services' ~/services/*/docker-compose.y*ml
+  docker inspect <container> --format '{{json .Mounts}}' | jq   # 実マウント確認
+  ```
+- **Homepage の参照**: `docker.yaml` の server/container 指定・bookmarks リンクが移動の影響を受けていないか
+  （port は変わっていないはずなので主に表示崩れ確認）。
+
+### ② compose のローカル git 管理（制御軸の地力）
+
+`~/services` の compose が version 管理されていなければ「前いじったの何で?」の履歴も revert も効かない。
+ただし**編集は稀 + NAS は ser7 に常時マウント済み**なので、cross-machine の git パイプライン
+（bare repo / post-receive フック / 外部 remote）は過剰。**NAS でローカル git を持つだけで十分**。
+
+**構成（2026-05 詳細化）**:
+- **monorepo + 複数 compose** — `~/services` をリポジトリルートに、各サービスは `~/services/<svc>/compose.yaml` の別 compose のまま。
+  **git の粒度とコンテナの起動範囲は独立**: 1 サービスだけ変更したら `cd ~/services/<svc> && docker compose up -d` で
+  そのコンテナだけ再作成（他は無停止）。「全部入り 1 compose」にしない限り全停止は起きない。`git commit` 自体はコンテナに無関与。
+- **allowlist な `.gitignore`** — blocklist（`.env` を除外）だと除外し忘れで secrets/データが混入する。
+  **全無視 → compose と必要設定だけ明示許可**にすれば、`.env` 実体やデータは許可しない限り原理的に入らない。
+
+確認:
+```sh
+git -C ~/services rev-parse --is-inside-work-tree 2>/dev/null || echo "未管理"
+```
+
+未管理なら、既存の `~/services` でそのまま git 化する（**やり直しゼロ**・現状がそのままスナップされる）:
+```sh
+cd ~/services
+git config --local core.fileMode false   # マウント越し時 CIFS のパーミッション固定で誤差分が出るのを抑制
+cat > .gitignore <<'EOF'
+# 全部無視
+*
+# ディレクトリは無視解除（配下に降りるため。これが無いと走査しない）
+!*/
+!.gitignore
+# 追跡したいものだけ許可
+!**/compose.yaml
+!**/compose.yml
+!**/docker-compose.yml
+!**/docker-compose.yaml
+# サービスごとに再現に要る設定があれば個別追加（実体 .env は足さない）
+# !**/.env.example
+# !**/*.conf
+EOF
+git init && git add -A
+git status   # ← commit 前に必ず目視: yml と必要設定だけが staged か（DB 実体/秘密が混ざってないか）
+git commit -m "init: NAS compose スタック現状スナップ"
+```
+
+運用フロー（remote もフックも 2 個目の clone も無し）:
+- **編集 + git は ser7 のマウント越しに直接** — エージェント（Claude Code）/ nvim が native にファイルを触れて git も叩ける＝
+  **SSH レス**。ssh 越しだと毎回 `ssh nas 'git ...'` でファイルツールが使えず面倒なため、こちらを第一選択に。
+- **遅さ対策（必要時のみ）** — マウント越し git は `.git` の小ファイル書き込みが SMB 越しで遅い。compose 数ファイルなら実用範囲だが、
+  気になれば `git init --separate-git-dir ~/repos/nas-services.git ~/services` で **worktree は NAS / `.git` は ser7 ローカル**に分離。
+- **コンテナ再起動だけ NAS 側** — `docker compose up -d` は NAS で（or ssh）。分担: git=ser7 マウント越し、起動=NAS。
+- **off-NAS 保全**: ①で borg が `~/services` を include していれば `.git` ごとバックアップされる → 外部 remote 不要。
+  include していなければ borg 側に足すのが筋（GitHub 経由より素直）。
+
+却下した重い案（編集頻度・マウント前提に対し過剰）:
+- ~~bare repo on NAS + post-receive で push-to-deploy~~ — 編集が頻繁で ser7 環境で書きたい時のための仕組み。今は不要。
+- ~~外部 remote（GitHub）経由で NAS が pull~~ — 外部依存 + pull トリガが増えるだけ。
+- ~~dotfiles に取り込み~~ — NAS は NixOS でなく nix deploy できない。レイヤを混ぜない（[[project_single_host_policy]]）。
+
+### ③ lazydocker 接続設定
+
+`tools.nix` に `lazydocker` 追加済（Mac 編集）。ser7 で nhs 後、NAS の docker を指す。
+
+- **思考非中断主義に最も合う形**: ser7 ローカルから `DOCKER_HOST=ssh://<user>@192.168.0.222 lazydocker`。
+  ターミナルから手を離さず NAS コンテナの logs/restart/exec/prune ができる。
+- **前提（ser7 で要確認）**:
+  - ser7 → NAS の ssh が鍵認証で通ること（`ssh <user>@192.168.0.222 docker ps`）。
+    Ugreen NAS の ssh ユーザー名は immich/paperless が HTTP API しか使っていないため dotfiles 上に情報なし → **要確認**。
+  - リモート（NAS）側に docker CLI があること（lazydocker は ssh 越しに `docker system dial-stdio` を叩く）。
+- **設定方法（どちらか）**:
+  ```sh
+  # 簡易: alias（zshrc.sh）
+  alias lzd='DOCKER_HOST=ssh://<user>@192.168.0.222 lazydocker'
+  # or docker context（docker CLI も入れる場合）
+  docker context create nas --docker host=ssh://<user>@192.168.0.222
+  DOCKER_CONTEXT=nas lazydocker
+  ```
+- ssh が通らない / Ugreen が docker CLI を載せていない場合のフォールバック:
+  `ssh nas` してから NAS 上で lazydocker（NAS に別途インストールが必要なため一手増える。非推奨）。
+
+### ④ Homepage ウィジェット拡充（ゴリ盛り → 必要なものだけ残す）
+
+方針: **一旦取れる widget を全部盛って、実際に視線が行くものだけ残す**。ダッシュボードの中身は
+yaml 編集だけで足し引き自由（Homepage は yaml をホットリロード）なので、最小から積むより
+「全部出して観察 → 削る」が glance 先の判断に向く。ここは git パイプラインのような
+「作ること自体がコスト」の話とは別で、ゴリ盛りが合理的。
+
+**前提**: widget の API キーは Homepage（NAS）側の env に置き `{{HOMEPAGE_VAR_*}}` で参照。
+これは §10 ② で gitignore する `.env` に入れる（ser7 の sops とは別管理）。port は各 compose に合わせる。
+
+ウィジェット可否（2026-05 時点、gethomepage.dev で確認）:
+- **あり**: immich / paperlessngx / jellyfin / navidrome / stash / calibreweb / ntfy
+- **無し**: LANraragi → リンクカードのみ
+- 複数 widget（ntfy / stash 等）は **fields を何個書いても先頭 4 個しか表示されない** → 並び順が効く（これも「盛って削る」レバー）
+
+#### services.yaml（3 軸でグループ化・全 widget 盛り）
+
+```yaml
+- コンテンツ:
+    - Immich:
+        href: http://192.168.0.222:2283
+        icon: immich.png
+        server: my-docker      # docker.yaml の server 名。コンテナ状態もカードに出る
+        container: immich_server
+        widget:
+          type: immich
+          url: http://192.168.0.222:2283
+          key: "{{HOMEPAGE_VAR_IMMICH_KEY}}"
+          version: 2            # Immich v1.118+ は 2。key は server.statistics 権限必須
+          fields: ["photos", "videos", "storage", "users"]
+    - Jellyfin:
+        href: http://192.168.0.222:<jellyfin-port>
+        icon: jellyfin.png
+        widget:
+          type: jellyfin
+          url: http://192.168.0.222:<jellyfin-port>
+          key: "{{HOMEPAGE_VAR_JELLYFIN_KEY}}"
+          version: 2            # Jellyfin 10.12+ は 2
+          enableBlocks: true    # movies/series/episodes/songs を表示
+          enableNowPlaying: true
+    - Navidrome:
+        href: http://192.168.0.222:4533
+        icon: navidrome.png
+        widget:
+          type: navidrome
+          url: http://192.168.0.222:4533
+          user: <navidrome-user>
+          salt: <randomsalt>
+          token: "{{HOMEPAGE_VAR_NAVIDROME_TOKEN}}"   # = md5(password + salt)
+          # 表示フィールドは固定（設定不可）
+    - Stash:
+        href: http://192.168.0.222:<stash-port>
+        icon: stash.png
+        widget:
+          type: stash
+          url: http://192.168.0.222:<stash-port>
+          key: "{{HOMEPAGE_VAR_STASH_KEY}}"
+          fields: ["scenes", "images", "galleries", "performers"]   # 先頭4のみ表示
+    - Calibre-web:
+        href: http://192.168.0.222:<calibre-port>
+        icon: calibre-web.png
+        widget:
+          type: calibreweb
+          url: http://192.168.0.222:<calibre-port>
+          username: <calibre-user>
+          password: "{{HOMEPAGE_VAR_CALIBRE_PASSWORD}}"
+          fields: ["books", "authors", "series"]
+    - LANraragi:
+        href: http://192.168.0.222:<lrr-port>
+        icon: lanraragi.png     # widget 無し → リンクのみ
+- PKM:
+    - Paperless-ngx:
+        href: http://192.168.0.222:8010
+        icon: paperless.png
+        widget:
+          type: paperlessngx
+          url: http://192.168.0.222:8010
+          key: "{{HOMEPAGE_VAR_PAPERLESS_KEY}}"
+          fields: ["total", "inbox"]   # inbox = 未処理件数（PKM アクションアイテム）
+- 制御:
+    - ntfy:
+        href: http://192.168.0.222:<ntfy-port>
+        icon: ntfy.png
+        widget:
+          type: ntfy
+          url: http://192.168.0.222:<ntfy-port>
+          topic: <borg-通知トピック>
+          # key: "{{HOMEPAGE_VAR_NTFY_KEY}}"   # 認証ありなら（tk_ 始まり）
+          fields: ["title", "message", "priority", "lastReceived"]
+    - Homepage:
+        href: http://192.168.0.222:3001
+        icon: homepage.png
+```
+
+Navidrome の token 生成（一度だけ）:
+```sh
+SALT=$(openssl rand -hex 8); echo "salt=$SALT"
+printf '%s' "<password>${SALT}" | md5sum | cut -d' ' -f1   # → これが token
+```
+
+#### widgets.yaml（情報ウィジェット・盛り）
+
+```yaml
+- greeting:
+    text_size: xl
+    text: morikawa
+- datetime:
+    text_size: l
+    format: { dateStyle: short, timeStyle: short }
+- search:
+    provider: duckduckgo
+    target: _blank
+- openmeteo:                 # キー不要
+    latitude: <lat>
+    longitude: <lon>
+    units: metric
+    cache: 5
+- resources:                 # まずこれで CPU/RAM/disk/温度/uptime
+    cpu: true
+    memory: true
+    disk: /                  # 複数マウントは disk を配列で並べる
+    cputemp: true
+    uptime: true
+    units: metric
+# さらに盛るなら glances（NAS で `glances -w` を別途常駐させる必要あり）:
+# - glances:
+#     url: http://192.168.0.222:61208
+#     metric: cpu            # cpu/memory/process/network/fs/sensors を別カードで複数並べられる
+```
+
+#### NAS 側 Homepage コンテナ env（.env に・gitignore 済）
+
+```sh
+HOMEPAGE_ALLOWED_HOSTS=192.168.0.222:3001
+HOMEPAGE_VAR_IMMICH_KEY=...
+HOMEPAGE_VAR_PAPERLESS_KEY=...      # ← ser7 sops の値と同じトークンを NAS にも置く
+HOMEPAGE_VAR_JELLYFIN_KEY=...
+HOMEPAGE_VAR_STASH_KEY=...
+HOMEPAGE_VAR_NAVIDROME_TOKEN=...
+HOMEPAGE_VAR_CALIBRE_PASSWORD=...
+# HOMEPAGE_VAR_NTFY_KEY=...
+```
+
+#### 盛った後の削り方
+
+1. 全部 deploy して 1 週間使う。
+2. **視線が行かなかった widget / カードを消す**（消すのも yaml 1 ブロック削除、ホットリロード）。
+3. 残す widget も `fields` を実際に見る 1〜2 個に絞る（4 個上限もあるので並べ替え）。
+   - 経験的に効くのは: Paperless `inbox` / Immich `storage` / ntfy 直近通知 / docker のコンテナ落ち検知。
+4. 削った結果を §10 ④ にメモ更新 → これが「必要なものだけ」の確定形。
+
+### 完了後
+
+board の「いま着手可能」表と「完了済 sprint アーカイブ」を更新する。
+
+---
+
+## 11. CLI ツール追加（Mac 編集 → ser7 で build 検証）
+
+気に入って追加したツール。Mac には nix が無く build 検証できないため、ser7 で `nhs`（または `home-manager build`）して通るか確認する。`tools.nix` には追加済。
+
+- **bottom** — 既存（追加済だった）。`tools.nix:17`。何もしなくてよい。
+- **serpl** — ripgrep+sed の対話 TUI。複数ファイル横断の find&replace を navigate-first で。`tools.nix` の「Rust CLI 追加」に追加済。`nhs` 後 `serpl` で起動確認。
+- **uutils-coreutils-noprefix** — Rust 製 coreutils を**素の名前**（`ls`/`cp`/`mv` 等）で GNU coreutils の代わりに使う構成を選択。
+  - **ser7 で要確認**: home-manager profile の bin が PATH で system coreutils より優先されるか（`which ls` が `~/.nix-profile/bin/ls` 等を指すか）。優先されないと素の名前では uutils が呼ばれない。
+  - **build collision 注意**: 同一 profile に GNU coreutils と両方入ると衝突警告が出ることがある。home.packages 側には coreutils を明示していないので通常は出ないはずだが、出たら `lib.hiPrio` で優先度付けを検討。
+  - 挙動差（GNU 拡張オプション非対応など）でスクリプトが転ぶ可能性があるので、合わなければ noprefix をやめて prefix 版（`uutils-coreutils`）か個別バイナリに切替。
+
