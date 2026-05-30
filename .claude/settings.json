@@ -17,7 +17,17 @@
   "permissions": {
     "allow": [
       "Bash(nix flake check *)",
+      "Bash(nix flake show *)",
       "Bash(nh os switch --dry *)",
+      "Bash(home-manager build *)",
+      "Bash(nix eval *)",
+      "Bash(nix build *)",
+      "Bash(nix show-derivation *)",
+      "Bash(nix-store --query *)",
+      "Bash(nix search *)",
+      "Bash(journalctl *)",
+      "Bash(ffprobe *)",
+      "Bash(readelf *)",
       "mcp__todoist__todoist_tasks"
     ]
   }
