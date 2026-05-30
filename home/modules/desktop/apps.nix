@@ -19,7 +19,6 @@
     hyprpicker         # カラーピッカー（HEX を wl-copy）
 
     # エンタメ・コミュニケーション
-    discord
     discord-ptb
     prismlauncher      # Minecraft
     slack

@@ -14,10 +14,10 @@ in {
   home.packages = with pkgs; [
     raindrop-to-daily
     # 基本CLIツール
+    uutils-coreutils-noprefix  # GNU coreutils の Rust 代替（同名コマンドで上書き）
     bottom
     eza
     fzf
-    httpie
     ripgrep
     zoxide
     jq
