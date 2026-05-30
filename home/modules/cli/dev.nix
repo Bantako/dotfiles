@@ -13,7 +13,7 @@
 
     # formatter
     rustfmt
-    nixfmt-rfc-style
+    nixfmt
     shfmt
     stylua                       # Lua
     prettier                     # JS/TS/JSON/MD/YAML
