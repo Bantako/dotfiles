@@ -21,15 +21,7 @@
     viAlias = true;
     vimAlias = true;
     defaultEditor = true;
-    extraPackages = with pkgs; [
-      rust-analyzer
-      rustfmt
-      nil        # Nix LSP
-      nixfmt
-      lua-language-server
-      vscode-json-languageserver
-      shfmt
-    ];
+    # LSP / formatter は dev.nix で管理
   };
 
   home.packages = with pkgs; [

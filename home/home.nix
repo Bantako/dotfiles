@@ -19,6 +19,7 @@
     ./modules/ai/mcp.nix
     ./modules/ai/rtk.nix
     ./modules/cli/bat.nix
+    ./modules/cli/dev.nix
     ./modules/cli/fastfetch.nix
     ./modules/cli/git.nix
     ./modules/cli/gpg.nix
