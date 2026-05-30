@@ -13,5 +13,12 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(nix flake check *)",
+      "Bash(nh os switch --dry *)",
+      "mcp__todoist__todoist_tasks"
+    ]
   }
 }

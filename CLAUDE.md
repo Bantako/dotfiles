@@ -110,23 +110,6 @@ ssh nas "docker run --rm --user \$(id -u):\$(id -g) --entrypoint sh \
 - **物理 Win 位置キー = Super = Unix Control**（シェル制御コード。SIGINT 等）
 - Mac 側は Karabiner で発火を固定済み。キーボードは QMK/VIA。
 
-**構造的な核心**: Mac は (Cmd vs Control) で app 修飾と Unix-ctrl を別キーに分離できるが、Win/Linux には Cmd が無く app 修飾 = Control に落ちる。よって物理 Ctrl キーは「**ターミナルでは Super 相当**（ghostty が Super-C=copy）／**GUI では Control 相当**（ブラウザ Ctrl-C=copy）」と**文脈で別キーコードを出す必要**がある。これは firmware では原理的に不可能（フォーカス中アプリを知らない）で、**compositor 側のアプリ検出付き remap が必須**。
+**構造的な核心**: Mac は (Cmd vs Control) で app 修飾と Unix-ctrl を別キーに分離できるが、Win/Linux には Cmd が無く app 修飾 = Control に落ちる。よって物理 Ctrl キーは「**ターミナルでは Super 相当**（ghostty が Super-C=copy）／**GUI では Control 相当**（ブラウザ Ctrl-C=copy）」と**文脈で別キーコードを出す必要**がある。これは firmware では原理的に不可能（フォーカス中アプリを知らない）。xremap 等の remap ツールはアプリ検出できるが、evdev レベル（コンポジター以前）で動作するため compositor のショートカットも影響を受ける。完全な解決策は未発見。
 
-**解ける見込みあり（旧「未解決」を更新）**: 旧記述の「Niri は `ext-foreign-toplevel-list-v1` なので xremap (`wlr-foreign-toplevel-management`) のアプリ検出が効かない」は古い。**xremap は現在 Niri ネイティブ対応（`NIRI_SOCKET` でアプリ検出）**。これにより `application.not`/`only` が Niri で機能するなら、文脈出し分けが成立する。
-
-**確定した構成**（役割分離）:
-
-| 層 | 役割 | 中身 |
-|---|---|---|
-| QMK firmware | OS 横断の静的正規化 | 物理 Ctrl位置→**Super(LGUI)** / 物理 Win位置→**Control(LCtrl)**。別キーコードに分けるのが肝。Mac は Karabiner で Cmd/Control |
-| ghostty | ターミナルの app 修飾 | Super=copy/paste/tab（設定済み）。Control は素通り=SIGINT |
-| xremap (niri feature) | GUI だけの文脈例外 | `Super→Control` を `application.not: ghostty` で。GUI は物理 Ctrl でネイティブ copy、ターミナルは除外で ghostty の Super を温存 |
-| Niri | WM | `mod-key = "Alt"` なので全修飾に無干渉 |
-
-→ 物理 Ctrl = copy/app 修飾（ターミナルも GUI も）、物理 Win = Unix Control、が Mac と完全一致（Shift 差なし）。
-
-**唯一の実証ポイント**: xremap の niri feature は nix-flake で "implemented, not tested" 扱い。**Niri 上で `application.not`/`only` が実際に効くか**を ser7 で実証する必要（`NIRI_SOCKET` 込みで `pkgs.xremap` を niri ビルドに替え、ghostty とブラウザで挙動確認）。通れば全部繋がる。通らなければ keyd 等のアプリ検出付き remap にフォールバック検討。
-
-**現状の `home/modules/desktop/xremap.nix`** は `application.only: ghostty` で Ctrl↔Super を全アプリにスワップしてしまう旧構成（wlroots ビルドで Niri 検出不可のため leak）。上記構成へ:
-- firmware が物理 Ctrl→Super を出す前提に変更（xremap でのスワップは廃止）
-- xremap は niri feature ビルドに替え、modmap を `Super→Control` + `application.not: ghostty` に書き換え
+**既知の問題（未解決）**: xremap は evdev レベル（コンポジター以前）でキーを書き換えるため、ghostty フォーカス中の Ctrl↔Super スワップが Niri の `Ctrl+Shift+3/4/5`（スクリーンショット）ショートカットを壊す。「アプリ側だけ制御」は xremap では原理的に不可能。解決策は検討したが現状は手つかず。

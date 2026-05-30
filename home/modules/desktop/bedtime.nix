@@ -1,4 +1,4 @@
-{ pkgs, ... }: {
+{ config, pkgs, ... }: {
   systemd.user.services.bedtime-lock = {
     Unit = {
       Description = "Bedtime screen lock";
@@ -6,7 +6,7 @@
     };
     Service = {
       Type = "oneshot";
-      ExecStart = "${pkgs.systemd}/bin/loginctl lock-session";
+      ExecStart = "${config.programs.noctalia-shell.package}/bin/noctalia-shell ipc call lockScreen lock";
     };
   };
 
