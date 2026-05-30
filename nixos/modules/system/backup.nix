@@ -22,7 +22,7 @@ in {
       "**/.venv"
       "**/dist"
     ];
-    repo = "/mnt/ugreen/borg/ser7";
+    repo = "/mnt/ugreen/backup/borg/ser7";
     encryption = {
       mode = "repokey-blake2";
       passCommand = "cat ${config.sops.secrets.borg_passphrase.path}";
