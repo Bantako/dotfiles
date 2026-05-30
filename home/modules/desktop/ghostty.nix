@@ -13,12 +13,7 @@ in {
     enable = true;
     package = pkgs.ghostty;
     settings = {
-      # テーマ・外観
-      theme = "Dracula";
-
-      # フォント
-      font-family = "JetBrainsMono Nerd Font Mono";
-      font-size = 13;
+      # フォント（font-family / font-size は stylix が管理）
       font-feature = "zero";
       font-codepoint-map = "U+3000-U+9FFF=Source Han Code JP,U+FF00-U+FFEF=Source Han Code JP";
       adjust-cell-height = "1";

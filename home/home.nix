@@ -28,6 +28,7 @@
     ./modules/cli/yazi.nix
     ./modules/desktop/apps.nix
     ./modules/desktop/gtk.nix
+    ./modules/desktop/stylix.nix
     ./modules/desktop/gammastep.nix
     ./modules/desktop/ghostty.nix
     ./modules/desktop/mpv.nix
