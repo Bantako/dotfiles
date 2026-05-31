@@ -20,7 +20,21 @@
 
     # エンタメ・コミュニケーション
     discord-ptb
-    prismlauncher      # Minecraft
+    ((prismlauncher.override {
+      # GUI 版 openjdk は GTK3 を直接 NEEDED に持ち、JVM 起動時に libwayland-egl.so.1 を
+      # プリロードする。これが Mesa の EGL Wayland platform 初期化と衝突して
+      # eglGetPlatformDisplay が EGL_BAD_PARAMETER で失敗する。headless 版は GTK3 を含まない
+      jdks = with pkgs; [ jdk21_headless jdk17_headless jdk8_headless ];
+    }).overrideAttrs (old: {
+      qtWrapperArgs = (old.qtWrapperArgs or []) ++ [
+        "--unset DISPLAY"
+        "--set GLFW_PLATFORM wayland"
+        # LWJGL 同梱の GLFW を nixpkgs の Wayland 対応 GLFW に差し替え（dlsym で
+        # eglGetPlatformDisplayEXT が取れない問題を回避）。PrismLauncher は
+        # JAVA_TOOL_OPTIONS を strip するため Java 9+ の JDK_JAVA_OPTIONS を使う
+        "--set JDK_JAVA_OPTIONS -Dorg.lwjgl.glfw.libname=${pkgs.glfw3-minecraft}/lib/libglfw.so"
+      ];
+    }))                # Minecraft: headless JDK + Wayland GLFW で起動
     slack
     spotify
 
