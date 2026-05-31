@@ -4,7 +4,7 @@
   users.users.morikawa = {
     isNormalUser = true;
     description = "morikawa";
-    extraGroups = [ "networkmanager" "wheel" "input" "corectrl" ];
+    extraGroups = [ "networkmanager" "wheel" "input" "corectrl" "dialout" ];
     shell = pkgs.zsh;
     linger = true;
     openssh.authorizedKeys.keys = [
