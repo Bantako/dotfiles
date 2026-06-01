@@ -39,6 +39,7 @@
 1. ~~**`git.yazi` + `glow` opener + `compress.yazi`**~~ — ✓ 完了
 2. ~~**`restore.yazi`**~~ — ✓ 完了（`R` キー、freedesktop Trash から直接復元）
 3. ~~**`mediainfo.yazi` + `mediainfo` パッケージ**~~ — ✓ 完了（video/audio プレビューに表示）
+4. ~~**`pdf.yazi` / `cbz.yazi` プレビュー**~~ — ✓ 完了（pdftoppm + bsdtar + imagemagick、CBZ/CBR 両対応）
 
 ### jless `[完了]`
 
@@ -181,3 +182,12 @@ base16 Dracula で全アプリ統一済み（2026-05-30）。ghostty / GTK / fuz
 |---|---|---|
 | nvim | Mason 完全停止 + LSP を Nix 管理に統一 | 41846ab |
 | 横断 | stylix で Dracula テーマ一元管理 | 6d8ec5e |
+
+2026-06-01 sprint:
+
+| 領域 | 内容 | commit |
+|---|---|---|
+| AI | aider / bonsai 削除、co2read PEP8 修正 | d781e9f |
+| yazi | PDF / CBZ / CBR プレビュー (pdf.yazi / cbz.yazi、poppler-utils + bsdtar + imagemagick) | 90f3d75 |
+| パッケージ | amdgpu_top 追加（GPU TUI 欠落補完） | 685aa56 |
+| パッケージ | iftop / iotop-c 削除（btm で代替） | 2522aef |
