@@ -80,8 +80,6 @@ in {
     amdgpu_top     # AMD GPU 使用率・VRAM・温度を TUI で表示
     smartmontools  # SSD/HDD の SMART 監視 (smartctl)
     lm_sensors     # CPU/GPU/M.2 温度 (sensors コマンド)
-    iotop-c        # リアルタイム disk I/O 内訳
-    iftop          # リアルタイム帯域モニター
     trash-cli      # trash-put でゴミ箱送り (rm の安全版)
     playerctl      # Spotify/mpv をスクリプト・キーから制御
 
