@@ -77,6 +77,7 @@ in {
     vhs           # ターミナル操作を GIF/MP4 録画 (.tape DSL)
 
     # 観測性・監視
+    amdgpu_top     # AMD GPU 使用率・VRAM・温度を TUI で表示
     smartmontools  # SSD/HDD の SMART 監視 (smartctl)
     lm_sensors     # CPU/GPU/M.2 温度 (sensors コマンド)
     iotop-c        # リアルタイム disk I/O 内訳
