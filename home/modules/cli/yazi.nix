@@ -1,7 +1,9 @@
 {pkgs, ...}: {
   home.packages = with pkgs; [
-    file      # mime-ext の fallback_file1 が使う file(1) コマンド
-    mediainfo # video/audio ファイルのメタデータ表示
+    file          # mime-ext の fallback_file1 が使う file(1) コマンド
+    mediainfo     # video/audio ファイルのメタデータ表示
+    poppler-utils # pdftoppm: PDF 1ページ目を PNG 化してプレビュー表示
+    libarchive    # bsdtar: CBZ/CBR 両対応（ZIP・RAR 統一展開）
   ];
 
   programs.yazi = {

@@ -49,6 +49,8 @@ prepend_rules = [
   { mime = "audio/*", use = ["play"] },
   { mime = "application/pdf", use = ["read"] },
   { mime = "application/epub+zip", use = ["read"] },
+  # コミック（mime-ext が application/cbr にマッピング）
+  { mime = "application/cbr", use = ["open"] },
   # アーカイブ（MIME で判定）
   { mime = "application/zip", use = ["unzip", "extract"] },
   { mime = "application/x-tar", use = ["extract"] },
@@ -81,6 +83,14 @@ show_symlink = true
 [[plugin.prepend_preloaders]]
 name = "/mnt/synology/**"
 run = "noop"
+
+[[plugin.prepend_previewers]]
+mime = "application/pdf"
+run  = "pdf"
+
+[[plugin.prepend_previewers]]
+mime = "application/cbr"
+run  = "cbz"
 
 [[plugin.prepend_fetchers]]
 id   = "mime"
