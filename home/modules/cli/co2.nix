@@ -4,18 +4,24 @@ let
   co2read = pkgs.writers.writePython3Bin "co2read" {
     libraries = with pkgs.python3Packages; [ pyserial pandas pyarrow ];
   } ''
-    import serial, time, signal, sys
+    import signal
+    import sys
+    import time
     from datetime import date
     from pathlib import Path
+
     import pandas as pd
+    import serial
 
     DATA_DIR = Path.home() / 'co2-data'
     DATA_DIR.mkdir(exist_ok=True)
 
     buffer = []
 
+
     def parquet_path():
         return DATA_DIR / f"{date.today()}.parquet"
+
 
     def flush():
         if not buffer:
@@ -30,9 +36,11 @@ let
         print(f"  → {path.name} に {len(df)} rows", flush=True)
         buffer.clear()
 
+
     def on_exit(sig, frame):
         flush()
         sys.exit(0)
+
 
     signal.signal(signal.SIGTERM, on_exit)
     signal.signal(signal.SIGINT, on_exit)
@@ -57,7 +65,11 @@ let
             except Exception:
                 continue
             buffer.append(row)
-            print(f"CO2: {row['co2']:4d} ppm | Tmp: {row['tmp']:.1f}°C | Hum: {row['hum']:.1f}%", flush=True)
+            co2 = row['co2']
+            tmp = row['tmp']
+            hum = row['hum']
+            print(f"CO2: {co2:4d} ppm | Tmp: {tmp:.1f}°C | Hum: {hum:.1f}%",
+                  flush=True)
             if len(buffer) >= 60:
                 flush()
   '';

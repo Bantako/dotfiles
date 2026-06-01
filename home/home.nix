@@ -13,7 +13,6 @@
   };
 
   imports = [
-    ./modules/ai/bonsai.nix
     ./modules/ai/claude-code.nix
     ./modules/ai/mcp.nix
     ./modules/ai/rtk.nix
