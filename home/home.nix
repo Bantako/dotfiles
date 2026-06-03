@@ -14,6 +14,7 @@
 
   imports = [
     ./modules/ai/claude-code.nix
+    ./modules/ai/hermes.nix
     ./modules/ai/mcp.nix
     ./modules/ai/rtk.nix
     ./modules/cli/co2.nix
