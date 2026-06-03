@@ -3,7 +3,19 @@
     enable = true;
     settings.user.name = "morikawa";
     settings.user.email = "morimoriyuki552@gmail.com";
+    settings.commit.template = "~/.config/git/commit-template";
   };
+
+  home.file.".config/git/commit-template".text = ''
+    # <type>(<scope>): <日本語メッセージ>
+    #
+    # type: feat / fix / chore / docs / refactor / style / test
+    # scope: 変更対象モジュール（任意）例: ai, tools, yazi, nixos
+    #
+    # 例: feat(ai): hermes-agent を Home Manager に追加
+    #     fix(minecraft): 起動失敗を修正
+    #     chore(tools): 不要パッケージを削除
+  '';
 
   programs.delta = {
     enable = true;
