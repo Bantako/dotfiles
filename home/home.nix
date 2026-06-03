@@ -31,6 +31,7 @@
     ./modules/desktop/gtk.nix
     ./modules/desktop/stylix.nix
     ./modules/desktop/gammastep.nix
+    ./modules/desktop/fcitx5.nix
     ./modules/desktop/ghostty.nix
     ./modules/desktop/mpv.nix
     ./modules/desktop/niri.nix
