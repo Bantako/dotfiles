@@ -32,6 +32,16 @@ NixOS + Home Manager を Nix Flakes で管理した dotfiles リポジトリ。
 
 `nil` を使用（`home/modules/cli/dev.nix`）。Nix ファイル編集時は nil の補完・診断が有効。
 
+## Nix 運用方針
+
+- フォーマッタは `nixfmt`（`nixfmt-rfc-style` ではない）
+- LSP は Nix 管理に統一。Neovim の Mason は使わない
+- 外部ツール依存は原則 Nix に引き取る方針
+
+## noctalia-shell
+
+就寝時間ロックスケジューラ。`loginctl` ではなく noctalia-shell の IPC 経由でロックする（`bedtime.nix` 参照）。
+
 ## NAS
 
 `ssh nas`（192.168.0.222）。git 未インストールのため compose 管理は `nas-git` コマンド経由。ser7 の CIFS マウント `/mnt/ugreen` と SSH の `~/services` / `~/data` は別パス——NAS 上のファイル操作は必ず `ssh nas` 経由で行う。
