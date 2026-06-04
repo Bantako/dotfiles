@@ -79,6 +79,18 @@ yaml 設定の minimal UI ダッシュボード。port 3001。
 
 `lzd` エイリアス（`DOCKER_HOST=ssh://nas lazydocker`）で NAS コンテナを TUI 管理。ssh 鍵認証済み。
 
+#### Backblaze B2 バックアップ (restic) `[完了]`
+
+NAS 全体の off-site バックアップ。restic + B2 の NAS コンテナ構成。
+
+**構成**: `~/services/backup/` に compose.yaml + scripts/。alpine コンテナが毎朝 3 時に実行。
+**対象**: photos/immich・music・documents・paperless・projects・backup/settings・Immich PostgreSQL dump
+**ステータス表示**: darkhttpd（port 8090）で status JSON 配信 → homepage customapi widget
+**スナップショット保持**: 日次 7・週次 4・月次 6
+**コスト**: ~$1.42/月（237GB）、上限 $10/月設定済み
+
+**写真整理**: Takeout を immich-go `--include-unmatched` でインポート完了。MobileBackup / PhotoLibrary / Takeout を `archive/photos/` に移動。
+
 #### borg Phase 2 — healthchecks heartbeat `[保留]`
 
 Phase 1（OnFailure → noctalia 通知）は完了済み。Phase 2 は「**そもそも実行されてない**」を検知する逆向きの補完。
@@ -191,3 +203,10 @@ base16 Dracula で全アプリ統一済み（2026-05-30）。ghostty / GTK / fuz
 | yazi | PDF / CBZ / CBR プレビュー (pdf.yazi / cbz.yazi、poppler-utils + bsdtar + imagemagick) | 90f3d75 |
 | パッケージ | amdgpu_top 追加（GPU TUI 欠落補完） | 685aa56 |
 | パッケージ | iftop / iotop-c 削除（btm で代替） | 2522aef |
+
+2026-06-04 sprint:
+
+| 領域 | 内容 | commit |
+|---|---|---|
+| NAS バックアップ | Backblaze B2 契約・restic コンテナ・毎日 3 時スケジュール・homepage widget | NAS deploy (2026-06-04) |
+| NAS 写真整理 | Takeout を immich-go で完全インポート・archive/photos に移動 | NAS (2026-06-04) |
