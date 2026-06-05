@@ -6,7 +6,8 @@ let
     DEEPSEEK_API_KEY = "/run/secrets/deepseek_api_key";
     RAINDROP_TOKEN   = "/run/secrets/raindrop_token";
     PAPERLESS_TOKEN  = "/run/secrets/paperless_token";
-    IMMICH_TOKEN     = "/run/secrets/immich_token";
+    IMMICH_TOKEN         = "/run/secrets/immich_token";
+    OPENROUTER_API_KEY   = "/run/secrets/openrouter_api_key";
   };
 in {
   home.packages = [ pkgs.sheldon ];
