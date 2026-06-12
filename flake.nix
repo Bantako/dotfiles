@@ -31,33 +31,48 @@
     };
   };
 
-  outputs = inputs: {
-    nixosConfigurations = {
-      nixos = inputs.nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          ./nixos/hosts/ser7/default.nix
-          inputs.sops-nix.nixosModules.sops
-        ];
-        specialArgs = {
-          inherit inputs;
-        };
+  outputs = inputs:
+    let
+      # ghostty 1.3.1: setCursorLocation に 1x1px ではなくセル全体を渡すパッチ
+      # imePoint() が返す y はセル下端なので top-left 基準に戻し、height も実セル高さにする。
+      # Niri が候補窓を画面上端に反転したとき入力行を覆わなくなる。
+      ghosttyImeOverlay = final: prev: {
+        ghostty = prev.ghostty.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [
+            ./patches/ghostty-ime-cursor-rect.patch
+          ];
+        });
       };
-    };
-    homeConfigurations = {
-      "morikawa@nixos" = inputs.home-manager.lib.homeManagerConfiguration {
-        pkgs = import inputs.nixpkgs {
+    in
+    {
+      nixosConfigurations = {
+        nixos = inputs.nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
-          config.allowUnfree = true;
+          modules = [
+            ./nixos/hosts/ser7/default.nix
+            inputs.sops-nix.nixosModules.sops
+            { nixpkgs.overlays = [ ghosttyImeOverlay ]; }
+          ];
+          specialArgs = {
+            inherit inputs;
+          };
         };
-        extraSpecialArgs = {
-          inherit inputs;
+      };
+      homeConfigurations = {
+        "morikawa@nixos" = inputs.home-manager.lib.homeManagerConfiguration {
+          pkgs = import inputs.nixpkgs {
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = [ ghosttyImeOverlay ];
+          };
+          extraSpecialArgs = {
+            inherit inputs;
+          };
+          modules = [
+            ./home/home.nix
+            inputs.stylix.homeModules.stylix
+          ];
         };
-        modules = [
-          ./home/home.nix
-          inputs.stylix.homeModules.stylix
-        ];
       };
     };
-  };
 }

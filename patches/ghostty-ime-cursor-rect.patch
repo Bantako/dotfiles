@@ -1,0 +1,34 @@
+From: morikawa <morimoriyuki552@gmail.com>
+Subject: [PATCH] fix(gtk): report full cell rect to IM context setCursorLocation
+
+Wayland compositors (e.g. Niri) use the cursor rectangle reported via
+text-input-v3 to place the IME candidate popup. When the popup would
+overflow below the screen edge, Niri flips it above the anchor rect.
+
+Previously ghostty reported a 1x1 px rect whose origin is the *bottom*
+of the cursor cell. On flip, the popup's lower edge aligns with the
+cell's bottom, covering the line being typed.
+
+Fix: pass the full cell rectangle (top-left origin + cell dimensions)
+so that on upward flip the popup sits above the current line.
+
+---
+ src/apprt/gtk/class/surface.zig | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/apprt/gtk/class/surface.zig b/src/apprt/gtk/class/surface.zig
+--- a/src/apprt/gtk/class/surface.zig
++++ b/src/apprt/gtk/class/surface.zig
+@@ -1232,9 +1232,9 @@ fn keyPressedSignalGtk(widget: *gtk.Widget, keyval: c.guint, keycode: c.guint,
+             if (priv.core_surface) |surface| {
+                 const ime_point = surface.imePoint();
+                 priv.im_context.as(gtk.IMContext).setCursorLocation(&.{
+                     .f_x = @intFromFloat(ime_point.x),
+-                    .f_y = @intFromFloat(ime_point.y),
+-                    .f_width = 1,
+-                    .f_height = 1,
++                    .f_y = @intFromFloat(ime_point.y - ime_point.height),
++                    .f_width = @intFromFloat(@max(1.0, ime_point.width)),
++                    .f_height = @intFromFloat(ime_point.height),
+                 });
+             }
