@@ -1,3 +1,7 @@
+# nix-ld: Python の dlopen は NIX_LD_LIBRARY_PATH を参照しないため明示的に追加
+[[ ":${LD_LIBRARY_PATH}:" != *":/run/current-system/sw/share/nix-ld/lib:"* ]] && \
+  export LD_LIBRARY_PATH="/run/current-system/sw/share/nix-ld/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
 # plugins
 eval "$(sheldon source)"
 

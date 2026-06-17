@@ -1,5 +1,11 @@
 { pkgs, ... }:
 {
+  # Python の dlopen は NIX_LD_LIBRARY_PATH を参照しないため LD_LIBRARY_PATH に追記する
+  # (sessionVariables は pipewire と競合するため extraInit で append する)
+  environment.extraInit = ''
+    export LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  '';
+
   programs.nix-ld = {
     enable = true;
     libraries = with pkgs; [
