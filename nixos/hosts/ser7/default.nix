@@ -34,6 +34,7 @@
     sddm-astronaut
     appimage-run
     gsettings-desktop-schemas
+    umu-launcher
   ];
 
   system.stateVersion = "26.05";
