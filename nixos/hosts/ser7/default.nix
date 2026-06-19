@@ -26,7 +26,7 @@
     inputs.niri.nixosModules.niri
   ];
 
-  networking.hostName = "nixos";
+  networking.hostName = "ser7";
 
   environment.systemPackages = with pkgs; [
     sops
