@@ -42,6 +42,26 @@ in {
     requires = [ "mnt-ugreen.mount" ];
     after = [ "mnt-ugreen.mount" ];
     unitConfig.OnFailure = [ "borg-notify-failure.service" ];
+    environment.BORG_RELOCATED_REPO_ACCESS_IS_OK = "yes";
+  };
+
+  systemd.services.obsidian-rsync = {
+    description = "Obsidian vault rsync to NAS";
+    requires = [ "mnt-ugreen.mount" ];
+    after = [ "mnt-ugreen.mount" ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "morikawa";
+      ExecStart = "${pkgs.rsync}/bin/rsync -a --delete --copy-links /home/morikawa/Obsidian/main-vault/ /mnt/ugreen/data/obsidian/main-vault/";
+    };
+  };
+
+  systemd.timers.obsidian-rsync = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "hourly";
+      Persistent = true;
+    };
   };
 
   systemd.services.borg-notify-failure = {
