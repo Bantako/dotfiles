@@ -3,6 +3,11 @@
 {
   networking.networkmanager.enable = true;
 
+  services.logind.settings.Login = {
+    IdleAction = "ignore";
+    IdleActionSec = 0;
+  };
+
   services.tailscale.enable = true;
 
   services.syncthing = {
