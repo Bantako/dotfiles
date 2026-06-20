@@ -46,7 +46,7 @@
     in
     {
       nixosConfigurations = {
-        nixos = inputs.nixpkgs.lib.nixosSystem {
+        ser7 = inputs.nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./nixos/hosts/ser7/default.nix
@@ -59,7 +59,7 @@
         };
       };
       homeConfigurations = {
-        "morikawa@nixos" = inputs.home-manager.lib.homeManagerConfiguration {
+        "morikawa@ser7" = inputs.home-manager.lib.homeManagerConfiguration {
           pkgs = import inputs.nixpkgs {
             system = "x86_64-linux";
             config.allowUnfree = true;
