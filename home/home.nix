@@ -5,6 +5,7 @@
     homeDirectory = "/home/${username}";
     stateVersion = "26.05";
     sessionPath = [ "${homeDirectory}/.local/bin" ];
+    sessionVariables.NIXOS_OZONE_WL = "1";
   };
   programs.home-manager.enable = true;
   programs.nh = {
