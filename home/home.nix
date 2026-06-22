@@ -26,6 +26,7 @@
     ./modules/cli/gpg.nix
     ./modules/cli/neovim.nix
     ./modules/cli/tools.nix
+    ./modules/cli/calendar.nix
     ./modules/cli/vimiv.nix
     ./modules/cli/yazi.nix
     ./modules/desktop/apps.nix
