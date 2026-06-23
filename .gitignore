@@ -1,9 +1,6 @@
 # NAS サービス設定の実環境ファイル（シークレット含む）
 home/modules/nas/**/.env
 
-# カレンダー同期設定（パスワード含む）
-home/modules/cli/calendar.nix
-
 # 作業中ファイル
 result
 docs/analysis.md

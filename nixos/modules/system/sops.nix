@@ -23,6 +23,7 @@ in {
       borg_passphrase = { mode = "0400"; };
       ntfy_url = { mode = "0444"; };
       radicale_password = userReadable // { path = "/run/secrets/radicale-password"; };
+      paperless_admin_password = userReadable // { };
     };
   };
 }
