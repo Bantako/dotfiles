@@ -5,6 +5,11 @@ let
       ${config.home.homeDirectory}/.dotfiles/home/modules/cli/scripts/raindrop-to-daily.py \
       "$@"
   '';
+  gitadora-tool = pkgs.writeShellScriptBin "gitadora-tool" ''
+    exec ${pkgs.python3.withPackages (p: [p.pyside6])}/bin/python3 \
+      ${config.home.homeDirectory}/Projects/gitadora-wiki/tool/main.py \
+      "$@"
+  '';
 in {
   xdg.configFile."ov/config.yaml".source = ./ov.yaml;
   xdg.configFile."yt-dlp/config".text = ''
@@ -13,6 +18,7 @@ in {
 
   home.packages = with pkgs; [
     raindrop-to-daily
+    gitadora-tool
     # 基本CLIツール
     uutils-coreutils-noprefix  # GNU coreutils の Rust 代替（同名コマンドで上書き）
     bottom
