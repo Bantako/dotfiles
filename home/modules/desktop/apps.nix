@@ -35,6 +35,7 @@
         "--set JDK_JAVA_OPTIONS -Dorg.lwjgl.glfw.libname=${pkgs.glfw3-minecraft}/lib/libglfw.so"
       ];
     }))                # Minecraft: headless JDK + Wayland GLFW で起動
+    feishin             # Navidrome / Jellyfin クライアント
     slack
     spotify
 
