@@ -23,10 +23,13 @@
   networking.firewall = rec {
     enable = true;
     trustedInterfaces = ["tailscale0"];
-    allowedUDPPorts = [ config.services.tailscale.port ];
+    allowedUDPPorts = [ config.services.tailscale.port 53317 ];
 
     # kdeconnect
     allowedTCPPortRanges = [ { from = 1714; to = 1764; } ];
     allowedUDPPortRanges = allowedTCPPortRanges;
+
+    # localsend (LAN file transfer, mDNS discovery + data)
+    allowedTCPPorts = [ 53317 ];
   };
 }
