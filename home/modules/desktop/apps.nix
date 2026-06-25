@@ -49,6 +49,10 @@
     protonup-qt        # GE-Proton等カスタムProton導入GUI
     protontricks       # Proton prefixにwinetricksを当てる
 
+    # ファイル交換
+    localsend           # LAN内アドホックファイル転送（AirDrop代替、スマホ⇔PC）
+    jocalsend           # LocalSend CLI（端末からファイルを投げる用）
+
     # その他
     featherpad         # 汎用GUIテキストエディタ（コード=nvim、ノート=Obsidian の枠外用）
   ];
