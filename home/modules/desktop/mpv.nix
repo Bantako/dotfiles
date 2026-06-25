@@ -13,8 +13,22 @@
 
       # 音量
       volume-max = 150;
-      af = "loudnorm";  # ラウドネス正規化（ファイル間の音量差をならす）
+      af = "dynaudnorm=g=5:f=250:r=0.9:p=0.5";  # 単パスリアルタイム。軽い
+
+      # ReplayGain: タグがあればそちらを優先
+      replaygain = "track";
+      replaygain-clip = "no";
+      replaygain-fallback = -3;
     };
+    profiles = {
+      "audio-only" = {
+        "profile-cond" = "audio and not video";
+        vo = "null";
+      };
+    };
+    scripts = with pkgs.mpvScripts; [
+      mpris  # デスクトップメディアキー/通知連携
+    ];
     bindings = {
       # シーク
       h = "seek -5";
