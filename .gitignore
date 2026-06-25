@@ -1,6 +1,9 @@
 # NAS サービス設定の実環境ファイル（シークレット含む）
 home/modules/nas/**/.env
 
+# Claude Code 作業用
+.claude/worktrees/
+
 # 作業中ファイル
 result
 docs/analysis.md
