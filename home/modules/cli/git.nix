@@ -3,6 +3,7 @@
     enable = true;
     settings.user.name = "morikawa";
     settings.user.email = "morimoriyuki552@gmail.com";
+    settings.init.defaultBranch = "main";
     settings.commit.template = "~/.config/git/commit-template";
   };
 
