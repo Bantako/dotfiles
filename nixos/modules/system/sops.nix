@@ -18,6 +18,7 @@ in {
       todoist_api_token = userReadable // { path = "/run/secrets/todoist-api-token"; };
       paperless_token = userReadable // { };
       immich_token = userReadable // { };
+      wger_api_token = userReadable // { };
       openrouter_api_key = userReadable // { };
       discord_bot_token = userReadable // { };
       borg_passphrase = { mode = "0400"; };
