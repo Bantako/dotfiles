@@ -19,6 +19,7 @@ in {
       paperless_token = userReadable // { };
       immich_token = userReadable // { };
       wger_api_token = userReadable // { };
+      jelu_api_token = userReadable // { };
       openrouter_api_key = userReadable // { };
       discord_bot_token = userReadable // { };
       borg_passphrase = { mode = "0400"; };
