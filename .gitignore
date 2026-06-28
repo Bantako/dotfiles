@@ -3,6 +3,7 @@ home/modules/nas/**/.env
 
 # Claude Code 作業用
 .claude/worktrees/
+.claude/*.lock
 
 # 作業中ファイル
 result

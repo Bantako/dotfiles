@@ -13,6 +13,8 @@
     inputs.niri.packages.${pkgs.stdenv.hostPlatform.system}.niri-unstable
   ];
 
+  security.pam.services.sddm.enableGnomeKeyring = true;
+
   services.xserver.enable = true;
 
   services.xserver.xkb = {
