@@ -10,4 +10,9 @@ let
 in
 {
   home.packages = [ herdrPkg ];
+
+  xdg.configFile."herdr/config.toml".text = ''
+    [experimental]
+    kitty_graphics = true
+  '';
 }
