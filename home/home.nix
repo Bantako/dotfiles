@@ -16,6 +16,7 @@
   imports = [
     ./modules/ai/claude-code.nix
     ./modules/ai/herdr.nix
+    ./modules/ai/hermes-webui.nix
     ./modules/ai/hermes.nix
     ./modules/ai/mcp.nix
     ./modules/ai/rtk.nix
