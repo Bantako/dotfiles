@@ -1,0 +1,20 @@
+--- a/src/detect/mod.rs
++++ b/src/detect/mod.rs
+@@ -142,7 +142,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
+     let name = normalized_agent_lookup_name(process_name);
+     // Match against known binary names
+     match name.as_str() {
+         "pi" => Some(Agent::Pi),
+-        "claude" | "claude-code" => Some(Agent::Claude),
++        "claude" | "claude-code" | ".claude-unwrapped" => Some(Agent::Claude),
+         "codex" => Some(Agent::Codex),
+         "gemini" => Some(Agent::Gemini),
+         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+@@ -610,6 +610,7 @@ mod tests {
+         assert_eq!(identify_agent("pi"), Some(Agent::Pi));
+         assert_eq!(identify_agent("claude"), Some(Agent::Claude));
+         assert_eq!(identify_agent("claude-code"), Some(Agent::Claude));
++        assert_eq!(identify_agent(".claude-unwrapped"), Some(Agent::Claude));
+         assert_eq!(identify_agent("codex"), Some(Agent::Codex));
+         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
+         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
