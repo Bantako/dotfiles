@@ -1,0 +1,105 @@
+--- a/tools/approval.py	1970-01-01 09:00:01.000000000 +0900
++++ b/tools/approval.py	2026-06-30 13:36:13.058915015 +0900
+@@ -12,7 +12,9 @@
+ import fnmatch
+ import logging
+ import os
++from pathlib import Path
+ import re
++import shlex
+ import sys
+ import threading
+ import time
+@@ -881,6 +883,82 @@
+     return False
+ 
+ 
++_SAFE_TMP_DELETE_ROOTS = (Path("/tmp"), Path("/var/tmp"))
++_SAFE_TMP_DELETE_GLOB_CHARS = set("*?[]{}")
++
++
++def _is_safe_tmp_recursive_delete(command: str) -> bool:
++    """Return True for tightly-scoped recursive deletes under temp dirs.
++
++    This is a narrow approval-bypass for agent scratch cleanup such as
++    ``rm -rf /tmp/hermes-abc123``. It intentionally rejects shell operators,
++    globs, relative paths, temp roots themselves, and paths whose resolved
++    parent chain escapes /tmp or /var/tmp.
++    """
++    command = (command or "").strip()
++    if not command or _has_allowlist_shell_operator(command):
++        return False
++
++    try:
++        argv = shlex.split(command, posix=True)
++    except ValueError:
++        return False
++
++    if len(argv) < 3 or Path(argv[0]).name != "rm":
++        return False
++
++    recursive = False
++    targets: list[str] = []
++    parsing_options = True
++    for arg in argv[1:]:
++        if parsing_options and arg == "--":
++            parsing_options = False
++            continue
++        if parsing_options and arg.startswith("--"):
++            if arg == "--recursive":
++                recursive = True
++                continue
++            if arg == "--force":
++                continue
++            return False
++        if parsing_options and arg.startswith("-") and arg != "-":
++            flags = arg[1:]
++            if not flags or any(ch not in "rf" for ch in flags):
++                return False
++            if "r" in flags:
++                recursive = True
++            continue
++        parsing_options = False
++        targets.append(arg)
++
++    if not recursive or not targets:
++        return False
++
++    roots: list[Path] = []
++    for root in _SAFE_TMP_DELETE_ROOTS:
++        try:
++            roots.append(root.resolve(strict=False))
++        except OSError:
++            roots.append(root)
++
++    for target in targets:
++        if any(ch in target for ch in _SAFE_TMP_DELETE_GLOB_CHARS):
++            return False
++        raw_path = Path(target).expanduser()
++        if not raw_path.is_absolute():
++            return False
++        try:
++            resolved = raw_path.resolve(strict=False)
++        except OSError:
++            return False
++        if any(resolved == root for root in roots):
++            return False
++        if not any(root in resolved.parents for root in roots):
++            return False
++
++    return True
++
++
+ 
+ # =========================================================================
+ # Config persistence for permanent allowlist
+@@ -1509,6 +1587,9 @@
+     if _command_matches_permanent_allowlist(command):
+         return {"approved": True, "message": None}
+ 
++    if _is_safe_tmp_recursive_delete(command):
++        return {"approved": True, "message": None}
++
+     is_cli = env_var_enabled("HERMES_INTERACTIVE")
+     is_gateway = _is_gateway_approval_context()
+     is_ask = env_var_enabled("HERMES_EXEC_ASK")

@@ -1,8 +1,12 @@
-{ pkgs, config, inputs, ... }:
+{
+  pkgs,
+  config,
+  inputs,
+  ...
+}:
 
 let
-  system = pkgs.stdenv.hostPlatform.system;
-  hermesPkg = inputs.hermes-agent.packages.${system}.full;
+  hermesPkg = import ./hermes-package.nix { inherit pkgs inputs; };
   # WebUI bootstrap.py は「同じPythonでWebUI依存 + Hermes Agentをimportできること」を要求する。
   # HermesのNix venvには pyyaml / cryptography / run_agent が揃っているので、これを明示的に使わせる。
   hermesPython = "${hermesPkg.passthru.hermesVenv}/bin/python3";
@@ -13,7 +17,8 @@ let
     rev = "3b120e70cc887f6099c52f32cf0cbe6ce5b857e0";
     hash = "sha256-lRbBgaQWMnqST11BLxvxQpdZZ1hwWDl4W/PkqDgYAtw=";
   };
-in {
+in
+{
   systemd.user.services.hermes-webui = {
     Unit = {
       Description = "Hermes WebUI (nesquena)";
@@ -42,7 +47,7 @@ in {
         fi
 
         # ---- env ----
-        # Bind all interfaces; NixOS firewall only exposes this over tailscale0.
+        # Bind all interfaces so other machines can access it directly; Tailscale Serve also exposes HTTPS.
         export HERMES_WEBUI_HOST="0.0.0.0"
         export HERMES_WEBUI_PORT="8787"
         export HERMES_WEBUI_STATE_DIR="$STATE_DIR"
@@ -58,7 +63,7 @@ in {
       Restart = "on-failure";
       RestartSec = "15s";
 
-      # Network exposure is controlled by the NixOS firewall (tailscale0 only).
+      # Direct network exposure is controlled by the NixOS firewall; HTTPS is handled by Tailscale Serve.
       PrivateTmp = true;
     };
 

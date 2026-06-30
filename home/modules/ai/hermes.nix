@@ -1,9 +1,9 @@
 { pkgs, inputs, ... }:
 
 let
-  system = pkgs.stdenv.hostPlatform.system;
-  hermesPkg = inputs.hermes-agent.packages.${system}.full;
-in {
+  hermesPkg = import ./hermes-package.nix { inherit pkgs inputs; };
+in
+{
   home.packages = [ hermesPkg ];
 
   systemd.user.services.hermes-discord = {
