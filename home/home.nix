@@ -1,4 +1,9 @@
-{inputs, config, pkgs, ...}:
+{
+  inputs,
+  config,
+  pkgs,
+  ...
+}:
 {
   home = rec {
     username = "morikawa";
@@ -14,6 +19,7 @@
   };
 
   imports = [
+    ./modules/ai/beszel-agent.nix
     ./modules/ai/claude-code.nix
     ./modules/ai/herdr.nix
     ./modules/ai/hermes-webui.nix
@@ -41,7 +47,7 @@
     ./modules/desktop/niri.nix
     ./modules/desktop/bedtime.nix
     ./modules/desktop/noctalia.nix
-./modules/desktop/xdg.nix
+    ./modules/desktop/xdg.nix
     ./modules/desktop/xremap.nix
     ./modules/desktop/browsers.nix
     ./modules/desktop/zathura.nix
@@ -51,7 +57,6 @@
     ./modules/shell/ssh.nix
     ./modules/shell/zsh.nix
   ];
-
 
   services.kdeconnect = {
     enable = true;
