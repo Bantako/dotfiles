@@ -23,6 +23,7 @@ in {
       lanraragi_api_token = userReadable // { };
       openrouter_api_key = userReadable // { };
       discord_bot_token = userReadable // { };
+      pavlok_api_key = userReadable // { };
       borg_passphrase = { mode = "0400"; };
       ntfy_url = { mode = "0444"; };
       radicale_password = userReadable // { path = "/run/secrets/radicale-password"; };

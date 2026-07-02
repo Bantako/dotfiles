@@ -45,6 +45,7 @@
     ./modules/desktop/ghostty.nix
     ./modules/desktop/mpv.nix
     ./modules/desktop/niri.nix
+    ./modules/desktop/pavlok.nix
     ./modules/desktop/bedtime.nix
     ./modules/desktop/noctalia.nix
     ./modules/desktop/xdg.nix
