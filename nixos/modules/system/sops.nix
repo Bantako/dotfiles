@@ -24,6 +24,7 @@ in {
       openrouter_api_key = userReadable // { };
       discord_bot_token = userReadable // { };
       pavlok_api_key = userReadable // { };
+      iris_news_miniflux_api_token = userReadable // { };
       borg_passphrase = { mode = "0400"; };
       ntfy_url = { mode = "0444"; };
       radicale_password = userReadable // { path = "/run/secrets/radicale-password"; };
