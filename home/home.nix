@@ -25,6 +25,7 @@
     ./modules/ai/hermes-webui.nix
     ./modules/ai/hermes.nix
     ./modules/ai/mcp.nix
+    ./modules/ai/opencode.nix
     ./modules/ai/rtk.nix
     ./modules/cli/co2.nix
     ./modules/cli/bat.nix
