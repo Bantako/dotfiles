@@ -21,6 +21,7 @@
     ../../modules/system/ssh.nix
     ../../modules/system/fail2ban.nix
     ../../modules/system/backup.nix
+    ../../modules/system/iris-news.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri
