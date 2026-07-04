@@ -2,6 +2,10 @@
 
 {
   networking.networkmanager.enable = true;
+  # tailscaled が systemd-resolved に直接 DNS を設定するため、NetworkManager が
+  # tailscale0 を "external" 接続として二重管理すると major link change のたびに
+  # DNS 設定が競合し MagicDNS が壊れる (tailscaled ログの nm-safe=no はこの非互換を示す)。
+  networking.networkmanager.unmanaged = [ "interface-name:tailscale0" ];
 
   services.logind.settings.Login = {
     IdleAction = "ignore";
