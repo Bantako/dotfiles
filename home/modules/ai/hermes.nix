@@ -19,10 +19,11 @@ in
         export GATEWAY_ALLOW_ALL_USERS=true
         export DISCORD_ALLOWED_USERS=383918836014907393
         export DISCORD_HOME_CHANNEL=1513925087105912904
-        exec ${hermesPkg}/bin/hermes gateway run
+        exec ${hermesPkg}/bin/hermes gateway run --replace
       '';
       Restart = "on-failure";
       RestartSec = "15s";
+      TimeoutStopSec = "210s";
     };
     Install.WantedBy = [ "default.target" ];
   };
