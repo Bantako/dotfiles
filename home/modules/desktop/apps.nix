@@ -2,13 +2,13 @@
 
 let
   feishinWithSecretStore = pkgs.symlinkJoin {
-    name = "feishin-gnome-libsecret";
+    name = "feishin-basic-text";
     paths = [ pkgs.feishin ];
     nativeBuildInputs = [ pkgs.makeWrapper ];
     postBuild = ''
       rm "$out/bin/feishin"
       makeWrapper ${pkgs.feishin}/bin/feishin "$out/bin/feishin" \
-        --add-flags "--password-store=gnome-libsecret"
+        --add-flags "--password-store=basic_text"
       rm "$out/share/applications/feishin.desktop"
       cp ${pkgs.feishin}/share/applications/feishin.desktop "$out/share/applications/feishin.desktop"
       substituteInPlace "$out/share/applications/feishin.desktop" \
