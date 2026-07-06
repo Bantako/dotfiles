@@ -21,6 +21,8 @@
 
     script = ''
       export IRIS_NEWS_MINIFLUX_API_TOKEN="$(cat /run/secrets/iris_news_miniflux_api_token)"
+      export IRIS_NEWS_LLM_BASE_URL="$(cat /run/secrets/iris_news_llm_base_url)"
+      export IRIS_NEWS_LLM_API_KEY="$(cat /run/secrets/iris_news_llm_api_key)"
       exec ${pkgs.uv}/bin/uv run python -m iris_news build-daily \
         --miniflux-base-url http://dxp2800-ad69.taild4ba88.ts.net:8084 \
         --refresh --ingest \

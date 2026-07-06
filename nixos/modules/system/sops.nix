@@ -25,6 +25,8 @@ in {
       discord_bot_token = userReadable // { };
       pavlok_api_key = userReadable // { };
       iris_news_miniflux_api_token = userReadable // { };
+      iris_news_llm_base_url = userReadable // { };
+      iris_news_llm_api_key = userReadable // { };
       borg_passphrase = { mode = "0400"; };
       ntfy_url = { mode = "0444"; };
       radicale_password = userReadable // { path = "/run/secrets/radicale-password"; };
