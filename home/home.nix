@@ -22,6 +22,7 @@
     ./modules/ai/beszel-agent.nix
     ./modules/ai/claude-code.nix
     ./modules/ai/herdr.nix
+    ./modules/ai/hermes-backup.nix
     ./modules/ai/hermes-webui.nix
     ./modules/ai/hermes.nix
     ./modules/ai/mcp.nix
