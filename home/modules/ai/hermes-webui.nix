@@ -22,8 +22,8 @@ in
   systemd.user.services.hermes-webui = {
     Unit = {
       Description = "Hermes WebUI (nesquena)";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
+      # network-online.target は user インスタンスに存在しない (指定しても無視される)。
+      # WebUI はローカル bind なので起動時のネットワーク待ちは不要。
       StartLimitIntervalSec = 120;
       StartLimitBurst = 3;
     };
@@ -47,8 +47,8 @@ in
         fi
 
         # ---- env ----
-        # Bind all interfaces so other machines can access it directly; Tailscale Serve also exposes HTTPS.
-        export HERMES_WEBUI_HOST="0.0.0.0"
+        # Loopback bind: 外部アクセスは Tailscale Serve (443/HTTPS) 経由に一本化。
+        export HERMES_WEBUI_HOST="127.0.0.1"
         export HERMES_WEBUI_PORT="8787"
         export HERMES_WEBUI_STATE_DIR="$STATE_DIR"
         export HERMES_WEBUI_SKIP_ONBOARDING=1
@@ -63,7 +63,11 @@ in
       Restart = "on-failure";
       RestartSec = "15s";
 
-      # Direct network exposure is controlled by the NixOS firewall; HTTPS is handled by Tailscale Serve.
+      # ピーク 8.9GB を観測したため制限。MemoryHigh で絞り、MemoryMax は暴走時の最終防壁。
+      MemoryHigh = "4G";
+      MemoryMax = "6G";
+
+      # HTTPS/外部公開は Tailscale Serve が担う (WebUI 自体は loopback のみ)。
       PrivateTmp = true;
     };
 
