@@ -16,11 +16,67 @@ let
     STAGE="$(mktemp -d)"
     trap 'rm -rf "$STAGE"' EXIT
 
+    # ~/.hermes のテキスト設定 (config.yaml / SOUL.md / skills 等) を etckeeper 方式で
+    # ローカル git に自動コミットする。エージェント自身が設定を書き換えるため、
+    # 「いつ何が変わったか」の履歴と破損時の復元点を確保する。.git ごと NAS に同期される。
+    # 除外は .gitignore ではなく .git/info/exclude で管理する
+    # (home-manager の symlink .gitignore は git が読まないため)。
+    GIT="${pkgs.git}/bin/git -C ${hermesDir}"
+    [ -d "${hermesDir}/.git" ] || $GIT init --quiet
+    cat > "${hermesDir}/.git/info/exclude" <<'EOF'
+    # secrets — 絶対にコミットしない
+    auth.json
+    .env
+    # SQLite / バイナリ状態
+    state.db*
+    kanban.db*
+    *.lock
+    *.pid
+    # キャッシュ・churn の大きい実行時データ
+    logs/
+    cache/
+    audio_cache/
+    image_cache/
+    sandboxes/
+    bin/
+    lsp/
+    pastes/
+    sessions/
+    webui/
+    gateway/
+    kanban/
+    pairing/
+    cost-snapshots/
+    cron/output/
+    plugins/
+    *_cache.json
+    *cache.yaml
+    .hermes_history
+    .update_check
+    .skills_prompt_snapshot.json
+    gateway_state.json
+    processes.json
+    channel_directory.json
+    shell-hooks-allowlist.json
+    interrupt_debug.log
+    *.bak
+    *.bak.*
+    config.yaml.corrupt.*
+    config.yaml.before-*
+    EOF
+    $GIT add -A
+    if ! $GIT diff --cached --quiet; then
+      $GIT -c user.name="hermes-backup" -c user.email="hermes-backup@ser7" \
+        commit --quiet -m "auto snapshot $(date -Iseconds)"
+    fi
+
     # SQLite は書き込み中の生ファイルコピーが壊れるため .backup で整合スナップショットを取る
     ${pkgs.sqlite}/bin/sqlite3 "${hermesDir}/state.db" ".backup $STAGE/state.db"
     ${pkgs.sqlite}/bin/sqlite3 "${hermesDir}/kanban.db" ".backup $STAGE/kanban.db"
 
-    ${pkgs.gnutar}/bin/tar -C "${hermesDir}" \
+    # hermes は稼働中なので "file changed as we read it" (exit 1) は警告扱いで許容する
+    ( ${pkgs.gnutar}/bin/tar -C "${hermesDir}" \
+      --warning=no-file-changed \
       --exclude './logs' \
       --exclude './cache' \
       --exclude './audio_cache' \
@@ -33,15 +89,23 @@ let
       --exclude './models_dev_cache.json' \
       --exclude '*.lock' \
       --exclude './gateway.pid' \
-      -cf - . | ${pkgs.openssh}/bin/ssh -o BatchMode=yes nas '
+      -cf - . || [ "$?" -eq 1 ] ) | ${pkgs.openssh}/bin/ssh -o BatchMode=yes nas '
         set -e
-        rm -rf ${remoteDir}/hermes.new
+        # tar が読み取り専用ディレクトリのモードを保存するため、削除前に書き込み権限を戻す
+        for d in ${remoteDir}/hermes.new ${remoteDir}/hermes.old; do
+          if [ -d "$d" ]; then
+            chmod -R u+w "$d"
+            rm -rf "$d"
+          fi
+        done
         mkdir -p ${remoteDir}/hermes.new
         tar -xf - -C ${remoteDir}/hermes.new
-        rm -rf ${remoteDir}/hermes.old
         [ -d ${remoteDir}/hermes ] && mv ${remoteDir}/hermes ${remoteDir}/hermes.old || true
         mv ${remoteDir}/hermes.new ${remoteDir}/hermes
-        rm -rf ${remoteDir}/hermes.old
+        if [ -d ${remoteDir}/hermes.old ]; then
+          chmod -R u+w ${remoteDir}/hermes.old
+          rm -rf ${remoteDir}/hermes.old
+        fi
       '
 
     ${pkgs.gnutar}/bin/tar -C "$STAGE" -cf - . | ${pkgs.openssh}/bin/ssh -o BatchMode=yes nas '
