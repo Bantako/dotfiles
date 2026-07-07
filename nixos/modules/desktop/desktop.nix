@@ -13,7 +13,11 @@
     inputs.niri.packages.${pkgs.stdenv.hostPlatform.system}.niri-unstable
   ];
 
-  security.pam.services.sddm.enableGnomeKeyring = true;
+  # sddm の PAM は useDefaultRules = false で login を substack するだけなので、
+  # security.pam.services.sddm.enableGnomeKeyring は反映されない（no-op）。
+  # このモジュールは login サービス側に pam_gnome_keyring を追加し、
+  # SDDM ログイン時のパスワードで login キーリングを自動作成・解錠する
+  services.gnome.gnome-keyring.enable = true;
 
   services.xserver.enable = true;
 

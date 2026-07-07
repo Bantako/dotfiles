@@ -1,14 +1,18 @@
 { pkgs, ... }:
 
 let
+  # Electron 32+ は basic_text バックエンドだと safeStorage.isEncryptionAvailable()
+  # が false になり、Feishin のパスワード保存は黙って失敗する（実測済み）。
+  # niri は Chromium が未知のデスクトップなので既定でも basic_text に落ちるため、
+  # gnome-libsecret を明示。gnome-keyring の login キーリングが PAM で解錠されている前提
   feishinWithSecretStore = pkgs.symlinkJoin {
-    name = "feishin-basic-text";
+    name = "feishin-gnome-libsecret";
     paths = [ pkgs.feishin ];
     nativeBuildInputs = [ pkgs.makeWrapper ];
     postBuild = ''
       rm "$out/bin/feishin"
       makeWrapper ${pkgs.feishin}/bin/feishin "$out/bin/feishin" \
-        --add-flags "--password-store=basic_text"
+        --add-flags "--password-store=gnome-libsecret"
       rm "$out/share/applications/feishin.desktop"
       cp ${pkgs.feishin}/share/applications/feishin.desktop "$out/share/applications/feishin.desktop"
       substituteInPlace "$out/share/applications/feishin.desktop" \
