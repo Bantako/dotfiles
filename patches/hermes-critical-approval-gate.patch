@@ -1,0 +1,171 @@
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -531,6 +531,39 @@
+ ]
+ 
+ 
++# Critical tier: irreversible data destruction. Unlike DANGEROUS_PATTERNS a
++# match here can never be satisfied by yolo mode, the permanent allowlist,
++# session-scoped approval caching, or smart (LLM) approval — every occurrence
++# requires a fresh human decision. Rationale: a session approval granted for
++# `docker compose down -v` on one stack silently approved the same verb on a
++# different stack and destroyed its volumes before a backup dump had been
++# taken (wger incident, 2026-07-08).
++CRITICAL_PATTERNS = [
++    (r'\bdocker(?:-compose|\s+compose)\b[^\n;|&]*\bdown\b[^\n;|&]*(?:\s-v\b|\s--volumes\b)',
++     "docker compose down with volume deletion (-v/--volumes)"),
++    (r'\bdocker\s+volume\s+(?:rm|remove|prune)\b', "docker volume rm/prune"),
++    (r'\bdocker\s+system\s+prune\b', "docker system prune"),
++    (r'\brestic\b[^\n;|&]*\b(?:forget|prune)\b',
++     "restic forget/prune (backup snapshot deletion)"),
++    (r'\bb2(?:v[0-9]+)?\b[^\n;|&]*\bdelete',
++     "b2 delete operation (cloud backup deletion)"),
++    (r'\bdrop\s+database\b', "SQL DROP DATABASE"),
++]
++CRITICAL_PATTERNS_COMPILED = [
++    (re.compile(pattern, _RE_FLAGS), description)
++    for pattern, description in CRITICAL_PATTERNS
++]
++
++
++def detect_critical_command(command: str) -> tuple:
++    """Detect irreversible data-destroying commands (critical tier)."""
++    normalized = _normalize_command_for_detection(command)
++    for compiled, description in CRITICAL_PATTERNS_COMPILED:
++        if compiled.search(normalized):
++            return True, description
++    return False, ""
++
++
+ def _legacy_pattern_key(pattern: str) -> str:
+     """Reproduce the old regex-derived approval key for backwards compatibility."""
+     return pattern.split(r'\b')[1] if r'\b' in pattern else pattern[:20]
+@@ -1317,6 +1350,13 @@
+         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
+         return _hardline_block_result(hardline_desc)
+ 
++    # == Critical destructive floor == (same contract as
++    # check_all_command_guards: fresh human approval on every invocation)
++    is_critical, critical_desc = detect_critical_command(command)
++    if is_critical:
++        return _require_critical_approval(command, critical_desc,
++                                          approval_callback)
++
+     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
+     # CLI --yolo remains process-scoped via the env var for local use.
+     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+@@ -1545,6 +1585,78 @@
+     return {"resolved": resolved, "choice": choice}
+ 
+ 
++def _require_critical_approval(command: str, description: str,
++                               approval_callback=None) -> dict:
++    """Force a fresh, uncached human decision for a critical command.
++
++    Runs before the yolo / allowlist / session-approval bypasses. Any
++    approving choice is valid for this single invocation only ("once"
++    semantics regardless of what the UI offered), and nothing is persisted.
++    With no human approval surface available the command is denied.
++    """
++    session_key = get_current_session_key()
++    is_cli = env_var_enabled("HERMES_INTERACTIVE")
++    is_gateway = _is_gateway_approval_context()
++    is_ask = env_var_enabled("HERMES_EXEC_ASK")
++
++    denied_msg = (
++        f"BLOCKED: Critical destructive command ({description}). The user "
++        "has NOT consented to this action. Do NOT retry this command, do "
++        "NOT rephrase it, and do NOT attempt the same outcome via a "
++        "different command. Explain to the user what you wanted to run and "
++        "why, then wait for their instruction."
++    )
++    no_surface_msg = (
++        f"BLOCKED: Critical destructive command ({description}) requires "
++        "explicit human approval for every single invocation, and no "
++        "approval surface is available in this context. Do NOT retry and "
++        "do NOT attempt the same outcome via a different command."
++    )
++
++    if is_gateway or is_ask:
++        with _lock:
++            notify_cb = _gateway_notify_cbs.get(session_key)
++        if notify_cb is None:
++            logger.warning("Critical command denied (no gateway notify): %s",
++                           command[:200])
++            return {"approved": False, "message": no_surface_msg,
++                    "description": description}
++        approval_data = {
++            "command": command,
++            "pattern_key": f"critical:{description}",
++            "pattern_keys": [f"critical:{description}"],
++            "description": f"CRITICAL (approval never cached): {description}",
++            "allow_permanent": False,
++        }
++        decision = _await_gateway_decision(session_key, notify_cb,
++                                           approval_data, surface="gateway")
++        if decision.get("resolved") and decision.get("choice") in {
++                "once", "session", "always"}:
++            # Deliberately no approve_session / approve_permanent here:
++            # critical approvals never outlive the single command.
++            return {"approved": True, "message": None, "user_approved": True,
++                    "description": description}
++        return {"approved": False, "message": denied_msg,
++                "description": description, "user_consent": False}
++
++    if is_cli:
++        choice = prompt_dangerous_approval(
++            command, f"CRITICAL (approval never cached): {description}",
++            allow_permanent=False, approval_callback=approval_callback)
++        if choice in {"once", "session", "always"}:
++            # Same as above: no persistence, even if the UI offered it.
++            return {"approved": True, "message": None, "user_approved": True,
++                    "description": description}
++        return {"approved": False, "message": denied_msg,
++                "description": description, "user_consent": False}
++
++    # Non-interactive, non-gateway (cron, batch): fail closed.
++    logger.warning("Critical command denied in non-interactive context: %s",
++                   command[:200])
++    return {"approved": False, "message": no_surface_msg,
++            "description": description}
++
++
+ def check_all_command_guards(command: str, env_type: str,
+                              approval_callback=None) -> dict:
+     """Run all pre-exec security checks and return a single approval decision.
+@@ -1578,6 +1690,14 @@
+                        sudo_guess_desc, command[:200])
+         return _sudo_stdin_block_result(sudo_guess_desc)
+ 
++    # == Critical destructive floor ==
++    # Fresh human approval on EVERY invocation; applies before the yolo /
++    # allowlist / session-approval bypasses below.
++    is_critical, critical_desc = detect_critical_command(command)
++    if is_critical:
++        return _require_critical_approval(command, critical_desc,
++                                          approval_callback)
++
+     # --yolo or approvals.mode=off: bypass all approval prompts.
+     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
+     approval_mode = _get_approval_mode()
+@@ -1878,6 +1998,20 @@
+     if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+         return {"approved": True, "message": None}
+ 
++    # == Critical destructive floor ==
++    # A cached execute_code approval must not smuggle critical destructive
++    # commands past the per-invocation terminal gate above.
++    is_critical, critical_desc = detect_critical_command(code)
++    if is_critical:
++        return {
++            "approved": False,
++            "message": (
++                f"BLOCKED: execute_code script contains a critical destructive "
++                f"command ({critical_desc}). Run that command via the terminal "
++                "tool instead so it can be individually reviewed and approved."
++            ),
++        }
++
+     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
+     approval_mode = _get_approval_mode()
+     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":

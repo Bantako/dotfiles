@@ -3,9 +3,16 @@
 let
   system = pkgs.stdenv.hostPlatform.system;
   hermesSrc = pkgs.applyPatches {
-    name = "hermes-agent-safe-tmp-src";
+    name = "hermes-agent-patched-src";
     src = inputs.hermes-agent;
-    patches = [ ../../../patches/hermes-safe-tmp-deletes.patch ];
+    patches = [
+      ../../../patches/hermes-safe-tmp-deletes.patch
+      # クリティカル層: 不可逆なデータ破壊コマンド (down -v / volume rm /
+      # restic forget / b2 delete / DROP DATABASE) は毎回人間の承認必須。
+      # セッション承認・allowlist・yolo・smart approve のどれでも素通りさせない。
+      # 経緯: wger インシデント (2026-07-08, docs/report-nas-pruning-2026-07-08.md)
+      ../../../patches/hermes-critical-approval-gate.patch
+    ];
   };
   # 使う機能だけに絞る (2026-07-07 P7)。復帰候補:
   #   daytona — コンテナオーケストレーションを使い始めるなら追加
