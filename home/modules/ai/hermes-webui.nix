@@ -61,7 +61,7 @@ in
         cd "$TARGET"
         exec python3 bootstrap.py
       '';
-      Restart = "on-failure";
+      Restart = "always";
       RestartSec = "15s";
 
       # ピーク 8.9GB を観測したため制限。MemoryHigh で絞り、MemoryMax は暴走時の最終防壁。
