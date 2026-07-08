@@ -13,7 +13,7 @@ in
       # スクリプト内で実際に疎通を待つ (ブート直後や回線断からの復帰用)。
       StartLimitIntervalSec = 300;
       StartLimitBurst = 5;
-      OnFailure = [ "hermes-failure-notify.service" ];
+      OnFailure = [ "hermes-failure-notify@%N.service" ];
     };
     Service = {
       ExecStart = pkgs.writeShellScript "hermes-discord-start" ''
@@ -34,22 +34,25 @@ in
     Install.WantedBy = [ "default.target" ];
   };
 
-  systemd.user.services.hermes-failure-notify = {
+  # テンプレートユニット: OnFailure=hermes-failure-notify@%n.service で失敗ユニット名を %i に受け取る。
+  # 単一の notify.service を複数ユニットから参照すると systemd がトリガー元を特定できず
+  # (multiple trigger source candidates)、MONITOR_* が渡らないためこの形にしている。
+  systemd.user.services."hermes-failure-notify@" = {
     Unit = {
-      Description = "Notify ntfy when a hermes service fails";
+      Description = "Notify ntfy that %i failed";
     };
     Service = {
       Type = "oneshot";
-      ExecStart = pkgs.writeShellScript "hermes-failure-notify" ''
+      ExecStart = "${pkgs.writeShellScript "hermes-failure-notify" ''
+        FAILED_UNIT="$1"
         NTFY_URL="$(cat /run/secrets/ntfy_url)"
-        # $SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS are set by systemd OnFailure
         ${pkgs.curl}/bin/curl -fs --retry 3 \
-          -H "Title: Hermes service FAILED" \
+          -H "Title: ''${FAILED_UNIT} FAILED" \
           -H "Priority: urgent" \
           -H "Tags: rotating_light,hermes" \
-          -d "Hermes service failed. Result: ''${SERVICE_RESULT:-unknown} Exit: ''${EXIT_CODE:-?} / ''${EXIT_STATUS:-?}" \
+          -d "''${FAILED_UNIT} failed. Result: ''${MONITOR_SERVICE_RESULT:-unknown} Exit: ''${MONITOR_EXIT_CODE:-?} / ''${MONITOR_EXIT_STATUS:-?}" \
           "$NTFY_URL/nas-alerts" > /dev/null || true
-      '';
+      ''} %i";
     };
   };
 }

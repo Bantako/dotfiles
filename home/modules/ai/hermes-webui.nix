@@ -26,7 +26,7 @@ in
       # WebUI はローカル bind なので起動時のネットワーク待ちは不要。
       StartLimitIntervalSec = 120;
       StartLimitBurst = 3;
-      OnFailure = [ "hermes-failure-notify.service" ];
+      OnFailure = [ "hermes-failure-notify@%N.service" ];
     };
 
     Service = {
