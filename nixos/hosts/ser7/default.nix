@@ -22,6 +22,7 @@
     ../../modules/system/fail2ban.nix
     ../../modules/system/backup.nix
     ../../modules/system/iris-news.nix
+    ../../modules/system/nas-monitor-heartbeat.nix
   ]
   ++ [
     inputs.niri.nixosModules.niri

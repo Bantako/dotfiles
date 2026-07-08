@@ -13,6 +13,7 @@ in
       # スクリプト内で実際に疎通を待つ (ブート直後や回線断からの復帰用)。
       StartLimitIntervalSec = 300;
       StartLimitBurst = 5;
+      OnFailure = [ "hermes-failure-notify.service" ];
     };
     Service = {
       ExecStart = pkgs.writeShellScript "hermes-discord-start" ''
@@ -31,5 +32,24 @@ in
       TimeoutStopSec = "210s";
     };
     Install.WantedBy = [ "default.target" ];
+  };
+
+  systemd.user.services.hermes-failure-notify = {
+    Unit = {
+      Description = "Notify ntfy when a hermes service fails";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = pkgs.writeShellScript "hermes-failure-notify" ''
+        NTFY_URL="$(cat /run/secrets/ntfy_url)"
+        # $SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS are set by systemd OnFailure
+        ${pkgs.curl}/bin/curl -fs --retry 3 \
+          -H "Title: Hermes service FAILED" \
+          -H "Priority: urgent" \
+          -H "Tags: rotating_light,hermes" \
+          -d "Hermes service failed. Result: ''${SERVICE_RESULT:-unknown} Exit: ''${EXIT_CODE:-?} / ''${EXIT_STATUS:-?}" \
+          "$NTFY_URL/nas-alerts" > /dev/null || true
+      '';
+    };
   };
 }
