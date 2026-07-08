@@ -109,10 +109,9 @@ TUI クライアントは用途立証後に追加する。
 
 ### PKM軸
 
-#### FreshRSS + newsboat `[保留]`
+#### FreshRSS + newsboat `[現状維持]`
 
-NAS で FreshRSS、TUI 側で newsboat。フィード同期可。
-**立証条件**: RSS を読む習慣 / 復活動機 (GitHub release 追跡 / ブログ巡回集約 / YouTube RSS) が立つこと。現状なし。
+**Miniflux + iris-news で実質解決 (2026-06)**: NAS に Miniflux を導入し、iris-news（LLM によるフィード要約・日次ビルド + 週次購読レビュー、systemd timer）で読書フローが定着。FreshRSS/newsboat の出番はなくなった。
 関連: [[aerc / newsboat 評価]]
 
 #### Datasette + dogsheep `[現状維持]`
@@ -141,6 +140,43 @@ xremap は evdev レベル（コンポジター以前）でキーを書き換え
 ## 領域 5: 横断 — stylix `[完了]`
 
 base16 Dracula で全アプリ統一済み（2026-05-30）。ghostty / GTK / fuzzel / bat / zathura / yazi / delta が stylix 管理に移行。commit: `6d8ec5e`
+
+---
+
+## 領域 6: AI エージェント運用 (hermes / herdr)
+
+2026-06 に立ち上がった新領域。ser7 の hermes agent（Discord bot + WebUI + TUI）と herdr（エージェント多重化）が中心。詳細な経緯は `analysis-hermes-nas-2026-07-06.md` と `report-nas-pruning-2026-07-08.md` を参照。
+
+### hermes 堅牢化・セキュリティ `[完了]` (2026-07-06〜08)
+
+分析ドキュメント P1〜P17 を一気に消化。allowlist 有効化 / `~/.hermes` バックアップ + etckeeper 方式 git 管理 / WebUI loopback 化 + メモリ制限 / extras 削減 (-694MiB) / シークレット混入対応 + コミット前スキャンゲート / OnFailure→ntfy 障害通知（テンプレートユニット + 誤検知抑止）/ **クリティカル承認層**（down -v・volume rm・restic forget・b2 delete・DROP DATABASE は毎回人間承認、キャッシュ不可）。
+
+### B2 キーの deleteFiles なし再発行 `[次]`
+
+バックアップを構造的に append-only 化。wger インシデント (2026-07-08) で「エージェントのミスがバックアップに届く」リスクが実証済み。クリティカル承認層と対になる最後のピース。**人間の作業**（Backblaze コンソール）。
+
+### リストア訓練 `[次]`
+
+immich の pg_dump を実際に別 DB へ復元してみる。復元したことのないバックアップは存在確認ができていないのと同じ。
+
+### VectorChord 移行 `[保留]`
+
+immich DB (pgvecto-rs pg14) → VectorChord (pg15)。server を v2.7.5 に pin 済みで時限爆弾は停止中。手順ドラフトは `report-nas-pruning-2026-07-08.md` にあり。
+**立証条件**: immich を新バージョンに上げたくなったとき。
+
+### シークレット一本化 (SOPS → .env 生成) `[保留]`
+
+ser7 の `~/.hermes/.env` 平文と SOPS の二体系解消。キーが増えるほど効く。
+ブロッカー: なし（着手順の問題のみ）
+
+### 自前パッチの upstream PR 化 `[保留]`
+
+`hermes-safe-tmp-deletes.patch` (105行) + `hermes-critical-approval-gate.patch` (171行) を flake input に当て続けるのは更新ごとの衝突リスク。クリティカル承認層は汎用機能なので受け入れられる可能性あり。
+
+### ユビキタス化: メモ→リマインドループ `[保留]`
+
+スマホ音声入力 → Discord → hermes 構造化 → ntfy X-Delay で時間起動リマインド。入口（キャプチャ摩擦ゼロ）と出口（文脈起動デリバリー）はセットで作らないと閉じない。既存資産（Discord home channel / Todoist / khal / ntfy）だけで組める。着手時に ntfy トピックを alerts / reminders に分離すること。
+**立証条件**: 時間起動ループを 1 往復通す動機が立ったとき。
 
 ---
 
@@ -210,3 +246,29 @@ base16 Dracula で全アプリ統一済み（2026-05-30）。ghostty / GTK / fuz
 |---|---|---|
 | NAS バックアップ | Backblaze B2 契約・restic コンテナ・毎日 3 時スケジュール・homepage widget | NAS deploy (2026-06-04) |
 | NAS 写真整理 | Takeout を immich-go で完全インポート・archive/photos に移動 | NAS (2026-06-04) |
+
+2026-06 (月次ロールアップ):
+
+| 領域 | 内容 | commit |
+|---|---|---|
+| AI | hermes agent 立ち上げ (Discord bot / WebUI + Tailscale Serve / v0.17.0) | 436607a, b203156, 4eef626 他 |
+| AI | herdr 導入（エージェント多重化、Claude Code 検出 + 自前パッチ） | 112e22b, 3fe0115 他 |
+| AI | opencode 導入、ccusage 追加 | 40f5119, 7e4a1af |
+| PKM | iris-news（LLM フィード要約、日次 timer + Miniflux 連携） | 5294a58, 7627b06 他 |
+| desktop | localsend + jocalsend（LAN ファイル転送、port 53317） | 754243c, c5929aa |
+| desktop | feishin 導入 + keyring 問題の根本解決（PAM 解錠 + gnome-libsecret） | 7490cac, fe862ee |
+| desktop | vdirsyncer + khal（CalDAV 同期・CUI カレンダー）、Pavlok bedtime | 9b9498a, dd0717d |
+| system | tailscale0 を NM 管理から除外（MagicDNS 破損修正）、Beszel agent | b70bf1a, 97c9837 |
+
+2026-07-06〜08 sprint (hermes/NAS 集中改善):
+
+| 領域 | 内容 | commit |
+|---|---|---|
+| AI 分析 | hermes / NAS 横断分析 (P1〜P17) → ほぼ全消化 | analysis-hermes-nas-2026-07-06.md |
+| AI security | GATEWAY_ALLOW_ALL_USERS 削除・WebUI loopback 化・extras -694MiB | e3b01b4, b2ba29c, 93ac66c |
+| AI backup | ~/.hermes → NAS 毎晩同期 + etckeeper 方式 git 管理 + シークレットスキャンゲート | 94cc5de, 8197832, 2789f35 |
+| AI 監視 | OnFailure→ntfy 障害通知（テンプレートユニット化・配信バグ修正）+ NAS heartbeat | 4fbcc7d, 452631d, da3ea72 |
+| AI guard | クリティカル承認層（破壊的動詞は毎回人間承認・キャッシュ不可） | de735d6 |
+| NAS 監視 | monitor スタック新設（unhealthy/exited 検出 → nas-alerts、状態変化時のみ） | NAS deploy (2026-07-07) |
+| NAS pruning | filebrowser / adguardhome / glances / wger 削除（**wger DB 喪失インシデント**あり） | report-nas-pruning-2026-07-08.md |
+| NAS 再現性 | immich v2.7.5 / paperless 2.20.15 / miniflux 2.3.1 に pin（:latest 廃止） | 同上 |
