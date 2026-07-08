@@ -45,13 +45,21 @@ in
       Type = "oneshot";
       ExecStart = "${pkgs.writeShellScript "hermes-failure-notify" ''
         FAILED_UNIT="$1"
-        NTFY_URL="$(cat /run/secrets/ntfy_url)"
+        # hermes は SIGTERM で exit 1 するため、restart やリビルドでも一瞬 failed になる。
+        # 猶予期間 (RestartSec=30s より長め) 待って復帰していれば通知しない。
+        # 「落ちて、落ちたまま」(StartLimit 到達・手動停止) のときだけ鳴らす。
+        sleep 45
+        state="$(systemctl --user is-active "$FAILED_UNIT" 2>/dev/null || true)"
+        case "$state" in active|activating) exit 0 ;; esac
+        # /run/secrets/ntfy_url はトピック込み URL (hermes 用) なので使わない。
+        # nas-alerts へはベース URL 直書き (nas-monitor-heartbeat.nix と同じ方式)。
         ${pkgs.curl}/bin/curl -fs --retry 3 \
           -H "Title: ''${FAILED_UNIT} FAILED" \
           -H "Priority: urgent" \
           -H "Tags: rotating_light,hermes" \
           -d "''${FAILED_UNIT} failed. Result: ''${MONITOR_SERVICE_RESULT:-unknown} Exit: ''${MONITOR_EXIT_CODE:-?} / ''${MONITOR_EXIT_STATUS:-?}" \
-          "$NTFY_URL/nas-alerts" > /dev/null || true
+          http://192.168.0.222:8080/nas-alerts > /dev/null \
+          || echo "ntfy notify failed for ''${FAILED_UNIT}" >&2
       ''} %i";
     };
   };
