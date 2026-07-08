@@ -35,6 +35,8 @@ hermes ソースで裏取りした結果、このフラグは **allowlist より
 
 実装メモ: home-manager の symlink `.gitignore` は git が読まない(too many levels of symbolic links)ため、除外は `.git/info/exclude` で管理する。
 
+**追記 (2026-07-08)**: skill 文書 2 件に実シークレット(radicale パスワード / raindrop トークン)が平文で書かれているのを発見。skill から除去し(実値は sops / claude MCP 設定に保存済み)、git 履歴を再作成、コミット前のシークレットスキャンゲートを追加した(検出時はコミット拒否 + ntfy 警告)。B2 へは汚染履歴が同期される前に対処完了。skills hub のカタログキャッシュ(secret 様文字列が混入)も追跡除外に追加。
+
 (以下は当初の指摘)
 
 #### 🟠 P3(原文): `config.yaml` が手動管理で、実際に破損歴がある
