@@ -49,6 +49,13 @@ let
     cost-snapshots/
     cron/output/
     plugins/
+    # skills 配下のキャッシュ/メタデータ (hub カタログに secret 様文字列が混入しうる)
+    .hub/
+    .archive/
+    .curator_backups/
+    .usage.json
+    .bundled_manifest
+    .curator_state
     *_cache.json
     *cache.yaml
     .hermes_history
@@ -66,8 +73,28 @@ let
     EOF
     $GIT add -A
     if ! $GIT diff --cached --quiet; then
-      $GIT -c user.name="hermes-backup" -c user.email="hermes-backup@ser7" \
-        commit --quiet -m "auto snapshot $(date -Iseconds)"
+      # シークレットスキャンゲート: 実値らしきパターンが staged に入っていたら
+      # コミットを中止して ntfy に警告 (git 履歴は消せないため fail-closed)。
+      # tar バックアップ自体は従来どおり続行する (バックアップは暗号化先にしか行かない)。
+      leaks="$($GIT diff --cached --no-color \
+        | grep -E '^\+' \
+        | grep -oiE '\b(sk|ghp|gho|glpat|xoxb|xoxp)-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|(api[_-]?key|access[_-]?token|secret|password)[^A-Za-z0-9]{1,4}[A-Za-z0-9_+-]{16,}' \
+        | grep -E '[0-9]' \
+        | grep -viE '\$|x{4,}|your[_-]|change-me|generate|placeholder|example|redacted|optional|<' \
+        | grep -vE '[A-Z0-9_]{16}$' || true)"
+      if [ -n "$leaks" ]; then
+        echo "SECRET-LIKE PATTERN STAGED — skipping git commit:" >&2
+        echo "$leaks" | cut -c1-40 >&2
+        $GIT reset --quiet
+        ${pkgs.curl}/bin/curl -fsS -o /dev/null \
+          --header "Title: hermes-backup: secret detected, commit skipped" \
+          --header "Priority: high" \
+          -d "~/.hermes の staged 変更にシークレットらしき値を検出。git commit をスキップした。journalctl --user -u hermes-backup で詳細確認。" \
+          http://192.168.0.222:8080/nas-alerts || true
+      else
+        $GIT -c user.name="hermes-backup" -c user.email="hermes-backup@ser7" \
+          commit --quiet -m "auto snapshot $(date -Iseconds)"
+      fi
     fi
 
     # SQLite は書き込み中の生ファイルコピーが壊れるため .backup で整合スナップショットを取る
