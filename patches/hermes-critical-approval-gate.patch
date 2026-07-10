@@ -1,6 +1,6 @@
 --- a/tools/approval.py
 +++ b/tools/approval.py
-@@ -531,6 +531,39 @@
+@@ -766,6 +766,39 @@
  ]
  
  
@@ -40,9 +40,9 @@
  def _legacy_pattern_key(pattern: str) -> str:
      """Reproduce the old regex-derived approval key for backwards compatibility."""
      return pattern.split(r'\b')[1] if r'\b' in pattern else pattern[:20]
-@@ -1317,6 +1350,13 @@
-         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
-         return _hardline_block_result(hardline_desc)
+@@ -2345,6 +2378,13 @@
+                        deny_pattern, command[:200])
+         return _user_deny_block_result(deny_pattern)
  
 +    # == Critical destructive floor == (same contract as
 +    # check_all_command_guards: fresh human approval on every invocation)
@@ -54,8 +54,8 @@
      # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
      # CLI --yolo remains process-scoped via the env var for local use.
      if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
-@@ -1545,6 +1585,78 @@
-     return {"resolved": resolved, "choice": choice}
+@@ -2614,6 +2654,78 @@
+     return {"resolved": resolved, "choice": choice, "reason": entry.reason}
  
  
 +def _require_critical_approval(command: str, description: str,
@@ -68,7 +68,7 @@
 +    With no human approval surface available the command is denied.
 +    """
 +    session_key = get_current_session_key()
-+    is_cli = env_var_enabled("HERMES_INTERACTIVE")
++    is_cli = _is_interactive_cli()
 +    is_gateway = _is_gateway_approval_context()
 +    is_ask = env_var_enabled("HERMES_EXEC_ASK")
 +
@@ -131,11 +131,11 @@
 +
 +
  def check_all_command_guards(command: str, env_type: str,
-                              approval_callback=None) -> dict:
-     """Run all pre-exec security checks and return a single approval decision.
-@@ -1578,6 +1690,14 @@
-                        sudo_guess_desc, command[:200])
-         return _sudo_stdin_block_result(sudo_guess_desc)
+                              approval_callback=None,
+                              has_host_access: bool = False) -> dict:
+@@ -2662,6 +2774,14 @@
+                        deny_pattern, command[:200])
+         return _user_deny_block_result(deny_pattern)
  
 +    # == Critical destructive floor ==
 +    # Fresh human approval on EVERY invocation; applies before the yolo /
@@ -148,8 +148,8 @@
      # --yolo or approvals.mode=off: bypass all approval prompts.
      # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
      approval_mode = _get_approval_mode()
-@@ -1878,6 +1998,20 @@
-     if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+@@ -3068,6 +3188,20 @@
+     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
          return {"approved": True, "message": None}
  
 +    # == Critical destructive floor ==
