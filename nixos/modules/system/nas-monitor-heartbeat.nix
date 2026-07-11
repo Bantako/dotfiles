@@ -20,7 +20,7 @@
 
       # Fetch heartbeat events from the last 2 hours
       last_time=$(${pkgs.curl}/bin/curl -s --max-time 10 \
-        "$NTFY_URL/$HEARTBEAT_TOPIC?since=2h" \
+        "$NTFY_URL/$HEARTBEAT_TOPIC?since=2h&poll=1" \
         | ${pkgs.python3}/bin/python3 -c "
 import sys, json
 try:
