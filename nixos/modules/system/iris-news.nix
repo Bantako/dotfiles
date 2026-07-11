@@ -30,6 +30,32 @@
     '';
   };
 
+  systemd.services.iris-news-static = {
+    description = "iris-news static paper server";
+    after = [ "iris-news-build.service" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "morikawa";
+      WorkingDirectory = "/srv/paper/html";
+      ExecStart = "${pkgs.python3}/bin/python -m http.server 8788 --bind 127.0.0.1 --directory /srv/paper/html";
+      Restart = "on-failure";
+    };
+  };
+
+  systemd.services.iris-news-tailscale-serve = {
+    description = "Tailscale Serve for iris-news";
+    after = [ "tailscaled.service" "iris-news-static.service" ];
+    wants = [ "tailscaled.service" "iris-news-static.service" ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.tailscale}/bin/tailscale serve --bg --yes --https=443 --set-path=/iris-news http://127.0.0.1:8788";
+    };
+  };
+
   systemd.timers.iris-news-build = {
     description = "Daily timer for iris-news-build.service";
     wantedBy = [ "timers.target" ];
