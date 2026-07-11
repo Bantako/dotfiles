@@ -19,7 +19,7 @@ in {
 
     [storage remote]
     type = "caldav"
-    url = "http://192.168.0.222:5232"
+    url = "http://192.168.11.9:5232"
     username = "morikawa"
     password = "${radicalePassword}"
 

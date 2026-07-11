@@ -14,7 +14,7 @@
     };
 
     script = ''
-      NTFY_URL="http://192.168.0.222:8080"
+      NTFY_URL="http://192.168.11.9:8080"
       HEARTBEAT_TOPIC="nas-alerts-heartbeat"
       HEARTBEAT_TIMEOUT=1200  # 20 min (2x 10min interval)
 

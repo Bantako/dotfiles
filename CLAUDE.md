@@ -19,7 +19,7 @@ Nix Flakes で管理された NixOS + Home Manager のdotfiles。`nh os switch` 
 
 ## NAS
 
-`ssh nas`（192.168.0.222）。git 未インストールのため compose 管理は Docker 経由（`nas-git` コマンド）。ser7 の CIFS マウント `/mnt/ugreen` は SSH の `~/services` / `~/data` とは別パスなので NAS 上のファイル操作は `ssh nas` 経由で行う。
+`ssh nas`（192.168.11.9）。git 未インストールのため compose 管理は Docker 経由（`nas-git` コマンド）。ser7 の CIFS マウント `/mnt/ugreen` は SSH の `~/services` / `~/data` とは別パスなので NAS 上のファイル操作は `ssh nas` 経由で行う。
 
 ## キーバインド方針
 

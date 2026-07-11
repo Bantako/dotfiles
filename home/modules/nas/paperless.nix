@@ -1,7 +1,7 @@
 {pkgs, ...}:
 let
   paperless-preview = pkgs.writeShellScript "paperless-preview" ''
-    PAPERLESS_URL="''${PAPERLESS_URL:-http://192.168.0.222:8010}"
+    PAPERLESS_URL="''${PAPERLESS_URL:-http://192.168.11.9:8010}"
     ${pkgs.xh}/bin/xh GET "''${PAPERLESS_URL}/api/documents/$1/" \
       "Authorization:Token ''${PAPERLESS_TOKEN}" 2>/dev/null \
       | ${pkgs.jq}/bin/jq -r \
@@ -10,7 +10,7 @@ let
 
   paperless-browse = pkgs.writeShellScriptBin "paperless-browse" ''
     set -euo pipefail
-    PAPERLESS_URL="''${PAPERLESS_URL:-http://192.168.0.222:8010}"
+    PAPERLESS_URL="''${PAPERLESS_URL:-http://192.168.11.9:8010}"
     : "''${PAPERLESS_TOKEN:?PAPERLESS_TOKEN が未設定}"
 
     list=$(${pkgs.xh}/bin/xh GET \

@@ -90,7 +90,7 @@ let
           --header "Title: hermes-backup: secret detected, commit skipped" \
           --header "Priority: high" \
           -d "~/.hermes の staged 変更にシークレットらしき値を検出。git commit をスキップした。journalctl --user -u hermes-backup で詳細確認。" \
-          http://192.168.0.222:8080/nas-alerts || true
+          http://192.168.11.9:8080/nas-alerts || true
       else
         $GIT -c user.name="hermes-backup" -c user.email="hermes-backup@ser7" \
           commit --quiet -m "auto snapshot $(date -Iseconds)"

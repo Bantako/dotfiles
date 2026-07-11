@@ -84,8 +84,8 @@ in {
       EDITOR = "nvim";
       BROWSER = "vivaldi";
       LESSHISTFILE = "$XDG_STATE_HOME/less/history";
-      PAPERLESS_URL = "http://192.168.0.222:8010";
-      IMMICH_URL    = "http://192.168.0.222:2283";
+      PAPERLESS_URL = "http://192.168.11.9:8010";
+      IMMICH_URL    = "http://192.168.11.9:2283";
     };
 
     initContent =

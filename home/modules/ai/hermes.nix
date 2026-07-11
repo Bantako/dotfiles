@@ -58,7 +58,7 @@ in
           -H "Priority: urgent" \
           -H "Tags: rotating_light,hermes" \
           -d "''${FAILED_UNIT} failed. Result: ''${MONITOR_SERVICE_RESULT:-unknown} Exit: ''${MONITOR_EXIT_CODE:-?} / ''${MONITOR_EXIT_STATUS:-?}" \
-          http://192.168.0.222:8080/nas-alerts > /dev/null \
+          http://192.168.11.9:8080/nas-alerts > /dev/null \
           || echo "ntfy notify failed for ''${FAILED_UNIT}" >&2
       ''} %i";
     };

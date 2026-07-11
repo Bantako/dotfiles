@@ -24,7 +24,7 @@
   services.printing.enable = true;
 
   fileSystems."/mnt/ugreen" = {
-    device = "//192.168.0.222/personal_folder";
+    device = "//192.168.11.9/personal_folder";
     fsType = "cifs";
     options = [
       "credentials=/etc/nixos/.smbcredentials"

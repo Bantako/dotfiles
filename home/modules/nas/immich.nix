@@ -2,7 +2,7 @@
 let
   immich-preview = pkgs.writeShellScript "immich-preview" ''
     printf '\033_Ga=d\033\\'
-    IMMICH_URL="''${IMMICH_URL:-http://192.168.0.222:2283}"
+    IMMICH_URL="''${IMMICH_URL:-http://192.168.11.9:2283}"
     ${pkgs.xh}/bin/xh GET "''${IMMICH_URL}/api/assets/$1/thumbnail" \
       "x-api-key:''${IMMICH_TOKEN}" \
       size==preview 2>/dev/null \
@@ -11,7 +11,7 @@ let
 
   immich-browse = pkgs.writeShellScriptBin "immich-browse" ''
     set -euo pipefail
-    IMMICH_URL="''${IMMICH_URL:-http://192.168.0.222:2283}"
+    IMMICH_URL="''${IMMICH_URL:-http://192.168.11.9:2283}"
     : "''${IMMICH_TOKEN:?IMMICH_TOKEN が未設定}"
 
     list=$(${pkgs.xh}/bin/xh POST \
