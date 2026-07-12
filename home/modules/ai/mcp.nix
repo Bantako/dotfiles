@@ -27,6 +27,12 @@ let
     export PAPERLESS_TOKEN="$(cat /run/secrets/paperless_token)"
     exec ${calendar-mcp-python}/bin/python ${./documents-mcp-server.py} "$@"
   '';
+
+  # Immichのアセット時刻と市/国レベルの場所候補だけを読む。
+  photos-mcp-server = pkgs.writeShellScriptBin "photos-mcp-server" ''
+    export IMMICH_TOKEN="$(cat /run/secrets/immich_token)"
+    exec ${calendar-mcp-python}/bin/python ${./photos-mcp-server.py} "$@"
+  '';
 in
 {
   home.packages = [
@@ -34,5 +40,6 @@ in
     calendar-mcp-server
     knowledge-mcp-server
     documents-mcp-server
+    photos-mcp-server
   ];
 }
