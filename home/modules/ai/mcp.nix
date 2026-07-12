@@ -33,6 +33,14 @@ let
     export IMMICH_TOKEN="$(cat /run/secrets/immich_token)"
     exec ${calendar-mcp-python}/bin/python ${./photos-mcp-server.py} "$@"
   '';
+
+  # 予定・写真・Paperless書類を同じJST日付で読み取り集計する。
+  today-mcp-server = pkgs.writeShellScriptBin "today-mcp-server" ''
+    export PATH=${pkgs.khal}/bin
+    export IMMICH_TOKEN="$(${pkgs.coreutils}/bin/cat /run/secrets/immich_token)"
+    export PAPERLESS_TOKEN="$(${pkgs.coreutils}/bin/cat /run/secrets/paperless_token)"
+    exec ${calendar-mcp-python}/bin/python ${./today-mcp-server.py} "$@"
+  '';
 in
 {
   home.packages = [
@@ -41,5 +49,6 @@ in
     knowledge-mcp-server
     documents-mcp-server
     photos-mcp-server
+    today-mcp-server
   ];
 }
