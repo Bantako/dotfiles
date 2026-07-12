@@ -21,11 +21,18 @@ let
     fi
     exec ${calendar-mcp-python}/bin/python ${./knowledge-mcp-server.py} "$@"
   '';
+
+  # Paperlessの文書メタデータだけを検索する。本文・PDF・変更系の操作は公開しない。
+  documents-mcp-server = pkgs.writeShellScriptBin "documents-mcp-server" ''
+    export PAPERLESS_TOKEN="$(cat /run/secrets/paperless_token)"
+    exec ${calendar-mcp-python}/bin/python ${./documents-mcp-server.py} "$@"
+  '';
 in
 {
   home.packages = [
     todoist-mcp-server
     calendar-mcp-server
     knowledge-mcp-server
+    documents-mcp-server
   ];
 }
