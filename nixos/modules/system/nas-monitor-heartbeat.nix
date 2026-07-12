@@ -20,18 +20,18 @@
 
       # Fetch heartbeat events from the last 2 hours
       last_time=$(${pkgs.curl}/bin/curl -s --max-time 10 \
-        "$NTFY_URL/$HEARTBEAT_TOPIC?since=2h&poll=1" \
+        "$NTFY_URL/$HEARTBEAT_TOPIC/json?since=2h&poll=1" \
         | ${pkgs.python3}/bin/python3 -c "
 import sys, json
-try:
-    data = json.load(sys.stdin)
-    events = data.get('events', [])
-    if events:
-        print(events[-1].get('time', 0))
-    else:
-        print(0)
-except Exception:
-    print(0)
+last_time = 0
+for line in sys.stdin:
+    try:
+        event = json.loads(line)
+    except Exception:
+        continue
+    if event.get('event') == 'message':
+        last_time = event.get('time', 0)
+print(last_time)
 " 2>/dev/null)
 
       if [ -z "$last_time" ] || [ "$last_time" -eq 0 ]; then
