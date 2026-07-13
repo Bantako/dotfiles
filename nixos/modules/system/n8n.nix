@@ -19,6 +19,9 @@ in
       N8N_EDITOR_BASE_URL = n8nUrl;
       WEBHOOK_URL = n8nUrl;
       N8N_PROXY_HOPS = 1;
+      # n8n 2.0 から Execute Command ノードがデフォルト無効化されたため再有効化。
+      # 単一ユーザー・tailnet 限定公開なのでリスクは許容範囲
+      NODES_EXCLUDE = "[]";
       # _FILE サフィックスにより systemd LoadCredential 経由で渡される。
       # ワークフローの Execute Command ノードからは
       #   pavlok-stimulus --secret "$PAVLOK_API_KEY_FILE" --type vibe --value 10
