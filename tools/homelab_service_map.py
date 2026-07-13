@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -16,35 +17,16 @@ DEFAULT_MANIFEST = ROOT / "docs" / "homelab-service-map.json"
 DEFAULT_OUTPUT = ROOT / "docs" / "homelab-service-map.md"
 
 
-def parse_compose_inventory(output: str) -> dict[str, list[str]]:
-    """Group Docker inspect label output by Compose project."""
-    projects: dict[str, list[str]] = defaultdict(list)
-    for line in output.splitlines():
-        fields = line.split("\t")
-        if len(fields) < 3:
-            continue
-        labels = dict(
-            field.split("=", 1)
-            for field in fields[1:]
-            if "=" in field
-        )
-        project = labels.get("project")
-        service = labels.get("service")
-        if not project or not service or project == "<no value>" or service == "<no value>":
-            continue
-        projects[project].append(service)
-    return {project: sorted(services) for project, services in sorted(projects.items())}
-
-
-def parse_docker_inspect(output: str) -> dict[str, list[str]]:
+def parse_docker_inspect(output: str) -> dict[str, list[tuple[str, str]]]:
     """Group Docker inspect JSON by Compose project."""
-    projects: dict[str, list[str]] = defaultdict(list)
+    projects: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for item in json.loads(output):
         labels = item.get("Config", {}).get("Labels") or {}
         project = labels.get("com.docker.compose.project")
         service = labels.get("com.docker.compose.service")
         if project and service:
-            projects[project].append(service)
+            state = item.get("State", {}).get("Status", "unknown")
+            projects[project].append((service, state))
     return {project: sorted(services) for project, services in sorted(projects.items())}
 
 
@@ -52,11 +34,11 @@ def run(command: list[str]) -> str:
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout
 
 
-def probe_nas() -> tuple[dict[str, list[str]], str | None]:
+def probe_nas() -> tuple[dict[str, list[tuple[str, str]]], str | None]:
     command = [
         "ssh",
         "nas",
-        "docker inspect $(docker ps -q)",
+        "ids=$(docker ps -aq); if [ -n \"$ids\" ]; then docker inspect $ids; else printf '[]'; fi",
     ]
     try:
         return parse_docker_inspect(run(command)), None
@@ -71,10 +53,21 @@ def probe_systemd(units: dict[str, dict[str, str]]) -> dict[str, str]:
         command = ["systemctl"]
         if scope == "user":
             command.append("--user")
-        command.extend(["show", unit, "-p", "ActiveState", "-p", "SubState", "--value"])
+        command.extend(
+            ["show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "LoadState"]
+        )
         try:
-            active, sub = run(command).splitlines()[:2]
-            observed[unit] = f"{active} ({sub})"
+            properties = dict(
+                line.split("=", 1) for line in run(command).splitlines() if "=" in line
+            )
+            active = properties["ActiveState"]
+            sub = properties["SubState"]
+            load_state = properties["LoadState"]
+            observed[unit] = (
+                "未観測（unit不存在）"
+                if load_state == "not-found"
+                else f"{active} ({sub})"
+            )
         except (OSError, subprocess.CalledProcessError, ValueError):
             observed[unit] = "未観測"
     return observed
@@ -82,9 +75,10 @@ def probe_systemd(units: dict[str, dict[str, str]]) -> dict[str, str]:
 
 def render_markdown(
     manifest: dict,
-    observed_nas: dict[str, list[str]],
+    observed_nas: dict[str, list[tuple[str, str]]],
     observed_ser7: dict[str, str],
     generated_at: str,
+    nas_error: str | None = None,
 ) -> str:
     lines = [
         "# Homelab サービスマップ",
@@ -93,7 +87,7 @@ def render_markdown(
         "> 目的・責務・変更時の確認は `docs/homelab-service-map.json` で管理し、稼働状態は生成時に取得する。",
         "",
         f"- 生成日時: {generated_at}",
-        "- 状態の意味: `稼働` は今回の観測結果、`未観測` は停止ではなく取得できなかった状態を表す。",
+        "- 状態の意味: `稼働` / `停止` は今回のDocker観測結果。`未観測` は停止ではなく取得できなかった状態。`未観測（unit不存在）` はmanifestにあるsystemd unitが存在しない状態を表す。",
         "",
     ]
 
@@ -109,7 +103,7 @@ def render_markdown(
         lines.extend([f"### {layer}", "", "| プロジェクト | 現在の状態 | 目的 | 管理場所 | 観測 | 変更時に確認 |", "|---|---|---|---|---|---|"])
         for project, metadata in sorted(entries):
             services = observed_nas.get(project)
-            state = f"稼働: {', '.join(services)}" if services else "未観測"
+            state = format_container_state(services) if services else "未観測"
             lines.append(
                 "| {project} | {state} | {purpose} | {source} | {observe} | {change_check} |".format(
                     project=project,
@@ -118,6 +112,34 @@ def render_markdown(
                 )
             )
         lines.append("")
+
+    unregistered = sorted(set(observed_nas) - set(manifest.get("nas", {})))
+    if unregistered:
+        lines.extend(
+            [
+                "## 未登録のNAS Composeプロジェクト",
+                "",
+                "> manifestに未登録のCompose projectを観測した。役割を確認して `docs/homelab-service-map.json` へ登録するか、不要な残骸なら削除判断をする。",
+                "",
+                "| プロジェクト | 現在の状態 |",
+                "|---|---|",
+            ]
+        )
+        for project in unregistered:
+            lines.append(f"| {project} | {format_container_state(observed_nas[project])} |")
+        lines.append("")
+
+    if nas_error:
+        lines.extend(
+            [
+                "## NAS Docker観測の取得失敗",
+                "",
+                "> 今回のNAS Docker inventoryは取得できなかった。NAS上の停止・稼働とは区別する。",
+                "",
+                f"- エラー: `{nas_error}`",
+                "",
+            ]
+        )
 
     lines.extend(["## ser7 の自動化・判断層", "", "| Unit | 現在の状態 | 目的 | 管理場所 | 観測 | 変更時に確認 |", "|---|---|---|---|---|---|"])
     for unit, metadata in manifest.get("ser7", {}).items():
@@ -144,6 +166,20 @@ def render_markdown(
     return "\n".join(lines)
 
 
+def format_container_state(services: list[tuple[str, str]]) -> str:
+    """Render Docker's State.Status without treating a stopped container as missing."""
+    by_state: dict[str, list[str]] = defaultdict(list)
+    for service, state in services:
+        by_state[state].append(service)
+
+    labels = {"running": "稼働", "exited": "停止"}
+    parts = []
+    for state, names in sorted(by_state.items()):
+        label = labels.get(state, f"状態={state}")
+        parts.append(f"{label}: {', '.join(sorted(names))}")
+    return "; ".join(parts)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -153,17 +189,27 @@ def main() -> int:
 
     manifest = json.loads(args.manifest.read_text())
     if args.skip_live:
-        observed_nas: dict[str, list[str]] = {}
+        observed_nas: dict[str, list[tuple[str, str]]] = {}
         observed_ser7: dict[str, str] = {}
+        nas_error = None
     else:
         observed_nas, nas_error = probe_nas()
         observed_ser7 = probe_systemd(manifest.get("ser7", {}))
         if nas_error:
-            print(f"warning: NAS inventory unavailable: {nas_error}")
+            print(f"warning: NAS inventory unavailable: {nas_error}", file=sys.stderr)
 
     generated_at = datetime.now(ZoneInfo("Asia/Tokyo")).isoformat(timespec="seconds")
-    args.output.write_text(render_markdown(manifest, observed_nas, observed_ser7, generated_at).rstrip() + "\n")
+    args.output.write_text(
+        render_markdown(manifest, observed_nas, observed_ser7, generated_at, nas_error).rstrip() + "\n"
+    )
     print(f"wrote {args.output}")
+    unregistered = sorted(set(observed_nas) - set(manifest.get("nas", {})))
+    if unregistered:
+        print(
+            f"warning: unregistered NAS Compose projects: {', '.join(unregistered)}",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

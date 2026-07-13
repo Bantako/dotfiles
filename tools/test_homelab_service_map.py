@@ -1,6 +1,8 @@
 import importlib.util
 import pathlib
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name("homelab_service_map.py")
@@ -11,36 +13,52 @@ service_map = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(service_map)
 
 
-class ParseComposeInventoryTests(unittest.TestCase):
-    def test_parses_docker_inspect_json(self):
+class ParseDockerInspectTests(unittest.TestCase):
+    def test_groups_services_by_compose_project_with_state(self):
         inventory = service_map.parse_docker_inspect(
-            '[{"Name":"/paperless-web","Config":{"Labels":'
-            '{"com.docker.compose.project":"paperless",'
-            '"com.docker.compose.service":"webserver"}}}]'
+            '[{"Config":{"Labels":{"com.docker.compose.project":"paperless",'
+            '"com.docker.compose.service":"webserver"}},"State":{"Status":"running"}},'
+            '{"Config":{"Labels":{"com.docker.compose.project":"paperless",'
+            '"com.docker.compose.service":"db"}},"State":{"Status":"exited"}}]'
         )
 
-        self.assertEqual(inventory, {"paperless": ["webserver"]})
-
-    def test_groups_services_by_compose_project(self):
-        inventory = service_map.parse_compose_inventory(
-            "/paperless-web\tproject=paperless\tservice=webserver\n"
-            "/paperless-db\tproject=paperless\tservice=db\n"
-            "/ntfy\tproject=ntfy\tservice=ntfy\n"
+        self.assertEqual(
+            inventory,
+            {"paperless": [("db", "exited"), ("webserver", "running")]},
         )
-
-        self.assertEqual(inventory["paperless"], ["db", "webserver"])
-        self.assertEqual(inventory["ntfy"], ["ntfy"])
 
     def test_ignores_unlabelled_containers(self):
-        inventory = service_map.parse_compose_inventory(
-            "/legacy\tproject=<no value>\tservice=<no value>\n"
+        inventory = service_map.parse_docker_inspect(
+            '[{"Config":{"Labels":{}},"State":{"Status":"running"}}]'
         )
 
         self.assertEqual(inventory, {})
 
 
+class ProbeSystemdTests(unittest.TestCase):
+    def test_marks_not_found_unit_as_unobserved(self):
+        with patch.object(
+            service_map,
+            "run",
+            return_value="LoadState=not-found\nActiveState=inactive\nSubState=dead\n",
+        ):
+            observed = service_map.probe_systemd({"renamed.service": {}})
+
+        self.assertEqual(observed, {"renamed.service": "未観測（unit不存在）"})
+
+    def test_keeps_existing_unit_state(self):
+        with patch.object(
+            service_map,
+            "run",
+            return_value="LoadState=loaded\nActiveState=active\nSubState=running\n",
+        ):
+            observed = service_map.probe_systemd({"known.service": {}})
+
+        self.assertEqual(observed, {"known.service": "active (running)"})
+
+
 class RenderMarkdownTests(unittest.TestCase):
-    def test_marks_observed_projects_and_keeps_unavailable_distinct(self):
+    def test_shows_stopped_and_unregistered_projects(self):
         manifest = {
             "nas": {
                 "paperless": {
@@ -50,27 +68,66 @@ class RenderMarkdownTests(unittest.TestCase):
                     "observe": "container health + Homepage",
                     "change_check": "DB backup と HTTP health",
                 },
-                "homebox": {
-                    "layer": "候補・停止中",
-                    "purpose": "資産管理の再評価候補",
-                    "source": "NAS ~/services/homebox",
-                    "observe": "未稼働",
-                    "change_check": "要件確認後に判断",
-                },
             },
             "ser7": {},
         }
 
         rendered = service_map.render_markdown(
             manifest,
-            observed_nas={"paperless": ["db", "webserver"]},
-            observed_ser7={"n8n.service": "active (running)"},
+            observed_nas={
+                "paperless": [("db", "running")],
+                "filebrowser": [("filebrowser", "exited")],
+            },
+            observed_ser7={},
             generated_at="2026-07-13T12:00:00+09:00",
         )
 
-        self.assertIn("paperless | 稼働: db, webserver", rendered)
-        self.assertIn("homebox | 未観測", rendered)
-        self.assertIn("生成日時: 2026-07-13T12:00:00+09:00", rendered)
+        self.assertIn("paperless | 稼働: db", rendered)
+        self.assertIn("## 未登録のNAS Composeプロジェクト", rendered)
+        self.assertIn("filebrowser | 停止: filebrowser", rendered)
+
+    def test_records_nas_inventory_error(self):
+        rendered = service_map.render_markdown(
+            {"nas": {}, "ser7": {}},
+            observed_nas={},
+            observed_ser7={},
+            generated_at="2026-07-13T12:00:00+09:00",
+            nas_error="ssh failed",
+        )
+
+        self.assertIn("## NAS Docker観測の取得失敗", rendered)
+        self.assertIn("ssh failed", rendered)
+
+
+class MainTests(unittest.TestCase):
+    def test_exits_nonzero_when_nas_project_is_unregistered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = pathlib.Path(directory)
+            manifest = directory_path / "manifest.json"
+            output = directory_path / "map.md"
+            manifest.write_text('{"nas": {}, "ser7": {}}')
+
+            with (
+                patch.object(
+                    service_map,
+                    "probe_nas",
+                    return_value=({"unknown": [("app", "running")]}, None),
+                ),
+                patch.object(service_map, "probe_systemd", return_value={}),
+                patch(
+                    "sys.argv",
+                    [
+                        "homelab_service_map.py",
+                        "--manifest",
+                        str(manifest),
+                        "--output",
+                        str(output),
+                    ],
+                ),
+            ):
+                self.assertEqual(service_map.main(), 1)
+
+            self.assertIn("未登録のNAS Composeプロジェクト", output.read_text())
 
 
 if __name__ == "__main__":
