@@ -26,6 +26,9 @@ in
     };
 
     script = ''
+      # LAN アドレスのみに束縛する。tailscale0 は trustedInterfaces のため
+      # 0.0.0.0 だと tailnet 全体から到達可能になってしまう
+      export MONITOR_RELAY_HOST=192.168.11.3
       export MONITOR_RELAY_TOKEN="$(cat ${config.sops.secrets.monitor_relay_token.path})"
       export HERMES_WEBHOOK_SECRET="$(cat ${config.sops.secrets.hermes_monitor_webhook_secret.path})"
       export HERMES_WEBHOOK_URL="http://127.0.0.1:8644/webhooks/homelab-alerts"
