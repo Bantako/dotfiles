@@ -17,6 +17,9 @@ in
   home.packages = [ herdrPkg ];
 
   xdg.configFile."herdr/config.toml".text = ''
+    [ui]
+    prompt_new_tab_name = false
+
     [keys]
     focus_agent = "prefix+1..9"
     switch_tab = ""
