@@ -131,6 +131,7 @@
     description = "Tailscale Serve for iris-news";
     after = [ "tailscaled.service" "iris-news-static.service" ];
     wants = [ "tailscaled.service" "iris-news-static.service" ];
+    wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {
       Type = "oneshot";

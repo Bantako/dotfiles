@@ -14,6 +14,8 @@ in {
       "/home/morikawa/.local/share/atuin"
       "/home/morikawa/.local/share/PrismLauncher"
       "/var/lib/sops-nix/key.txt"
+      # n8n のフロー定義と暗号化キー (SQLite, git 管理外の唯一の正本)
+      "/var/lib/n8n"
     ];
     exclude = [
       "**/.cache"
