@@ -8,6 +8,10 @@
     claude-code.url = "github:sadjow/claude-code-nix";
     hermes-agent.url = "github:NousResearch/hermes-agent";
     herdr.url = "github:ogulcancelik/herdr";
+    hunk = {
+      url = "github:modem-dev/hunk";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     zen-browser.url = "github:youwen5/zen-browser-flake";
     zen-browser.inputs.nixpkgs.follows = "nixpkgs";
     nix-index-database.url = "github:nix-community/nix-index-database";
