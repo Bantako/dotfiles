@@ -1,0 +1,38 @@
+{
+  "nas_layers": [
+    "基盤・入口・監視",
+    "個人データの正本",
+    "作業・公開物",
+    "候補・停止中"
+  ],
+  "nas": {
+    "tailscale": {"layer": "基盤・入口・監視", "purpose": "NASをtailnetへ接続する", "source": "NAS ~/services/tailscale", "observe": "container state + Tailscale status", "change_check": "node identity と外部到達性"},
+    "homepage": {"layer": "基盤・入口・監視", "purpose": "NASサービスの入口を集約する", "source": "NAS ~/services/homepage", "observe": "HTTP health + Homepage widgets", "change_check": "リンク・widget・config reload"},
+    "ntfy": {"layer": "基盤・入口・監視", "purpose": "障害・運用通知を配送する", "source": "NAS ~/services/ntfy", "observe": "HTTP health + publish path", "change_check": "通知先と配送確認"},
+    "monitor": {"layer": "基盤・入口・監視", "purpose": "unhealthy/exitedコンテナを検出して通知する", "source": "NAS ~/services/monitor", "observe": "container-alerts heartbeat + ntfy", "change_check": "ignore対象と通知経路"},
+    "backup": {"layer": "基盤・入口・監視", "purpose": "resticでバックアップし状態を公開する", "source": "NAS ~/services/backup", "observe": "snapshot + backup status", "change_check": "対象・DB dump・復元経路"},
+    "beszel": {"layer": "基盤・入口・監視", "purpose": "NASとser7のホスト・コンテナを観測する", "source": "NAS ~/services/beszel", "observe": "Beszel Hub", "change_check": "agent接続と負荷"},
+    "immich": {"layer": "個人データの正本", "purpose": "写真・動画を管理する", "source": "NAS ~/services/immich", "observe": "HTTP health + Immich UI", "change_check": "DB互換性・画像処理・backup"},
+    "paperless": {"layer": "個人データの正本", "purpose": "書類を保管・検索する", "source": "NAS ~/services/paperless", "observe": "container health + Homepage", "change_check": "DB dump・consumer・HTTP health"},
+    "radicale": {"layer": "個人データの正本", "purpose": "CalDAV/CardDAVの正本を持つ", "source": "NAS ~/services/radicale", "observe": "HTTP health + local calendar mirror", "change_check": "認証・CalDAV同期・backup"},
+    "karakeep": {"layer": "個人データの正本", "purpose": "ブックマークと保存状態を管理する", "source": "NAS ~/services/karakeep", "observe": "container health + UI", "change_check": "web・Meilisearch・Chromeの連携"},
+    "miniflux": {"layer": "個人データの正本", "purpose": "RSS購読と既読状態を管理する", "source": "NAS ~/services/miniflux", "observe": "container health + API", "change_check": "PostgreSQL・feed refresh・backup"},
+    "jelu": {"layer": "個人データの正本", "purpose": "読書管理の現行正本を持つ", "source": "NAS ~/services/jelu", "observe": "HTTP UI", "change_check": "移行・エクスポート・backup"},
+    "navidrome": {"layer": "個人データの正本", "purpose": "音楽の再生状態とプレイリストを管理する", "source": "NAS ~/services/navidrome", "observe": "HTTP UI", "change_check": "ライブラリ分割・DB・playlist"},
+    "calibre": {"layer": "個人データの正本", "purpose": "書籍ファイルの現行ライブラリを提供する", "source": "NAS ~/services/calibre", "observe": "container health + UI", "change_check": "library path・metadata・backup"},
+    "lanraragi": {"layer": "個人データの正本", "purpose": "アーカイブのタグと閲覧状態を管理する", "source": "NAS ~/services/lanraragi", "observe": "container health + UI", "change_check": "library mount・database・backup"},
+    "stash": {"layer": "個人データの正本", "purpose": "メディアの整理と検索を行う", "source": "NAS ~/services/stash", "observe": "HTTP UI", "change_check": "storage headroom・SQLite・backup"},
+    "iris-news": {"layer": "作業・公開物", "purpose": "iris-newsの公開物をCaddyで配信する", "source": "NAS ~/services/iris-news", "observe": "HTTP response + generated paper", "change_check": "ser7 buildとのpublish接続"},
+    "gitadora-wiki": {"layer": "作業・公開物", "purpose": "GITADORA wiki APIとサイトを配信する", "source": "NAS ~/services/gitadora-wiki", "observe": "HTTP response", "change_check": "API・Caddy・静的成果物"},
+    "homebox": {"layer": "候補・停止中", "purpose": "資産・取扱説明書管理の再評価候補", "source": "NAS ~/services/homebox", "observe": "未稼働", "change_check": "要件・スマホ利用・API適合を確認後に判断"}
+  },
+  "ser7": {
+    "n8n.service": {"scope": "system", "purpose": "Pavlokなどのワークフローを実行する", "source": "nixos/modules/system/n8n.nix", "observe": "systemd + Tailscale Serve", "change_check": "workflow実行・secret境界・公開範囲"},
+    "n8n-tailscale-serve.service": {"scope": "system", "purpose": "n8nをTailscale限定HTTPSで公開する", "source": "nixos/modules/system/n8n.nix", "observe": "systemd + tailscale serve status", "change_check": "8443のServe設定と外部到達性"},
+    "nas-monitor-heartbeat.timer": {"scope": "system", "purpose": "NAS monitor自身の停止を別経路で検出する", "source": "nixos/modules/system/nas-monitor-heartbeat.nix", "observe": "systemd timer + ntfy JSON Lines", "change_check": "heartbeat timeoutと通知先"},
+    "hermes-discord.service": {"scope": "user", "purpose": "HermesのDiscord会話入口を提供する", "source": "home/modules/ai/hermes.nix", "observe": "systemd user service", "change_check": "allowlist・gateway所有・failure notification"},
+    "hermes-webui.service": {"scope": "user", "purpose": "Hermes WebUIを提供する", "source": "home/modules/ai/hermes-webui.nix", "observe": "systemd user service + Tailscale", "change_check": "loopback bind・memory limit・公開経路"},
+    "beszel-agent.service": {"scope": "user", "purpose": "ser7をBeszelへ観測対象として接続する", "source": "home/modules/ai/beszel-agent.nix", "observe": "systemd user service", "change_check": "agent接続とPodman state"},
+    "bedtime-pavlok-vibe.service": {"scope": "user", "purpose": "従来の就寝時Pavlok vibe発火を担う", "source": "home/modules/desktop/pavlok.nix", "observe": "systemd user service", "change_check": "n8n移行後の二重発火を確認"}
+  }
+}
