@@ -7,6 +7,9 @@ let
   ccusage = pkgs.writeShellScriptBin "ccusage" ''
     exec ${pkgs.nodejs_22}/bin/npx -y ccusage "$@"
   '';
+  tokscale = pkgs.writeShellScriptBin "tokscale" ''
+    exec ${pkgs.nodejs_22}/bin/npx -y tokscale "$@"
+  '';
 in {
   # overlay 方式
   nixpkgs.overlays = [
@@ -16,6 +19,7 @@ in {
   home.packages = with pkgs; [
     claude-code
     ccusage
+    tokscale
   ];
 
   _module.args.claudeAliases = {

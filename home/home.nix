@@ -22,6 +22,7 @@
     inputs.hunk.homeManagerModules.default
     ./modules/ai/beszel-agent.nix
     ./modules/ai/claude-code.nix
+    ./modules/ai/codex.nix
     ./modules/ai/herdr.nix
     ./modules/ai/hermes-backup.nix
     ./modules/ai/hermes-webui.nix

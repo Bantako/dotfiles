@@ -6,6 +6,9 @@
     niri.url = "github:sodiboo/niri-flake";
     niri.inputs.nixpkgs.follows = "nixpkgs";
     claude-code.url = "github:sadjow/claude-code-nix";
+    # codex はリリースが速く本体 nixpkgs だと遅れるため専用 input で追従
+    # 更新: nix flake update nixpkgs-codex
+    nixpkgs-codex.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     hermes-agent.url = "github:NousResearch/hermes-agent";
     herdr.url = "github:ogulcancelik/herdr";
     hunk = {
