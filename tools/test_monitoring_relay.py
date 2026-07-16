@@ -81,6 +81,32 @@ class NormalizeAlertTests(unittest.TestCase):
         self.assertEqual(len(normalized["errors"]), 2_048)
         self.assertTrue(normalized["errors"].endswith("…"))
 
+    def test_allows_resolved_alert_without_errors(self):
+        normalized = relay.normalize_gatus_alert(
+            {
+                "event_type": "RESOLVED",
+                "service": "ntfy",
+                "description": "ntfy health endpoint failed",
+                "errors": "   ",
+                "url": "http://192.168.11.9:8080/v1/health",
+            }
+        )
+
+        self.assertEqual(normalized["state"], "resolved")
+        self.assertEqual(normalized["errors"], "")
+
+    def test_rejects_non_string_errors(self):
+        with self.assertRaisesRegex(ValueError, "errors"):
+            relay.normalize_gatus_alert(
+                {
+                    "event_type": "RESOLVED",
+                    "service": "ntfy",
+                    "description": "ntfy health endpoint failed",
+                    "errors": [],
+                    "url": "http://192.168.11.9:8080/v1/health",
+                }
+            )
+
 
 class HermesRequestTests(unittest.TestCase):
     def test_signs_canonical_payload_using_webhook_v2(self):

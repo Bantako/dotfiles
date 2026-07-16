@@ -30,9 +30,9 @@ def _required_text(payload: dict[str, Any], key: str, limit: int = 1_024) -> str
     return value.strip()
 
 
-def _truncated_text(payload: dict[str, Any], key: str, limit: int) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
+def _optional_truncated_text(payload: dict[str, Any], key: str, limit: int) -> str:
+    value = payload.get(key, "")
+    if not isinstance(value, str):
         raise ValueError(key)
     value = value.strip()
     return value if len(value) <= limit else value[: limit - 1] + "…"
@@ -55,7 +55,7 @@ def normalize_gatus_alert(payload: dict[str, Any]) -> dict[str, str]:
         "source": "gatus",
         "service": service,
         "description": _required_text(payload, "description"),
-        "errors": _truncated_text(payload, "errors", 2_048),
+        "errors": _optional_truncated_text(payload, "errors", 2_048),
         "url": _required_text(payload, "url"),
     }
 
