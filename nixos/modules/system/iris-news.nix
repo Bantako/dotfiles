@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 {
   systemd.tmpfiles.rules = [
@@ -36,6 +41,22 @@
     };
 
     script = ''
+      # Miniflux は rootless Podman の user service なので、この system service との
+      # 起動順は保証されない。ローカル API が応答するまで最大60秒待ち、超過したら
+      # トークンを触らずに明示的に失敗させる (/healthcheck はトークン不要)。
+      ready=false
+      for _ in $(${pkgs.coreutils}/bin/seq 1 30); do
+        if ${pkgs.curl}/bin/curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:8084/healthcheck; then
+          ready=true
+          break
+        fi
+        ${pkgs.coreutils}/bin/sleep 2
+      done
+      if [ "$ready" != true ]; then
+        echo "Miniflux (http://127.0.0.1:8084) not ready after 60s; aborting build" >&2
+        exit 1
+      fi
+
       export IRIS_NEWS_MINIFLUX_API_TOKEN="$(cat /run/secrets/iris_news_miniflux_api_token)"
       exec ${pkgs.uv}/bin/uv run python -m iris_news build-daily \
         --miniflux-base-url http://127.0.0.1:8084 \
@@ -53,7 +74,10 @@
   systemd.services.iris-news-publish = {
     description = "Publish iris-news static paper to NAS";
     requires = [ "mnt-ugreen.mount" ];
-    after = [ "mnt-ugreen.mount" "iris-news-build.service" ];
+    after = [
+      "mnt-ugreen.mount"
+      "iris-news-build.service"
+    ];
 
     serviceConfig = {
       Type = "oneshot";
@@ -132,8 +156,14 @@
 
   systemd.services.iris-news-tailscale-serve = {
     description = "Tailscale Serve for iris-news";
-    after = [ "tailscaled.service" "iris-news-static.service" ];
-    wants = [ "tailscaled.service" "iris-news-static.service" ];
+    after = [
+      "tailscaled.service"
+      "iris-news-static.service"
+    ];
+    wants = [
+      "tailscaled.service"
+      "iris-news-static.service"
+    ];
     wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {

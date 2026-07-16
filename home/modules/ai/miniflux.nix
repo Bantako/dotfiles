@@ -22,7 +22,7 @@ in
         env_file="/run/secrets/miniflux-env"
 
         test -r "$env_file"
-        test -d "$state_dir/postgres"
+        mkdir -p "$state_dir/postgres"
 
         ${podman} pod rm --force miniflux >/dev/null 2>&1 || true
         ${podman} pod create --name miniflux --publish 127.0.0.1:8084:8080

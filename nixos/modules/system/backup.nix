@@ -2,7 +2,29 @@
 
 let
   ntfyUrl = "$(cat ${config.sops.secrets.ntfy_url.path})";
-in {
+
+  # Miniflux は rootless Podman の user service (owner: morikawa) なので、file 単位の
+  # data ディレクトリ backup はクラッシュ一貫性が無い。Borg が読む前に論理 dump を
+  # backup 対象サブツリー内へ書き出す。pod は止めない。tmp → mv の atomic 置換で、
+  # dump 失敗時は直前の known-good dump を保持する。
+  # user context の podman/systemd への到達は borg-notify-failure と同じ
+  # `systemd-run --machine=morikawa@.host --user` パターンを流用する。
+  minifluxDump = pkgs.writeShellScript "miniflux-pg-dump" ''
+    set -euo pipefail
+    dump_dir="$HOME/.local/share/miniflux/dumps"
+    tmp="$dump_dir/miniflux.sql.gz.tmp"
+    dest="$dump_dir/miniflux.sql.gz"
+    ${pkgs.coreutils}/bin/mkdir -p "$dump_dir"
+    ${pkgs.coreutils}/bin/rm -f "$tmp"
+    # DB 認証情報は miniflux-db コンテナ自身の POSTGRES_USER/POSTGRES_DB に従う
+    # (secret は読まない)。未設定なら値を出さず変数名だけで失敗させる。
+    ${pkgs.podman}/bin/podman exec miniflux-db sh -c \
+      'set -eu; : "''${POSTGRES_USER:?unset}"; : "''${POSTGRES_DB:?unset}"; exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+      | ${pkgs.gzip}/bin/gzip -c > "$tmp"
+    ${pkgs.coreutils}/bin/mv -f "$tmp" "$dest"
+  '';
+in
+{
   services.borgbackup.jobs.home = {
     paths = [
       "/home/morikawa/.ssh"
@@ -35,7 +57,18 @@ in {
     };
     compression = "auto,zstd";
     startAt = "daily";
-    prune.keep = { daily = 7; weekly = 4; monthly = 6; };
+    prune.keep = {
+      daily = 7;
+      weekly = 4;
+      monthly = 6;
+    };
+    # dump 失敗 (Miniflux 停止中など) は backup ジョブ全体を止めない。直前の
+    # known-good dump が残るため、他パスの backup は継続する。
+    preHook = ''
+      ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
+        --pipe --wait --collect --quiet -- ${minifluxDump} \
+        || echo "miniflux pg_dump failed; keeping previous dump" >&2
+    '';
     postHook = ''
       ${pkgs.curl}/bin/curl -fs --retry 3 \
         --connect-timeout 5 --max-time 15 \
