@@ -46,7 +46,8 @@
     "hermes-webui-tailscale-serve.service": {"scope": "system", "purpose": "Hermes WebUIをTailscale限定HTTPSで公開する", "source": "nixos/modules/system/networking.nix", "observe": "systemd oneshot + tailscale serve status", "change_check": "loopback WebUI・Serve設定・外部到達性"},
     "beszel-agent.service": {"scope": "user", "purpose": "ser7をBeszelへ観測対象として接続する", "source": "home/modules/ai/beszel-agent.nix", "observe": "systemd user service", "change_check": "agent接続とPodman state"},
     "karakeep.service": {"scope": "user", "purpose": "ブックマークと保存状態をrootless Podmanで管理する", "source": "home/modules/ai/karakeep.nix", "observe": "systemd user service + Podman + Tailscale HTTPS", "change_check": "web・Meilisearch・Chromeの連携、Borg snapshot、外部到達性"},
+    "karakeep-tailscale-serve.service": {"scope": "system", "purpose": "KarakeepをTailscale限定HTTPSで公開する", "source": "nixos/modules/system/karakeep.nix", "observe": "systemd oneshot + tailscale serve status", "change_check": "loopback backend(127.0.0.1:3003)・8444のServe設定・backend health・外部到達性"},
     "miniflux.service": {"scope": "user", "purpose": "RSS購読と既読状態をrootless Podman PostgreSQLで管理する", "source": "home/modules/ai/miniflux.nix", "observe": "systemd user service + Podman + Tailscale HTTPS", "change_check": "PostgreSQL restore、iris-news ingest、Borg snapshot、外部到達性"},
-    "bedtime-pavlok-vibe.service": {"scope": "user", "purpose": "従来の就寝時Pavlok vibe発火を担う", "source": "home/modules/desktop/pavlok.nix", "observe": "systemd user service", "change_check": "n8n移行後の二重発火を確認"}
+    "miniflux-tailscale-serve.service": {"scope": "system", "purpose": "MinifluxをTailscale限定HTTPSで公開する", "source": "nixos/modules/system/miniflux.nix", "observe": "systemd oneshot + tailscale serve status", "change_check": "loopback backend(127.0.0.1:8084)・8445のServe設定・backend health・外部到達性"}
   }
 }
