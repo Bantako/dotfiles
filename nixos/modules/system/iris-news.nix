@@ -95,7 +95,10 @@
       IRIS_NEWS_HERMES_MODEL = "gpt-5.6-luna";
       IRIS_NEWS_HERMES_TOOLSETS = "safe";
       IRIS_NEWS_HERMES_TIMEOUT = "120";
-      IRIS_NEWS_KARAKEEP_BASE_URL = "http://192.168.11.9:3003";
+      # Karakeep now runs as a rootless Podman user service on ser7.  Keep
+      # this private, loopback-only path rather than routing mutable saves
+      # back through the retired NAS instance.
+      IRIS_NEWS_KARAKEEP_BASE_URL = "http://127.0.0.1:3003";
     };
 
     serviceConfig = {
