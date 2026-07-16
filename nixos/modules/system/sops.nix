@@ -50,6 +50,9 @@ in
       karakeep_env = userReadable // {
         path = "/run/secrets/karakeep-env";
       };
+      miniflux_env = userReadable // {
+        path = "/run/secrets/miniflux-env";
+      };
       hermes_monitor_webhook_secret = userReadable // { };
       monitor_relay_token = userReadable // { };
     };

@@ -38,7 +38,7 @@
     script = ''
       export IRIS_NEWS_MINIFLUX_API_TOKEN="$(cat /run/secrets/iris_news_miniflux_api_token)"
       exec ${pkgs.uv}/bin/uv run python -m iris_news build-daily \
-        --miniflux-base-url http://dxp2800-ad69.taild4ba88.ts.net:8084 \
+        --miniflux-base-url http://127.0.0.1:8084 \
         --refresh --ingest \
         --db /srv/paper/data/paper.db
     '';

@@ -18,6 +18,8 @@ in {
       "/var/lib/n8n"
       # Karakeep のブックマークDBと検索index (rootless Podman user service)
       "/home/morikawa/.local/share/karakeep"
+      # Miniflux のPostgreSQLデータ (rootless Podman user service)
+      "/home/morikawa/.local/share/miniflux"
     ];
     exclude = [
       "**/.cache"
