@@ -16,6 +16,8 @@ in {
       "/var/lib/sops-nix/key.txt"
       # n8n のフロー定義と暗号化キー (SQLite, git 管理外の唯一の正本)
       "/var/lib/n8n"
+      # Karakeep のブックマークDBと検索index (rootless Podman user service)
+      "/home/morikawa/.local/share/karakeep"
     ];
     exclude = [
       "**/.cache"
@@ -34,6 +36,7 @@ in {
     prune.keep = { daily = 7; weekly = 4; monthly = 6; };
     postHook = ''
       ${pkgs.curl}/bin/curl -fs --retry 3 \
+        --connect-timeout 5 --max-time 15 \
         -H "Title: borg backup completed" \
         -d "ser7 home backup OK" \
         "${ntfyUrl}" > /dev/null || true
@@ -74,6 +77,7 @@ in {
         ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user --collect \
           ${pkgs.libnotify}/bin/notify-send -u critical 'borgbackup failed' 'home バックアップが失敗しました'
         ${pkgs.curl}/bin/curl -fs --retry 3 \
+          --connect-timeout 5 --max-time 15 \
           -H "Title: borg backup FAILED" \
           -H "Priority: urgent" \
           -H "Tags: rotating_light" \

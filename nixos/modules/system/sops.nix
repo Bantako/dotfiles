@@ -47,6 +47,9 @@ in
       karakeep_api_key = userReadable // {
         path = "/run/secrets/karakeep-api-key";
       };
+      karakeep_env = userReadable // {
+        path = "/run/secrets/karakeep-env";
+      };
       hermes_monitor_webhook_secret = userReadable // { };
       monitor_relay_token = userReadable // { };
     };

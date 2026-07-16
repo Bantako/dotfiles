@@ -27,6 +27,7 @@
     ./modules/ai/hermes-backup.nix
     ./modules/ai/hermes-webui.nix
     ./modules/ai/hermes.nix
+    ./modules/ai/karakeep.nix
     ./modules/ai/hunk.nix
     ./modules/ai/mcp.nix
     ./modules/ai/opencode.nix
