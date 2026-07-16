@@ -41,6 +41,11 @@ let
     export PAPERLESS_TOKEN="$(${pkgs.coreutils}/bin/cat /run/secrets/paperless_token)"
     exec ${calendar-mcp-python}/bin/python ${./today-mcp-server.py} "$@"
   '';
+
+  # 公開Transit APIだけを読む。APIキーもローカルの位置情報も渡さない。
+  transit-mcp-server = pkgs.writeShellScriptBin "transit-mcp-server" ''
+    exec ${calendar-mcp-python}/bin/python ${./transit-mcp-server.py} "$@"
+  '';
 in
 {
   home.packages = [
@@ -50,5 +55,6 @@ in
     documents-mcp-server
     photos-mcp-server
     today-mcp-server
+    transit-mcp-server
   ];
 }
