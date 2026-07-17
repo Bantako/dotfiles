@@ -10,6 +10,75 @@ let
       ${config.home.homeDirectory}/Projects/gitadora-wiki/tool/main.py \
       "$@"
   '';
+  booru-fetch = pkgs.writeShellScriptBin "booru-fetch" ''
+    set -euo pipefail
+
+    staging_root="''${BOORU_STAGING_DIR:-$HOME/Pictures/booru-staging}"
+    simulate=0
+    urls=()
+
+    while (($# > 0)); do
+      case "$1" in
+        --help|-h)
+          printf '%s\n' \
+            'Usage: booru-fetch [--simulate] URL [URL ...]' \
+            '  Download explicit Pixiv/Gelbooru URLs into a review staging directory.' \
+            '  Nothing is uploaded to Szurubooru automatically.'
+          exit 0
+          ;;
+        --simulate|-s)
+          simulate=1
+          shift
+          ;;
+        --)
+          shift
+          urls+=("$@")
+          break
+          ;;
+        -* )
+          printf 'booru-fetch: unknown option: %s\n' "$1" >&2
+          exit 2
+          ;;
+        *)
+          urls+=("$1")
+          shift
+          ;;
+      esac
+    done
+
+    if (( ''${#urls[@]} == 0 )); then
+      printf '%s\n' 'booru-fetch: at least one URL is required' >&2
+      exit 2
+    fi
+
+    timestamp="$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)"
+    run_dir="$staging_root/$timestamp"
+    ${pkgs.coreutils}/bin/mkdir -p "$run_dir"
+    printf '%s\n' "''${urls[@]}" > "$run_dir/SOURCE_URLS.txt"
+    printf '%s\n' \
+      'Review this directory, then upload only selected files to Szurubooru:' \
+      'http://192.168.11.9:8082/' \
+      'Keep SOURCE_URLS.txt with the staging item for source attribution.' \
+      'This directory is staging, not the canonical library.' \
+      > "$run_dir/NEXT.txt"
+
+    args=(
+      --no-input
+      --directory "$run_dir"
+      --download-archive "$staging_root/.download-archive.txt"
+      --error-file "$run_dir/errors.txt"
+    )
+    if ((simulate)); then
+      args+=(--simulate)
+    fi
+
+    ${pkgs.gallery-dl}/bin/gallery-dl "''${args[@]}" "''${urls[@]}"
+
+    file_count="$(${pkgs.findutils}/bin/find "$run_dir" -type f \
+      ! -name SOURCE_URLS.txt ! -name NEXT.txt ! -name errors.txt -print | \
+      ${pkgs.coreutils}/bin/wc -l)"
+    printf 'staging_dir=%s\nfiles=%s\n' "$run_dir" "$file_count"
+  '';
 in {
   xdg.configFile."ov/config.yaml".source = ./ov.yaml;
   xdg.configFile."yt-dlp/config".text = ''
@@ -65,6 +134,7 @@ in {
     # メディア・メタデータ
     exiftool      # EXIF/メタデータ管理
     gallery-dl    # 画像ギャラリーサイトの一括ダウンロード
+    booru-fetch   # gallery-dl staging → Szurubooru review の入口
 
     # Nix 管理
     nix-tree              # Nix store 依存ツリーを TUI 探検
