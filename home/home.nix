@@ -29,6 +29,7 @@
     ./modules/ai/hermes.nix
     ./modules/ai/karakeep.nix
     ./modules/ai/miniflux.nix
+    ./modules/ai/szurubooru.nix
     ./modules/ai/hunk.nix
     ./modules/ai/mcp.nix
     ./modules/ai/opencode.nix

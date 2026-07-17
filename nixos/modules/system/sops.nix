@@ -53,6 +53,15 @@ in
       miniflux_env = userReadable // {
         path = "/run/secrets/miniflux-env";
       };
+      szurubooru_env = userReadable // {
+        path = "/run/secrets/szurubooru-env";
+      };
+      gelbooru_api_key = userReadable // {
+        path = "/run/secrets/gelbooru-api-key";
+      };
+      gelbooru_user_id = userReadable // {
+        path = "/run/secrets/gelbooru-user-id";
+      };
       hermes_monitor_webhook_secret = userReadable // { };
       monitor_relay_token = userReadable // { };
     };

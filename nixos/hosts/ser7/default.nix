@@ -24,6 +24,7 @@
     ../../modules/system/iris-news.nix
     ../../modules/system/karakeep.nix
     ../../modules/system/miniflux.nix
+    ../../modules/system/szurubooru.nix
     ../../modules/system/n8n.nix
     ../../modules/system/nas-monitor-heartbeat.nix
     ../../modules/system/monitoring-relay.nix

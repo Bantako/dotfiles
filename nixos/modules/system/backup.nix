@@ -23,6 +23,20 @@ let
       | ${pkgs.gzip}/bin/gzip -c > "$tmp"
     ${pkgs.coreutils}/bin/mv -f "$tmp" "$dest"
   '';
+  szurubooruDump = pkgs.writeShellScript "szurubooru-pg-dump" ''
+    set -euo pipefail
+    dump_dir="$HOME/.local/share/szurubooru/dumps"
+    tmp="$dump_dir/szurubooru.sql.gz.tmp"
+    dest="$dump_dir/szurubooru.sql.gz"
+    ${pkgs.coreutils}/bin/mkdir -p "$dump_dir"
+    ${pkgs.coreutils}/bin/rm -f "$tmp"
+    # DB credentials remain inside the container environment; neither the
+    # backup service nor its logs read or display them.
+    ${pkgs.podman}/bin/podman exec szurubooru-sql sh -c \
+      'set -eu; : "''${POSTGRES_USER:?unset}"; : "''${POSTGRES_DB:?unset}"; exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+      | ${pkgs.gzip}/bin/gzip -c > "$tmp"
+    ${pkgs.coreutils}/bin/mv -f "$tmp" "$dest"
+  '';
 in
 {
   services.borgbackup.jobs.home = {
@@ -42,6 +56,8 @@ in
       "/home/morikawa/.local/share/karakeep"
       # Miniflux のPostgreSQLデータ (rootless Podman user service)
       "/home/morikawa/.local/share/miniflux"
+      # Szurubooru media data and logical PostgreSQL dumps (rootless Podman)
+      "/home/morikawa/.local/share/szurubooru"
     ];
     exclude = [
       "**/.cache"
@@ -68,6 +84,9 @@ in
       ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
         --pipe --wait --collect --quiet -- ${minifluxDump} \
         || echo "miniflux pg_dump failed; keeping previous dump" >&2
+      ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
+        --pipe --wait --collect --quiet -- ${szurubooruDump} \
+        || echo "szurubooru pg_dump failed; keeping previous dump" >&2
     '';
     postHook = ''
       ${pkgs.curl}/bin/curl -fs --retry 3 \
