@@ -24,6 +24,14 @@ in
     focus_agent = "prefix+1..9"
     switch_tab = ""
 
+    [[keys.command]]
+    key = "prefix+t"
+    type = "popup"
+    command = "exec \"''${SHELL:-sh}\""
+    description = "open scratch terminal"
+    width = "90%"
+    height = "90%"
+
     [experimental]
     kitty_graphics = true
   '';

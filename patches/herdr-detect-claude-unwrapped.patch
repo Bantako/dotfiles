@@ -1,25 +1,15 @@
 --- a/src/detect/mod.rs
 +++ b/src/detect/mod.rs
-@@ -113,7 +113,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
-     let name = normalized_agent_lookup_name(agent);
-     match name.as_str() {
+@@ -127,7 +127,7 @@
+ fn lookup_agent(name: &str) -> Option<Agent> {
+     match name {
          "pi" => Some(Agent::Pi),
 -        "claude" | "claude-code" => Some(Agent::Claude),
 +        "claude" | "claude-code" | ".claude-unwrapped" | ".claude-unwrapp" => Some(Agent::Claude),
          "codex" => Some(Agent::Codex),
          "gemini" => Some(Agent::Gemini),
          "cursor" | "cursor-agent" => Some(Agent::Cursor),
-@@ -142,7 +142,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
-     let name = normalized_agent_lookup_name(process_name);
-     // Match against known binary names
-     match name.as_str() {
-         "pi" => Some(Agent::Pi),
--        "claude" | "claude-code" => Some(Agent::Claude),
-+        "claude" | "claude-code" | ".claude-unwrapped" | ".claude-unwrapp" => Some(Agent::Claude),
-         "codex" => Some(Agent::Codex),
-         "gemini" => Some(Agent::Gemini),
-         "cursor" | "cursor-agent" => Some(Agent::Cursor),
-@@ -610,6 +610,8 @@ mod tests {
+@@ -605,6 +605,8 @@
          assert_eq!(identify_agent("pi"), Some(Agent::Pi));
          assert_eq!(identify_agent("claude"), Some(Agent::Claude));
          assert_eq!(identify_agent("claude-code"), Some(Agent::Claude));
@@ -28,7 +18,7 @@
          assert_eq!(identify_agent("codex"), Some(Agent::Codex));
          assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
          assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
-@@ -641,6 +643,8 @@ mod tests {
+@@ -639,6 +641,8 @@
          assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
          assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
          assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
