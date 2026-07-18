@@ -23,6 +23,23 @@ let
       | ${pkgs.gzip}/bin/gzip -c > "$tmp"
     ${pkgs.coreutils}/bin/mv -f "$tmp" "$dest"
   '';
+  # Materialious stores its internal accounts, subscriptions, history, and
+  # playback progress in SQLite. Snapshot it with SQLite's online backup API
+  # before Borg runs; copying its live database/WAL files would not be safe.
+  materialiousDump = pkgs.writeShellScript "materialious-sqlite-dump" ''
+    set -euo pipefail
+    state_dir="$HOME/.local/share/materialious"
+    db="$state_dir/materialious.db"
+    dump_dir="$state_dir/dumps"
+    tmp="$dump_dir/materialious.db.tmp"
+    dest="$dump_dir/materialious.db"
+
+    test -f "$db" || exit 0
+    ${pkgs.coreutils}/bin/mkdir -p "$dump_dir"
+    ${pkgs.coreutils}/bin/rm -f "$tmp"
+    ${pkgs.sqlite}/bin/sqlite3 "$db" ".backup '$tmp'"
+    ${pkgs.coreutils}/bin/mv -f "$tmp" "$dest"
+  '';
   szurubooruDump = pkgs.writeShellScript "szurubooru-pg-dump" ''
     set -euo pipefail
     dump_dir="$HOME/.local/share/szurubooru/dumps"
@@ -56,15 +73,24 @@ in
       "/home/morikawa/.local/share/karakeep"
       # Miniflux のPostgreSQLデータ (rootless Podman user service)
       "/home/morikawa/.local/share/miniflux"
+      # Materialious internal accounts, subscriptions, history, and playlists.
+      # The live SQLite database itself is excluded below; its consistent dump
+      # under dumps/ is included instead.
+      "/home/morikawa/.local/share/materialious"
       # Szurubooru media data and logical PostgreSQL dumps (rootless Podman)
       "/home/morikawa/.local/share/szurubooru"
     ];
     exclude = [
       "**/.cache"
+      # 稼働中PostgreSQLの生ファイルは一貫性を持って読めない。preHookの論理dumpだけを残す。
+      "**/.local/share/miniflux/postgres"
       "**/node_modules"
       "**/target"
       "**/.venv"
       "**/dist"
+      # SQLite's database, WAL, and shared-memory files are replaced by the
+      # consistent online snapshot written by materialiousDump above.
+      "/home/morikawa/.local/share/materialious/materialious.db*"
     ];
     repo = "/mnt/ugreen/backup/borg/ser7";
     encryption = {
@@ -84,6 +110,9 @@ in
       ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
         --pipe --wait --collect --quiet -- ${minifluxDump} \
         || echo "miniflux pg_dump failed; keeping previous dump" >&2
+      ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
+        --pipe --wait --collect --quiet -- ${materialiousDump} \
+        || echo "materialious SQLite backup failed; keeping previous dump" >&2
       ${pkgs.systemd}/bin/systemd-run --machine=morikawa@.host --user \
         --pipe --wait --collect --quiet -- ${szurubooruDump} \
         || echo "szurubooru pg_dump failed; keeping previous dump" >&2

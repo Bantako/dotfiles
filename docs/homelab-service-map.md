@@ -3,7 +3,7 @@
 > このファイルは `tools/homelab_service_map.py` が生成する現在の運用地図。
 > 目的・責務・変更時の確認は `docs/homelab-service-map.json` で管理し、稼働状態は生成時に取得する。
 
-- 生成日時: 2026-07-16T23:24:17+09:00
+- 生成日時: 2026-07-18T22:28:09+09:00
 - 状態の意味: `稼働` / `停止` は今回のDocker観測結果。`未観測` は停止ではなく取得できなかった状態。`未観測（unit不存在）` はmanifestにあるsystemd unitが存在しない状態を表す。
 
 ## NAS Docker
@@ -49,6 +49,14 @@
 | karakeep | 停止: chrome, meilisearch, web | ser7へ移設済みのロールバック元。データとComposeは削除せず停止状態で保持する | NAS ~/services/karakeep | container state（monitorの意図的停止除外対象） | ser7の実データと外部到達性を確認後に削除を判断 |
 | miniflux | 停止: miniflux, miniflux-db | ser7へ移設済みのロールバック元。PostgreSQL dataとComposeは削除せず停止状態で保持する | NAS ~/services/miniflux | container state（monitorの意図的停止除外対象） | ser7のPostgreSQL・iris-news ingest・外部到達性を確認後に削除を判断 |
 
+## 未登録のNAS Composeプロジェクト
+
+> manifestに未登録のCompose projectを観測した。役割を確認して `docs/homelab-service-map.json` へ登録するか、不要な残骸なら削除判断をする。
+
+| プロジェクト | 現在の状態 |
+|---|---|
+| szurubooru | 稼働: client, server, sql |
+
 ## ser7 の自動化・判断層
 
 | Unit | 現在の状態 | 目的 | 管理場所 | 観測 | 変更時に確認 |
@@ -70,6 +78,8 @@
 | beszel-agent.service | active (running) | ser7をBeszelへ観測対象として接続する | home/modules/ai/beszel-agent.nix | systemd user service | agent接続とPodman state |
 | karakeep.service | active (running) | ブックマークと保存状態をrootless Podmanで管理する | home/modules/ai/karakeep.nix | systemd user service + Podman + Tailscale HTTPS | web・Meilisearch・Chromeの連携、Borg snapshot、外部到達性 |
 | karakeep-tailscale-serve.service | active (exited) | KarakeepをTailscale限定HTTPSで公開する | nixos/modules/system/karakeep.nix | systemd oneshot + tailscale serve status | loopback backend(127.0.0.1:3003)・8444のServe設定・backend health・外部到達性 |
+| materialious.service | active (running) | YouTubeの検索・購読・履歴・視聴進捗を内部アカウントで管理する | home/modules/ai/materialious.nix | systemd user service + Podman + Tailscale HTTPS | SQLite online snapshot、内部認証、loopback bind、動画再生・端末間同期 |
+| materialious-tailscale-serve.service | active (exited) | MaterialiousをTailscale限定HTTPSで公開する | nixos/modules/system/materialious.nix | systemd oneshot + tailscale serve status | loopback backend(127.0.0.1:3000)・8447のServe設定・backend health・外部到達性 |
 | miniflux.service | active (running) | RSS購読と既読状態をrootless Podman PostgreSQLで管理する | home/modules/ai/miniflux.nix | systemd user service + Podman + Tailscale HTTPS | PostgreSQL restore、iris-news ingest、Borg snapshot、外部到達性 |
 | miniflux-tailscale-serve.service | active (exited) | MinifluxをTailscale限定HTTPSで公開する | nixos/modules/system/miniflux.nix | systemd oneshot + tailscale serve status | loopback backend(127.0.0.1:8084)・8445のServe設定・backend health・外部到達性 |
 

@@ -50,6 +50,9 @@ in
       karakeep_env = userReadable // {
         path = "/run/secrets/karakeep-env";
       };
+      materialious_env = userReadable // {
+        path = "/run/secrets/materialious-env";
+      };
       miniflux_env = userReadable // {
         path = "/run/secrets/miniflux-env";
       };
