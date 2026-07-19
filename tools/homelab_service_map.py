@@ -68,7 +68,7 @@ def probe_systemd(units: dict[str, dict[str, str]]) -> dict[str, str]:
                 if load_state == "not-found"
                 else f"{active} ({sub})"
             )
-        except (OSError, subprocess.CalledProcessError, ValueError):
+        except (KeyError, OSError, subprocess.CalledProcessError, ValueError):
             observed[unit] = "未観測"
     return observed
 

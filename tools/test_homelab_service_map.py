@@ -36,6 +36,16 @@ class ParseDockerInspectTests(unittest.TestCase):
 
 
 class ProbeSystemdTests(unittest.TestCase):
+    def test_marks_incomplete_unit_properties_as_unobserved(self):
+        with patch.object(
+            service_map,
+            "run",
+            return_value="LoadState=loaded\nActiveState=active\n",
+        ):
+            observed = service_map.probe_systemd({"incomplete.service": {}})
+
+        self.assertEqual(observed, {"incomplete.service": "未観測"})
+
     def test_marks_not_found_unit_as_unobserved(self):
         with patch.object(
             service_map,
