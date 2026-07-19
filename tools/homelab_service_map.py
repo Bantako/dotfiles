@@ -213,7 +213,11 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text())
-    validate_manifest(manifest)
+    try:
+        validate_manifest(manifest)
+    except ValueError as error:
+        print(f"error: invalid manifest: {error}", file=sys.stderr)
+        return 2
     if args.skip_live:
         observed_nas: dict[str, list[tuple[str, str]]] = {}
         observed_ser7: dict[str, str] = {}

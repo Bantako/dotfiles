@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import pathlib
 import tempfile
 import unittest
@@ -151,6 +152,37 @@ class ManifestValidationTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def test_returns_usage_error_without_probing_for_invalid_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = pathlib.Path(directory)
+            manifest = directory_path / "manifest.json"
+            output = directory_path / "map.md"
+            manifest.write_text(
+                '{"nas": {"paperless": {"layer": "個人データの正本"}}, "ser7": {}}'
+            )
+
+            with (
+                patch.object(service_map, "probe_nas") as probe_nas,
+                patch.object(service_map, "probe_systemd") as probe_systemd,
+                patch(
+                    "sys.argv",
+                    [
+                        "homelab_service_map.py",
+                        "--manifest",
+                        str(manifest),
+                        "--output",
+                        str(output),
+                    ],
+                ),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                result = service_map.main()
+
+            self.assertEqual(result, 2)
+            self.assertIn("error: invalid manifest:", stderr.getvalue())
+            probe_nas.assert_not_called()
+            probe_systemd.assert_not_called()
+
     def test_exits_nonzero_when_nas_project_is_unregistered(self):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = pathlib.Path(directory)
