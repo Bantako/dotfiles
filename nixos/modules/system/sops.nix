@@ -65,6 +65,9 @@ in
       gelbooru_user_id = userReadable // {
         path = "/run/secrets/gelbooru-user-id";
       };
+      szurubooru_importer_token = userReadable // {
+        path = "/run/secrets/szurubooru-importer-token";
+      };
       hermes_monitor_webhook_secret = userReadable // { };
       monitor_relay_token = userReadable // { };
     };

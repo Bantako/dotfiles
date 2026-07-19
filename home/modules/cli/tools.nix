@@ -10,6 +10,10 @@ let
       ${config.home.homeDirectory}/Projects/gitadora-wiki/tool/main.py \
       "$@"
   '';
+  taggerRoot = "${config.home.homeDirectory}/Projects/szurubooru-tagger";
+  booru-import = pkgs.writeShellScriptBin "booru-import" ''
+    exec ${pkgs.python3}/bin/python3 ${taggerRoot}/szurubooru_import.py "$@"
+  '';
   booru-fetch = pkgs.writeShellScriptBin "booru-fetch" ''
     set -euo pipefail
 
@@ -26,8 +30,8 @@ let
         --help|-h)
           printf '%s\n' \
             'Usage: booru-fetch [--simulate] URL [URL ...]' \
-            '  Download explicit Pixiv/Gelbooru URLs into a review staging directory.' \
-            '  Nothing is uploaded to Szurubooru automatically.'
+            '  Download explicit Pixiv/Gelbooru URLs and import them into Szurubooru.' \
+            '  Use --simulate for download-only staging without API writes.'
           exit 0
           ;;
         --simulate|-s)
@@ -70,10 +74,10 @@ let
     ${pkgs.coreutils}/bin/chmod 600 "$config_file"
     printf '%s\n' "''${urls[@]}" > "$run_dir/SOURCE_URLS.txt"
     printf '%s\n' \
-      'Review this directory, then upload only selected files to Szurubooru:' \
+      'Automatic Szurubooru import is attempted after staging:' \
       'https://ser7.taild4ba88.ts.net:8446/' \
       'Keep SOURCE_URLS.txt with the staging item for source attribution.' \
-      'This directory is staging, not the canonical library.' \
+      'This directory remains as a retryable import record.' \
       > "$run_dir/NEXT.txt"
 
     args=(
@@ -82,6 +86,9 @@ let
       --directory "$run_dir"
       --download-archive "$staging_root/.download-archive.txt"
       --error-file "$run_dir/errors.txt"
+      --write-metadata
+      --write-info-json
+      --write-tags
     )
     if ((simulate)); then
       args+=(--simulate)
@@ -89,10 +96,18 @@ let
 
     ${pkgs.gallery-dl}/bin/gallery-dl "''${args[@]}" "''${urls[@]}"
 
-    file_count="$(${pkgs.findutils}/bin/find "$run_dir" -type f \
-      ! -name SOURCE_URLS.txt ! -name NEXT.txt ! -name errors.txt -print | \
+    file_count="$(${pkgs.findutils}/bin/find "$run_dir" -type f \( \
+      -iname '*.avif' -o -iname '*.gif' -o -iname '*.jpeg' -o -iname '*.jpg' \
+      -o -iname '*.png' -o -iname '*.webp' \) -print | \
       ${pkgs.coreutils}/bin/wc -l)"
     printf 'staging_dir=%s\nfiles=%s\n' "$run_dir" "$file_count"
+    if (( ! simulate )); then
+      policy="''${BOORU_TAG_POLICY:-${taggerRoot}/tag-policy.json}"
+      report="${taggerRoot}/reports/$timestamp-triage.json"
+      ${pkgs.python3}/bin/python3 ${taggerRoot}/szurubooru_tagger.py scan \
+        "$run_dir" --policy "$policy" --output "$report"
+      ${booru-import}/bin/booru-import --username Bantako "$report" --apply
+    fi
   '';
 in
 {
@@ -150,7 +165,8 @@ in
     # メディア・メタデータ
     exiftool # EXIF/メタデータ管理
     gallery-dl # 画像ギャラリーサイトの一括ダウンロード
-    booru-fetch # gallery-dl staging → Szurubooru review の入口
+    booru-fetch # gallery-dl staging → 自動タグ付け・Szurubooru取込
+    booru-import # 候補レポートのSzurubooru取込（既定はdry-run）
 
     # Nix 管理
     nix-tree # Nix store 依存ツリーを TUI 探検
