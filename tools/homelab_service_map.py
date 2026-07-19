@@ -17,10 +17,35 @@ DEFAULT_MANIFEST = ROOT / "docs" / "homelab-service-map.json"
 DEFAULT_OUTPUT = ROOT / "docs" / "homelab-service-map.md"
 
 
+def validate_manifest(manifest: dict) -> None:
+    """Validate the metadata required to render the service map."""
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest must be a JSON object")
+
+    common_fields = ("purpose", "source", "observe", "change_check")
+    for section in ("nas", "ser7"):
+        entries = manifest.get(section)
+        if not isinstance(entries, dict):
+            raise ValueError(f"manifest.{section} must be a JSON object")
+        required_fields = ("layer", *common_fields) if section == "nas" else common_fields
+        for name, metadata in entries.items():
+            if not isinstance(metadata, dict):
+                raise ValueError(f"manifest.{section}.{name} must be a JSON object")
+            for field in required_fields:
+                value = metadata.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"missing or empty manifest field: {section}.{name}.{field}")
+
+
 def parse_docker_inspect(output: str) -> dict[str, list[tuple[str, str]]]:
     """Group Docker inspect JSON by Compose project."""
     projects: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for item in json.loads(output):
+    payload = json.loads(output)
+    if not isinstance(payload, list):
+        raise ValueError("Docker inspect output must be a JSON array")
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("Docker inspect items must be JSON objects")
         labels = item.get("Config", {}).get("Labels") or {}
         project = labels.get("com.docker.compose.project")
         service = labels.get("com.docker.compose.service")
@@ -42,7 +67,7 @@ def probe_nas() -> tuple[dict[str, list[tuple[str, str]]], str | None]:
     ]
     try:
         return parse_docker_inspect(run(command)), None
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
         return {}, str(error)
 
 
@@ -188,6 +213,7 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text())
+    validate_manifest(manifest)
     if args.skip_live:
         observed_nas: dict[str, list[tuple[str, str]]] = {}
         observed_ser7: dict[str, str] = {}

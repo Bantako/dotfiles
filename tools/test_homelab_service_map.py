@@ -35,6 +35,29 @@ class ParseDockerInspectTests(unittest.TestCase):
         self.assertEqual(inventory, {})
 
 
+class ProbeNasTests(unittest.TestCase):
+    def test_returns_inventory_error_for_invalid_docker_json(self):
+        with patch.object(service_map, "run", return_value="not-json"):
+            observed, error = service_map.probe_nas()
+
+        self.assertEqual(observed, {})
+        self.assertIsNotNone(error)
+
+    def test_returns_inventory_error_for_non_array_docker_json(self):
+        with patch.object(service_map, "run", return_value="{}"):
+            observed, error = service_map.probe_nas()
+
+        self.assertEqual(observed, {})
+        self.assertIsNotNone(error)
+
+    def test_returns_inventory_error_for_non_object_docker_item(self):
+        with patch.object(service_map, "run", return_value="[null]"):
+            observed, error = service_map.probe_nas()
+
+        self.assertEqual(observed, {})
+        self.assertIsNotNone(error)
+
+
 class ProbeSystemdTests(unittest.TestCase):
     def test_marks_incomplete_unit_properties_as_unobserved(self):
         with patch.object(
@@ -107,6 +130,24 @@ class RenderMarkdownTests(unittest.TestCase):
 
         self.assertIn("## NAS Docker観測の取得失敗", rendered)
         self.assertIn("ssh failed", rendered)
+
+
+class ManifestValidationTests(unittest.TestCase):
+    def test_reports_missing_manifest_field_with_entry_path(self):
+        manifest = {
+            "nas": {
+                "paperless": {
+                    "layer": "個人データの正本",
+                    "purpose": "書類を保管・検索する",
+                    "source": "NAS ~/services/paperless",
+                    "observe": "container health + Homepage",
+                },
+            },
+            "ser7": {},
+        }
+
+        with self.assertRaisesRegex(ValueError, "nas.paperless.change_check"):
+            service_map.validate_manifest(manifest)
 
 
 class MainTests(unittest.TestCase):
