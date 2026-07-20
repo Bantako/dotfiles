@@ -172,6 +172,7 @@ in
     nix-tree # Nix store 依存ツリーを TUI 探検
     nix-output-monitor # nh ビルド進捗をリッチ表示
     nvd # switch 前後のパッケージ差分表示
+    just # 再現したい運用手順・dry-run・監査の永続化
     comma # `nix run` 不要の即席パッケージ実行 (`, cowsay hi`)
 
     # モダン診断・調査 CLI

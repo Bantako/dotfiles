@@ -15,6 +15,7 @@
     rustfmt
     nixfmt
     shfmt
+    shellcheck
     stylua                       # Lua
     prettier                     # JS/TS/JSON/MD/YAML
     ruff                         # Python
