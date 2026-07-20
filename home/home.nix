@@ -56,6 +56,7 @@
     ./modules/desktop/niri.nix
     ./modules/desktop/pavlok.nix
     ./modules/desktop/bedtime.nix
+    ./modules/desktop/noctalia-state-bridge.nix
     ./modules/desktop/noctalia.nix
     ./modules/desktop/xdg.nix
     ./modules/desktop/xremap.nix

@@ -31,6 +31,9 @@ in
       openrouter_api_key = userReadable // { };
       discord_bot_token = userReadable // { };
       pavlok_api_key = userReadable // { };
+      n8n_api_key = userReadable // {
+        path = "/run/secrets/n8n-api-key";
+      };
       iris_news_miniflux_api_token = userReadable // { };
       iris_news_llm_base_url = userReadable // { };
       iris_news_llm_api_key = userReadable // { };
