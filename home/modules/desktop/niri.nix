@@ -35,6 +35,7 @@
           width = 1;     # デフォルト: 4
         };
       };
+      screenshot-path = "~/Pictures/Screenshots/Screenshot-%Y-%m-%d_%H-%M-%S.png";
       binds = {
         # アプリ起動系
         # バインド被りのため休止
@@ -52,7 +53,7 @@
         "Ctrl+Shift+3".action.screenshot-screen = {};   # 全画面
         "Ctrl+Shift+4".action.spawn = [                 # 範囲選択 → satty で加筆
           "sh" "-c"
-          "grim -g \"$(slurp)\" - | satty -f - --copy-command wl-copy"
+          "grim -g \"$(slurp)\" - | satty -f - --copy-command wl-copy --output-filename '~/Pictures/Screenshots/Screenshot-%Y-%m-%d_%H-%M-%S.png' --actions-on-enter save-to-file --actions-on-right-click save-to-file"
         ];
         "Ctrl+Shift+5".action.screenshot-window = {};   # ウィンドウ
 
