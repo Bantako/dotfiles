@@ -71,6 +71,15 @@ in
       szurubooru_importer_token = userReadable // {
         path = "/run/secrets/szurubooru-importer-token";
       };
+      saucenao_api_key = userReadable // {
+        path = "/run/secrets/saucenao-api-key";
+      };
+      grimmory_db_password = userReadable // {
+        path = "/run/secrets/grimmory-db-password";
+      };
+      grimmory_admin_password = userReadable // {
+        path = "/run/secrets/grimmory-admin-password";
+      };
       hermes_monitor_webhook_secret = userReadable // { };
       monitor_relay_token = userReadable // { };
     };

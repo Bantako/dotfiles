@@ -1,4 +1,9 @@
-{ inputs, config, pkgs, ... }:
+{
+  inputs,
+  config,
+  pkgs,
+  ...
+}:
 
 {
   imports = [
@@ -21,6 +26,7 @@
     ../../modules/system/ssh.nix
     ../../modules/system/fail2ban.nix
     ../../modules/system/backup.nix
+    ../../modules/system/grimmory.nix
     ../../modules/system/iris-news.nix
     ../../modules/system/karakeep.nix
     ../../modules/system/materialious.nix
@@ -50,7 +56,10 @@
   nix = {
     settings = {
       auto-optimise-store = true;
-      experimental-features = ["nix-command" "flakes"];
+      experimental-features = [
+        "nix-command"
+        "flakes"
+      ];
       max-jobs = "auto";
       # dev-shell の再ビルドを抑制。現在世代は GC root で保護されるため
       # 下の --delete-older-than 7d とは競合しない（古い世代のみ削除対象）

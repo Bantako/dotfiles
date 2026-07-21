@@ -2,6 +2,9 @@
 let
   stateDir = "${config.home.homeDirectory}/.local/share/szurubooru";
   podman = "${pkgs.podman}/bin/podman";
+  # 2D videos from the NAS reach ~5 GB, above the 1 GiB defaults of both nginx
+  # (client) and waitress (server), so raise the ceiling on both sides.
+  maxUploadBytes = "8589934592";
   client = "szurubooru/client@sha256:74dedd54ca4f7c40ccf05be3768e813b47ed050326eab238f7e133d4acf87472";
   server = "szurubooru/server@sha256:a7ad796f36ec85d97f7869b3ec6808a8a2b0265e09be25f25af42c6b1ee40b54";
   postgres = "postgres@sha256:ea50b9fd617b66c9135816a4536cf6e0697d4eea7014a7194479c95f6edd5ef9";
@@ -80,7 +83,12 @@ in
           --env THREADS=2 \
           --volume "$state_dir/data:/data:Z,U" \
           --volume "$config_file:/opt/app/config.yaml:ro,Z" \
-          ${server}
+          ${server} \
+          /bin/sh -c \
+          'cd /opt/app && alembic upgrade head && exec waitress-serve-3 \
+             --listen "*:''${PORT}" --threads ''${THREADS} \
+             --max-request-body-size ${maxUploadBytes} \
+             szurubooru.facade:app'
 
         ${podman} create \
           --pod szurubooru \
@@ -88,7 +96,10 @@ in
           --env BACKEND_HOST=server \
           --env BASE_URL=/ \
           --volume "$state_dir/data:/data:ro,Z" \
-          ${client}
+          ${client} \
+          /bin/sh -c \
+          'sed -i "s/client_max_body_size [0-9]*;/client_max_body_size ${maxUploadBytes};/" \
+             /etc/nginx/nginx.conf && exec /docker-start.sh'
 
         ${podman} start szurubooru-sql
         for _ in $(${pkgs.coreutils}/bin/seq 1 30); do
