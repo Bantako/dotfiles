@@ -32,6 +32,11 @@ let
   ];
   stateRoot = "${config.xdg.stateHome}/hermes-supervisor";
   runtimeRoot = "$XDG_RUNTIME_DIR/hermes-supervisor";
+  kanbanDb =
+    if cfg.board == "default" then
+      "${config.home.homeDirectory}/.hermes/kanban.db"
+    else
+      "${config.home.homeDirectory}/.hermes/kanban/boards/${cfg.board}/kanban.db";
   watchCommand = pkgs.writeShellScript "hermes-supervisor-watch" ''
     exec ${pkgs.util-linux}/bin/flock \
       --nonblock \
@@ -40,21 +45,42 @@ let
       ${supervisorCli}/bin/hermes-supervisor watch \
       --policy ${config.xdg.configHome}/hermes-supervisor/policy.json \
       --state ${stateRoot}/state.json \
+      --audit ${stateRoot}/run-audit.jsonl \
       --state-db ${config.home.homeDirectory}/.hermes/state.db \
-      --kanban-db ${config.home.homeDirectory}/.hermes/kanban.db \
+      --kanban-db ${kanbanDb} \
       --board ${lib.escapeShellArg cfg.board} \
       --hermes ${hermesPkg}/bin/hermes \
       --profile default
   '';
   gcCommand = pkgs.writeShellScript "hermes-supervisor-gc" ''
+    ${pkgs.coreutils}/bin/install -d -m 0700 \
+      ${stateRoot}/detailed-logs \
+      ${stateRoot}/worktrees \
+      ${stateRoot}/sandboxes \
+      ${stateRoot}/cache
     exec ${pkgs.util-linux}/bin/flock \
       --nonblock \
       --conflict-exit-code 0 \
       "${runtimeRoot}/watch.lock" \
       ${supervisorCli}/bin/hermes-supervisor gc \
       --older-than 30d \
-      --state-root ${stateRoot}
+      --state-root ${stateRoot} \
+      --kanban-db ${kanbanDb} \
+      --board ${lib.escapeShellArg cfg.board} \
+      --hermes ${hermesPkg}/bin/hermes \
+      --artifact-root detailed_logs=${stateRoot}/detailed-logs \
+      --artifact-root worktrees=${stateRoot}/worktrees \
+      --artifact-root sandboxes=${stateRoot}/sandboxes \
+      --artifact-root cache=${stateRoot}/cache \
+      ${lib.optionalString (!cfg.retention.apply.enable) "--dry-run"}
   '';
+  ecoReportCommand = pkgs.writeShellApplication {
+    name = "hermes-supervisor-eco-report";
+    text = ''
+      exec ${supervisorCli}/bin/hermes-supervisor eco-report \
+        --audit ${stateRoot}/run-audit.jsonl
+    '';
+  };
   briefingCommand = pkgs.writeShellScript "hermes-supervisor-briefing" ''
     exec ${pkgs.util-linux}/bin/flock \
       --nonblock \
@@ -62,7 +88,7 @@ let
       "${runtimeRoot}/watch.lock" \
       ${hermesPkg.passthru.hermesVenv}/bin/python3 \
       ${../../../tools/hermes_supervisor.py} brief \
-      --kanban-db ${config.home.homeDirectory}/.hermes/kanban.db \
+      --kanban-db ${kanbanDb} \
       --state-root ${stateRoot} \
       --hermes ${hermesPkg}/bin/hermes \
       --discord-target ${lib.escapeShellArg cfg.discordTarget} \
@@ -143,6 +169,11 @@ in
         description = "Dedicated non-secret emergency ntfy endpoint.";
       };
     };
+    retention.apply.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Explicitly permit the retention timer to archive and delete scoped candidates.";
+    };
     board = lib.mkOption {
       type = lib.types.str;
       default = "supervisor";
@@ -185,7 +216,11 @@ in
       }
     ];
 
-    home.packages = [ supervisorCli ] ++ lib.optional cfg.control.enable controlCommand;
+    home.packages = [
+      supervisorCli
+      ecoReportCommand
+    ]
+    ++ lib.optional cfg.control.enable controlCommand;
 
     xdg.configFile."hermes-supervisor/policy.json".source = ./hermes-supervisor/policy.json;
     xdg.configFile."hermes-supervisor/prompts" = {

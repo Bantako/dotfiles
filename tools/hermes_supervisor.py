@@ -76,6 +76,14 @@ class BriefingError(ValueError):
     """A deterministic briefing input or delivery failed closed."""
 
 
+class AuditError(ValueError):
+    """A structured run audit is invalid or cannot be stored safely."""
+
+
+class RetentionError(ValueError):
+    """A scoped retention plan or operation failed closed."""
+
+
 @dataclass(frozen=True)
 class BriefingDecision:
     id: str
@@ -4100,9 +4108,17 @@ def detect_changes(
 
 
 @dataclass(frozen=True)
+class CaptureAuditRelation:
+    source_message_id: int
+    card_id: str
+    relation_kind: str
+
+
+@dataclass(frozen=True)
 class CaptureRunResult:
     cards: tuple[CreatedCardRef, ...]
     state: SupervisorState
+    relations: tuple[CaptureAuditRelation, ...] = ()
 
 
 class CaptureService:
@@ -4126,6 +4142,7 @@ class CaptureService:
         if profile != "default":
             raise CaptureError("source profile must be 'default'")
         cards: list[CreatedCardRef] = []
+        relations: list[CaptureAuditRelation] = []
         try:
             with StateLock(store.lock_path):
                 if store.path.exists():
@@ -4200,6 +4217,11 @@ class CaptureService:
                     self._persist(store, acknowledged)
                     current = acknowledged
                     cards.append(card)
+                    relations.append(CaptureAuditRelation(
+                        message.id,
+                        card.id,
+                        projection.relation_kind or "capture",
+                    ))
 
                 if changes.proposed_message_id < current.last_message_id:
                     raise StateError("proposed message cursor cannot move backwards")
@@ -4213,7 +4235,7 @@ class CaptureService:
                 )
                 if final != current:
                     self._persist(store, final)
-                return CaptureRunResult(tuple(cards), final)
+                return CaptureRunResult(tuple(cards), final, tuple(relations))
         except (CaptureError, DetectionError, StateError):
             raise
         except (OSError, sqlite3.Error, TypeError, ValueError, RecursionError) as error:
@@ -5937,6 +5959,1372 @@ def _decisions_from_markdown(markdown: str) -> tuple[BriefingDecision, ...]:
     return tuple(decisions)
 
 
+_RUN_AUDIT_KEYS = {
+    "schema_version", "batch_id", "status", "invocation_at", "failure_code",
+    "started_at", "finished_at", "pre_operation", "input_message_ids", "input_event_ids", "source_ids",
+    "capture_relations", "primary_goal_id", "primary_card_id", "skipped_candidates",
+    "risk", "gate", "budget", "changed_plan_fields", "confidence",
+    "unresolved_assumptions", "calls", "source_change_count", "accepted_result_ids",
+    "human_corrections", "review_duration_supplied_seconds", "review_reply_started_at",
+    "review_reply_finished_at", "procedure_conversions",
+}
+_RUN_AUDIT_RELATION_KEYS = {"source_message_id", "card_id", "relation_kind"}
+_RUN_AUDIT_SKIPPED_KEYS = {"card_id", "reason_code"}
+_RUN_AUDIT_RISK_KEYS = {"level", "reason_code"}
+_RUN_AUDIT_GATE_KEYS = {"decision", "reason_code"}
+_RUN_AUDIT_BUDGET_KEYS = {"supervisor_runs", "strong_calls", "cheap_calls"}
+_RUN_AUDIT_CALL_KEYS = {
+    "attempt_id", "result_id", "kind", "model_tier", "retry", "escalation",
+    "input_tokens", "output_tokens", "total_tokens", "estimated_cost", "actual_cost",
+}
+_RUN_AUDIT_COST_KEYS = {"amount", "currency"}
+_RUN_AUDIT_PRE_OPERATION_KEYS = {
+    "state_present", "mode", "control_state", "last_message_id", "last_event_id",
+    "last_supervisor_message_id", "last_supervisor_event_id",
+}
+_AUDIT_CURRENCY = re.compile(r"[A-Z]{3}")
+_RUN_AUDIT_MAX_RECORDS = 65_536
+_RUN_AUDIT_MAX_FILE_BYTES = 256 * 1024 * 1024
+_RUN_AUDIT_MAX_RECORD_BYTES = 64 * 1024
+_RUN_AUDIT_MAX_ITEMS = 256
+_AUDIT_CODE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+_AUDIT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _audit_code(value: Any, label: str) -> str:
+    if type(value) is not str or len(value) > 64 or _AUDIT_CODE.fullmatch(value) is None:
+        raise AuditError(f"invalid {label}")
+    return value
+
+
+def _audit_id(value: Any, label: str, *, nullable: bool = False) -> str | None:
+    if nullable and value is None:
+        return None
+    if type(value) is not str or _AUDIT_ID.fullmatch(value) is None:
+        raise AuditError(f"invalid {label}")
+    return value
+
+
+def _audit_count(value: Any, label: str) -> int:
+    if type(value) is not int or not 0 <= value <= 1_000_000_000:
+        raise AuditError(f"invalid {label}")
+    return value
+
+
+def _audit_number(value: Any, label: str, *, nullable: bool = False) -> float | None:
+    if nullable and value is None:
+        return None
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise AuditError(f"invalid {label}")
+    return float(value)
+
+
+def _audit_ids(value: Any, label: str) -> list[int]:
+    if type(value) is not list or len(value) > _RUN_AUDIT_MAX_ITEMS:
+        raise AuditError(f"invalid {label}")
+    if any(type(item) is not int or item <= 0 for item in value):
+        raise AuditError(f"invalid {label}")
+    if value != sorted(set(value)):
+        raise AuditError(f"invalid {label}")
+    return value
+
+
+def validate_run_audit_record(record: Any) -> dict[str, Any]:
+    """Validate the complete bounded audit schema; unknown fields fail closed."""
+    if type(record) is not dict or set(record) != _RUN_AUDIT_KEYS:
+        raise AuditError("invalid run audit fields")
+    if record["schema_version"] != 2 or type(record["schema_version"]) is not int:
+        raise AuditError("invalid run audit schema")
+    _audit_id(record["batch_id"], "batch id")
+    if record["status"] not in ("pending", "completed", "failed"):
+        raise AuditError("invalid audit lifecycle status")
+    invocation = _audit_number(record["invocation_at"], "invocation timestamp")
+    failure_code = record["failure_code"]
+    if record["status"] == "failed":
+        _audit_code(failure_code, "failure code")
+    elif failure_code is not None:
+        raise AuditError("failure code is terminal-failure only")
+    started = _audit_number(record["started_at"], "started timestamp")
+    finished = _audit_number(record["finished_at"], "finished timestamp")
+    assert started is not None and finished is not None
+    if finished < started:
+        raise AuditError("invalid audit timestamp order")
+    pre_operation = record["pre_operation"]
+    if type(pre_operation) is not dict or set(pre_operation) != _RUN_AUDIT_PRE_OPERATION_KEYS:
+        raise AuditError("invalid pre-operation metadata")
+    if type(pre_operation["state_present"]) is not bool:
+        raise AuditError("invalid pre-operation state presence")
+    if pre_operation["mode"] not in ("shadow", "limited", "eco"):
+        raise AuditError("invalid pre-operation mode")
+    if pre_operation["control_state"] not in (
+        "running", "paused", "frozen", "emergency_stopped"
+    ):
+        raise AuditError("invalid pre-operation control state")
+    for key in (
+        "last_message_id", "last_event_id", "last_supervisor_message_id",
+        "last_supervisor_event_id",
+    ):
+        _audit_count(pre_operation[key], key)
+    message_ids = _audit_ids(record["input_message_ids"], "message ids")
+    event_ids = _audit_ids(record["input_event_ids"], "event ids")
+    source_ids = record["source_ids"]
+    expected_source_ids = sorted(
+        [f"message:{item}" for item in message_ids]
+        + [f"event:{item}" for item in event_ids]
+    )
+    if source_ids != expected_source_ids:
+        raise AuditError("invalid unique source ids")
+    for field, keys in (
+        ("capture_relations", _RUN_AUDIT_RELATION_KEYS),
+        ("skipped_candidates", _RUN_AUDIT_SKIPPED_KEYS),
+    ):
+        items = record[field]
+        if type(items) is not list or len(items) > _RUN_AUDIT_MAX_ITEMS:
+            raise AuditError(f"invalid {field}")
+        for item in items:
+            if type(item) is not dict or set(item) != keys:
+                raise AuditError(f"invalid {field}")
+            _audit_id(item["card_id"], "candidate card id", nullable=field == "skipped_candidates")
+            if field == "capture_relations":
+                source_message_id = item["source_message_id"]
+                if type(source_message_id) is not int or source_message_id <= 0:
+                    raise AuditError("invalid capture source message id")
+                _audit_code(item["relation_kind"], field)
+            else:
+                _audit_code(item["reason_code"], field)
+    _audit_id(record["primary_goal_id"], "primary goal id", nullable=True)
+    _audit_id(record["primary_card_id"], "primary card id", nullable=True)
+    risk = record["risk"]
+    if type(risk) is not dict or set(risk) != _RUN_AUDIT_RISK_KEYS:
+        raise AuditError("invalid risk")
+    if risk["level"] not in ("none", "low", "medium", "high", "critical"):
+        raise AuditError("invalid risk level")
+    _audit_code(risk["reason_code"], "risk reason")
+    gate = record["gate"]
+    if type(gate) is not dict or set(gate) != _RUN_AUDIT_GATE_KEYS:
+        raise AuditError("invalid gate")
+    if gate["decision"] not in ("allow", "schedule", "needs_human", "deny", "not_evaluated"):
+        raise AuditError("invalid gate decision")
+    _audit_code(gate["reason_code"], "gate reason")
+    budget = record["budget"]
+    if type(budget) is not dict or set(budget) != _RUN_AUDIT_BUDGET_KEYS:
+        raise AuditError("invalid budget")
+    for key in sorted(_RUN_AUDIT_BUDGET_KEYS):
+        _audit_count(budget[key], key)
+    for field in ("changed_plan_fields", "unresolved_assumptions"):
+        items = record[field]
+        if type(items) is not list or len(items) > 64 or len(items) != len(set(items)):
+            raise AuditError(f"invalid {field}")
+        for item in items:
+            _audit_code(item, field)
+    confidence = _audit_number(record["confidence"], "confidence")
+    if confidence is None or confidence > 1:
+        raise AuditError("invalid confidence")
+    calls = record["calls"]
+    if type(calls) is not list or len(calls) > _RUN_AUDIT_MAX_ITEMS:
+        raise AuditError("invalid calls")
+    accepted_result_ids = record["accepted_result_ids"]
+    if (
+        type(accepted_result_ids) is not list or len(accepted_result_ids) > _RUN_AUDIT_MAX_ITEMS
+        or accepted_result_ids != sorted(set(accepted_result_ids))
+    ):
+        raise AuditError("invalid accepted result ids")
+    for result_id in accepted_result_ids:
+        _audit_id(result_id, "accepted result id")
+    attempt_ids: set[str] = set()
+    call_result_ids: set[str] = set()
+    for call in calls:
+        if type(call) is not dict or set(call) != _RUN_AUDIT_CALL_KEYS:
+            raise AuditError("invalid call")
+        attempt_id = _audit_id(call["attempt_id"], "call attempt id")
+        if attempt_id in attempt_ids:
+            raise AuditError("duplicate call attempt id")
+        assert attempt_id is not None
+        attempt_ids.add(attempt_id)
+        result_id = _audit_id(call["result_id"], "call result id", nullable=True)
+        if result_id is not None:
+            call_result_ids.add(result_id)
+            if result_id not in accepted_result_ids:
+                raise AuditError("call result is not explicitly accepted")
+        if call["retry"] and result_id is None:
+            raise AuditError("retry must be attributed to a result")
+        if call["kind"] not in ("llm", "api") or call["model_tier"] not in ("none", "strong", "cheap"):
+            raise AuditError("invalid call kind")
+        if call["kind"] == "llm" and call["model_tier"] == "none":
+            raise AuditError("invalid LLM model tier")
+        if call["kind"] == "api" and call["model_tier"] != "none":
+            raise AuditError("invalid API model tier")
+        for key in ("retry", "escalation"):
+            if type(call[key]) is not bool:
+                raise AuditError("invalid call flag")
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            _audit_count(call[key], key)
+        if call["total_tokens"] != call["input_tokens"] + call["output_tokens"]:
+            raise AuditError("invalid total token count")
+        for key in ("estimated_cost", "actual_cost"):
+            cost = call[key]
+            if cost is None:
+                continue
+            if type(cost) is not dict or set(cost) != _RUN_AUDIT_COST_KEYS:
+                raise AuditError("invalid cost")
+            _audit_number(cost["amount"], "cost amount")
+            if type(cost["currency"]) is not str or _AUDIT_CURRENCY.fullmatch(cost["currency"]) is None:
+                raise AuditError("invalid cost currency")
+    if call_result_ids != set(accepted_result_ids):
+        raise AuditError("accepted result ids must match attributed call results")
+    for key in (
+        "source_change_count", "human_corrections", "procedure_conversions"
+    ):
+        _audit_count(record[key], key)
+    _audit_number(
+        record["review_duration_supplied_seconds"], "supplied review duration", nullable=True
+    )
+    reply_started = _audit_number(
+        record["review_reply_started_at"], "review reply start", nullable=True
+    )
+    reply_finished = _audit_number(
+        record["review_reply_finished_at"], "review reply finish", nullable=True
+    )
+    if (reply_started is None) != (reply_finished is None):
+        raise AuditError("review reply timestamps must be supplied together")
+    if reply_started is not None and reply_finished is not None and reply_finished < reply_started:
+        raise AuditError("invalid review reply timestamp order")
+    if record["source_change_count"] != len(message_ids) + len(event_ids):
+        raise AuditError("inconsistent source change count")
+    return record
+
+
+class RunAuditLog:
+    """Private, bounded JSONL repository using atomic whole-file replacement."""
+
+    def __init__(self, path: Path):
+        if type(path) is not type(Path()) or not path.is_absolute():
+            raise AuditError("audit path must be absolute")
+        self.path = path
+
+    def _read_payload(self, directory_fd: int, *, missing_ok: bool) -> bytes:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path.name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            if missing_ok:
+                return b""
+            raise AuditError("run audit does not exist")
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+                or metadata.st_size > _RUN_AUDIT_MAX_FILE_BYTES
+            ):
+                raise AuditError("run audit must be a private single-link regular file")
+            payload = b""
+            while len(payload) <= metadata.st_size:
+                chunk = os.read(fd, min(65536, metadata.st_size + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload += chunk
+            if len(payload) != metadata.st_size or os.read(fd, 1):
+                raise AuditError("run audit changed during read")
+            return payload
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _decode(payload: bytes) -> tuple[dict[str, Any], ...]:
+        if payload and not payload.endswith(b"\n"):
+            raise AuditError("truncated run audit")
+        records: list[dict[str, Any]] = []
+        for line in payload.splitlines():
+            try:
+                raw = line.decode("ascii", "strict")
+            except UnicodeError as error:
+                raise AuditError("invalid run audit encoding") from error
+            value = _strict_json_loads(
+                raw, max_bytes=_RUN_AUDIT_MAX_RECORD_BYTES, error_type=AuditError,
+                message="invalid run audit record",
+            )
+            records.append(validate_run_audit_record(value))
+        if len(records) > _RUN_AUDIT_MAX_RECORDS:
+            raise AuditError("too many run audit records")
+        return tuple(records)
+
+    def read_records(self) -> tuple[dict[str, Any], ...]:
+        try:
+            directory_fd = _open_control_private_directory(self.path.parent, create=False)
+        except (OSError, StateError) as error:
+            raise AuditError("run audit directory is invalid") from error
+        try:
+            return self._decode(self._read_payload(directory_fd, missing_ok=False))
+        finally:
+            os.close(directory_fd)
+
+    @contextlib.contextmanager
+    def _exclusive_lock(self):
+        """Serialize read/dedupe/replace through a bounded private fd lock."""
+        directory_fd = lock_fd = -1
+        try:
+            directory_fd = _open_control_private_directory(self.path.parent, create=True)
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            if type(nofollow) is not int:
+                raise AuditError("run audit lock requires O_NOFOLLOW")
+            flags = os.O_RDWR | os.O_CREAT | nofollow | getattr(os, "O_CLOEXEC", 0)
+            lock_fd = os.open(self.path.name + ".lock", flags, 0o600, dir_fd=directory_fd)
+            metadata = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+            ):
+                raise AuditError("run audit lock must be a private single-link regular file")
+            os.fchmod(lock_fd, 0o600)
+            deadline = time.monotonic() + 10.0
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise AuditError("run audit lock timed out")
+                    time.sleep(0.01)
+            yield
+        except AuditError:
+            raise
+        except OSError as error:
+            raise AuditError("run audit lock failed") from error
+        finally:
+            if lock_fd >= 0:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+
+    def append(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self._exclusive_lock():
+            return self._append_unlocked(record)
+
+    def annotate(
+        self,
+        batch_id: str,
+        *,
+        review_duration_supplied_seconds: int | float | None = None,
+        review_reply_started_at: int | float | None = None,
+        review_reply_finished_at: int | float | None = None,
+        procedure_conversions: int | None = None,
+    ) -> dict[str, Any]:
+        _audit_id(batch_id, "batch id")
+        if review_duration_supplied_seconds is not None:
+            _audit_number(
+                review_duration_supplied_seconds,
+                "supplied review duration",
+            )
+        if (review_reply_started_at is None) != (review_reply_finished_at is None):
+            raise AuditError("review reply timestamps must be supplied together")
+        if review_reply_started_at is not None and review_reply_finished_at is not None:
+            started = _audit_number(review_reply_started_at, "review reply start")
+            finished = _audit_number(review_reply_finished_at, "review reply finish")
+            assert started is not None and finished is not None
+            if finished < started:
+                raise AuditError("invalid review reply timestamp order")
+        if procedure_conversions is not None:
+            _audit_count(procedure_conversions, "procedure conversions")
+        if (
+            review_duration_supplied_seconds is None
+            and review_reply_started_at is None
+            and procedure_conversions is None
+        ):
+            raise AuditError("audit annotation is empty")
+        with self._exclusive_lock():
+            records = self.read_records()
+            matches = [record for record in records if record["batch_id"] == batch_id]
+            if len(matches) != 1 or matches[0]["status"] not in ("completed", "failed"):
+                raise AuditError("audit annotation requires one terminal batch")
+            updated = dict(matches[0])
+            if review_duration_supplied_seconds is not None:
+                existing_duration = updated["review_duration_supplied_seconds"]
+                if existing_duration not in (None, review_duration_supplied_seconds):
+                    raise AuditError("supplied review duration conflicts")
+                updated["review_duration_supplied_seconds"] = review_duration_supplied_seconds
+            if review_reply_started_at is not None:
+                existing_reply = (
+                    updated["review_reply_started_at"],
+                    updated["review_reply_finished_at"],
+                )
+                incoming_reply = (review_reply_started_at, review_reply_finished_at)
+                if existing_reply != (None, None) and existing_reply != incoming_reply:
+                    raise AuditError("review reply timestamps conflict")
+                updated["review_reply_started_at"] = review_reply_started_at
+                updated["review_reply_finished_at"] = review_reply_finished_at
+            if procedure_conversions is not None:
+                existing_conversions = updated["procedure_conversions"]
+                if existing_conversions not in (0, procedure_conversions):
+                    raise AuditError("procedure conversions conflict")
+                updated["procedure_conversions"] = procedure_conversions
+            validate_run_audit_record(updated)
+            return self._append_unlocked(updated, allow_terminal_annotation=True)
+
+    def _append_unlocked(
+        self,
+        record: dict[str, Any],
+        *,
+        allow_terminal_annotation: bool = False,
+    ) -> dict[str, Any]:
+        validate_run_audit_record(record)
+        canonical = json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        encoded = (canonical + "\n").encode("ascii")
+        if len(encoded) > _RUN_AUDIT_MAX_RECORD_BYTES:
+            raise AuditError("run audit record exceeds limit")
+        try:
+            directory_fd = _open_control_private_directory(self.path.parent, create=True)
+        except (OSError, StateError) as error:
+            raise AuditError("run audit directory is invalid") from error
+        temporary = f".{self.path.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}"
+        fd = -1
+        try:
+            current = self._read_payload(directory_fd, missing_ok=True)
+            records = self._decode(current)
+            duplicate_indexes = [
+                index for index, item in enumerate(records)
+                if item["batch_id"] == record["batch_id"]
+            ]
+            replacement_index: int | None = None
+            if duplicate_indexes:
+                if len(duplicate_indexes) != 1:
+                    raise AuditError("duplicate batch id in run audit")
+                replacement_index = duplicate_indexes[0]
+                duplicate = records[replacement_index]
+                existing = json.dumps(
+                    duplicate, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                )
+                if existing == canonical:
+                    return duplicate
+                existing_status = duplicate["status"]
+                incoming_status = record["status"]
+                annotation_fields = {
+                    "review_duration_supplied_seconds",
+                    "review_reply_started_at",
+                    "review_reply_finished_at",
+                    "procedure_conversions",
+                }
+                annotation_update = (
+                    allow_terminal_annotation
+                    and existing_status in ("completed", "failed")
+                    and incoming_status == existing_status
+                    and all(
+                        duplicate[key] == record[key]
+                        for key in _RUN_AUDIT_KEYS - annotation_fields
+                    )
+                )
+                if annotation_update:
+                    pass
+                elif existing_status == "pending" and incoming_status == "pending":
+                    return duplicate
+                elif existing_status in ("completed", "failed") and incoming_status == "pending":
+                    return duplicate
+                elif existing_status != "pending" or incoming_status not in ("completed", "failed"):
+                    raise AuditError("batch id conflicts with committed run audit")
+            output_records = list(records)
+            if replacement_index is None:
+                output_records.append(record)
+            else:
+                output_records[replacement_index] = record
+            payload = b"".join(
+                (json.dumps(
+                    item, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                ) + "\n").encode("ascii")
+                for item in output_records
+            )
+            if len(payload) > _RUN_AUDIT_MAX_FILE_BYTES:
+                raise AuditError("run audit file exceeds limit")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+            fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+            written = 0
+            while written < len(payload):
+                count = os.write(fd, payload[written:])
+                if count <= 0:
+                    raise OSError("short audit write")
+                written += count
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            os.replace(temporary, self.path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return record
+        except AuditError:
+            raise
+        except OSError as error:
+            raise AuditError("run audit append failed") from error
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            os.close(directory_fd)
+
+
+def build_eco_report(records: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    if type(records) is not tuple or len(records) > _RUN_AUDIT_MAX_RECORDS:
+        raise AuditError("invalid eco report input")
+    validated = sorted(
+        (validate_run_audit_record(record) for record in records),
+        key=lambda item: (item["started_at"], item["batch_id"]),
+    )
+    calls = [call for record in validated for call in record["calls"]]
+    attempt_ids = [call["attempt_id"] for call in calls]
+    if len(attempt_ids) != len(set(attempt_ids)):
+        raise AuditError("duplicate call attempt id across audit records")
+    llm_calls = [call for call in calls if call["kind"] == "llm"]
+    idle = [record for record in validated if not record["source_ids"]]
+    source_ids = {source_id for record in validated for source_id in record["source_ids"]}
+    accepted_result_ids = {
+        result_id for record in validated for result_id in record["accepted_result_ids"]
+    }
+    accepted_calls = [call for call in calls if call["result_id"] in accepted_result_ids]
+    input_tokens = sum(call["input_tokens"] for call in llm_calls)
+    output_tokens = sum(call["output_tokens"] for call in llm_calls)
+    total_tokens = sum(call["total_tokens"] for call in llm_calls)
+
+    currencies = {
+        cost["currency"]
+        for call in accepted_calls
+        for field in ("estimated_cost", "actual_cost")
+        if (cost := call[field]) is not None
+    }
+    if len(currencies) > 1:
+        raise AuditError("mixed audit cost currencies")
+
+    def cost_summary(field: str) -> dict[str, Any]:
+        values = [call[field] for call in accepted_calls]
+        known = [value for value in values if value is not None]
+        known_currencies = {value["currency"] for value in known}
+        return {
+            "amount": None if not known else sum(value["amount"] for value in known),
+            "currency": next(iter(known_currencies), None),
+            "known_count": len(known),
+            "unknown_count": len(values) - len(known),
+        }
+
+    estimated_cost = cost_summary("estimated_cost")
+    actual_cost = cost_summary("actual_cost")
+    supplied_values: list[float] = []
+    fallback_values: list[float] = []
+    chosen_values: list[float] = []
+    for record in validated:
+        supplied = record["review_duration_supplied_seconds"]
+        if supplied is not None:
+            supplied_values.append(supplied)
+            chosen_values.append(supplied)
+        elif record["review_reply_started_at"] is not None:
+            fallback = record["review_reply_finished_at"] - record["review_reply_started_at"]
+            fallback_values.append(fallback)
+            chosen_values.append(fallback)
+
+    def ratio(
+        numerator: int | float | None, denominator: int, *, unknown: bool = False
+    ) -> dict[str, int | float | None]:
+        return {
+            "numerator": numerator,
+            "denominator": denominator,
+            "value": (
+                None if denominator == 0 or numerator is None or unknown
+                else numerator / denominator
+            ),
+        }
+
+    def duration(values: list[float]) -> dict[str, int | float | None]:
+        return {"total": None if not values else sum(values), "count": len(values)}
+
+    accepted = len(accepted_result_ids)
+    return {
+        "schema_version": 1,
+        "batches": len(validated),
+        "source_changes": len(source_ids),
+        "idle_polls": len(idle),
+        "idle_llm_calls": sum(
+            call["kind"] == "llm" for record in idle for call in record["calls"]
+        ),
+        "batches_per_source_change": ratio(len(validated), len(source_ids)),
+        "strong_invocations": sum(call["model_tier"] == "strong" for call in llm_calls),
+        "cheap_invocations": sum(call["model_tier"] == "cheap" for call in llm_calls),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_cost": estimated_cost,
+        "actual_cost": actual_cost,
+        "accepted_results": accepted,
+        "tokens_per_accepted_result": ratio(total_tokens, accepted),
+        "estimated_cost_per_accepted_result": ratio(
+            estimated_cost["amount"], accepted, unknown=estimated_cost["unknown_count"] > 0
+        ),
+        "actual_cost_per_accepted_result": ratio(
+            actual_cost["amount"], accepted, unknown=actual_cost["unknown_count"] > 0
+        ),
+        "retries": sum(call["retry"] for call in calls),
+        "escalations": sum(call["escalation"] for call in calls),
+        "human_corrections": sum(record["human_corrections"] for record in validated),
+        "review_duration_supplied_seconds": duration(supplied_values),
+        "review_duration_fallback_seconds": duration(fallback_values),
+        "review_duration_chosen_seconds": duration(chosen_values),
+        "procedure_conversions": sum(record["procedure_conversions"] for record in validated),
+    }
+
+
+_RETENTION_KINDS = frozenset({"detailed_logs", "worktrees", "sandboxes", "cache"})
+_RETENTION_NAME = re.compile(r"supervisor-[a-z0-9][a-z0-9.-]{0,127}")
+_RETENTION_MAX_CANDIDATES = 256
+_RETENTION_OWNERS = frozenset({
+    "supervisor", "supervisor-capture", "supervisor-watcher", "supervisor-control"
+})
+
+
+@dataclass(frozen=True)
+class RetentionTreeEntry:
+    path: str
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    nlink: int
+    mtime_ns: int
+    kind: str
+
+
+@dataclass(frozen=True)
+class RetentionArtifact:
+    kind: str
+    root: Path
+    name: str
+    device: int
+    inode: int
+    mtime: float
+    is_directory: bool
+    manifest: tuple[RetentionTreeEntry, ...]
+    provenance_name: str
+    provenance: RetentionTreeEntry
+
+
+@dataclass(frozen=True)
+class RetentionPlan:
+    board: str
+    kanban_db: Path
+    cutoff: float
+    archive_ids: tuple[str, ...]
+    artifacts: tuple[RetentionArtifact, ...]
+
+
+@dataclass(frozen=True)
+class RetentionResult:
+    candidates: RetentionPlan
+    archived_ids: tuple[str, ...]
+    deleted_artifacts: tuple[str, ...]
+
+
+def _validate_retention_board(board: Any) -> str:
+    if (
+        type(board) is not str or len(board) > 64
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", board) is None
+    ):
+        raise RetentionError("invalid retention board")
+    return board
+
+
+_RETENTION_TASK_SCHEMA = (
+    ("id", "TEXT", 0, 1), ("title", "TEXT", 1, 0), ("body", "TEXT", 0, 0),
+    ("assignee", "TEXT", 0, 0), ("status", "TEXT", 1, 0),
+    ("priority", "INTEGER", 0, 0), ("created_by", "TEXT", 0, 0),
+    ("created_at", "INTEGER", 1, 0), ("started_at", "INTEGER", 0, 0),
+    ("completed_at", "INTEGER", 0, 0), ("workspace_kind", "TEXT", 1, 0),
+    ("workspace_path", "TEXT", 0, 0), ("branch_name", "TEXT", 0, 0),
+    ("claim_lock", "TEXT", 0, 0), ("claim_expires", "INTEGER", 0, 0),
+    ("tenant", "TEXT", 0, 0), ("result", "TEXT", 0, 0),
+    ("idempotency_key", "TEXT", 0, 0), ("consecutive_failures", "INTEGER", 1, 0),
+    ("worker_pid", "INTEGER", 0, 0), ("last_failure_error", "TEXT", 0, 0),
+    ("max_runtime_seconds", "INTEGER", 0, 0), ("last_heartbeat_at", "INTEGER", 0, 0),
+    ("current_run_id", "INTEGER", 0, 0), ("workflow_template_id", "TEXT", 0, 0),
+    ("current_step_key", "TEXT", 0, 0), ("skills", "TEXT", 0, 0),
+    ("model_override", "TEXT", 0, 0), ("max_retries", "INTEGER", 0, 0),
+    ("goal_mode", "INTEGER", 1, 0), ("goal_max_turns", "INTEGER", 0, 0),
+    ("session_id", "TEXT", 0, 0), ("project_id", "TEXT", 0, 0),
+    ("block_kind", "TEXT", 0, 0), ("block_recurrences", "INTEGER", 1, 0),
+)
+
+
+class RetentionTaskRepository:
+    """Read one already-pinned board database through a read-only SQLite snapshot."""
+
+    def __init__(self, database: Path):
+        if type(database) is not type(Path()) or not database.is_absolute():
+            raise RetentionError("kanban database path must be absolute")
+        self.database = database
+
+    def _read(self, task_id: str | None, cutoff: float | None) -> Any:
+        directory_fd = file_fd = -1
+        connection: sqlite3.Connection | None = None
+        try:
+            directory_fd = _open_control_private_directory(self.database.parent, create=False)
+            file_fd = os.open(
+                self.database.name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise RetentionError("kanban database must be a single-link regular file")
+            connection = sqlite3.connect(
+                f"file:/proc/self/fd/{file_fd}?mode=ro", uri=True, isolation_level=None
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            schema = tuple(
+                (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5]))
+                for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            )
+            if schema != _RETENTION_TASK_SCHEMA:
+                raise RetentionError("unsupported retention tasks schema")
+            if task_id is None:
+                rows = connection.execute(
+                    "SELECT id, status, created_by, completed_at FROM tasks "
+                    "WHERE status = 'done' AND completed_at IS NOT NULL "
+                    "AND completed_at <= ? ORDER BY id LIMIT ?",
+                    (cutoff, _RETENTION_MAX_CANDIDATES + 1),
+                ).fetchall()
+                if len(rows) > _RETENTION_MAX_CANDIDATES:
+                    raise RetentionError("too many archive candidates")
+                return tuple(self._validate_row(row) for row in rows)
+            rows = connection.execute(
+                "SELECT id, status, created_by, completed_at FROM tasks WHERE id = ? LIMIT 2",
+                (task_id,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RetentionError("retention task is missing or duplicated")
+            return self._validate_row(rows[0])
+        except RetentionError:
+            raise
+        except (OSError, sqlite3.Error, StateError, TypeError, ValueError) as error:
+            raise RetentionError("retention database read failed") from error
+        finally:
+            if connection is not None:
+                connection.close()
+            if file_fd >= 0:
+                os.close(file_fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+
+    @staticmethod
+    def _validate_row(row: sqlite3.Row) -> tuple[str, str, str, float | None]:
+        identifier, status_value, owner, completed_at = (
+            row["id"], row["status"], row["created_by"], row["completed_at"]
+        )
+        if (
+            type(identifier) is not str or _AUDIT_ID.fullmatch(identifier) is None
+            or type(status_value) is not str or status_value not in _KANBAN_TASK_STATUSES
+            or type(owner) is not str
+            or (completed_at is not None and (
+                type(completed_at) not in (int, float) or not math.isfinite(completed_at)
+                or completed_at < 0
+            ))
+        ):
+            raise RetentionError("invalid retention task metadata")
+        return identifier, status_value, owner, None if completed_at is None else float(completed_at)
+
+    def candidates(self, cutoff: float) -> tuple[str, ...]:
+        rows = self._read(None, cutoff)
+        return tuple(row[0] for row in rows if row[2] in _RETENTION_OWNERS)
+
+    def status(self, task_id: str) -> tuple[str, str, str, float | None]:
+        _audit_id(task_id, "retention task id")
+        return self._read(task_id, None)
+
+
+def _retention_archive_ids(database: Path, board: str, cutoff: float) -> tuple[str, ...]:
+    _validate_retention_board(board)
+    return RetentionTaskRepository(database).candidates(cutoff)
+
+
+def _retention_tree_manifest(
+    parent_fd: int,
+    name: str,
+    *,
+    root_device: int,
+    relative: str = ".",
+    depth: int = 0,
+    budget: list[int] | None = None,
+) -> tuple[RetentionTreeEntry, ...]:
+    if budget is None:
+        budget = [0]
+    if depth > 16:
+        raise RetentionError("retention artifact exceeds depth limit")
+    budget[0] += 1
+    if budget[0] > 4096:
+        raise RetentionError("retention artifact exceeds entry limit")
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    is_directory = stat.S_ISDIR(metadata.st_mode)
+    is_regular = stat.S_ISREG(metadata.st_mode)
+    if (
+        metadata.st_dev != root_device or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o077 or not (is_directory or is_regular)
+        or (is_regular and metadata.st_nlink != 1)
+    ):
+        raise RetentionError("retention artifact tree is unsafe")
+    entry = RetentionTreeEntry(
+        relative, metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+        metadata.st_nlink, metadata.st_mtime_ns, "directory" if is_directory else "file",
+    )
+    entries = [entry]
+    if is_directory:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            for child in sorted(os.listdir(child_fd)):
+                child_relative = child if relative == "." else f"{relative}/{child}"
+                entries.extend(_retention_tree_manifest(
+                    child_fd, child, root_device=root_device, relative=child_relative,
+                    depth=depth + 1, budget=budget,
+                ))
+        finally:
+            os.close(child_fd)
+    return tuple(entries)
+
+
+def _read_artifact_provenance(
+    directory_fd: int, kind: str, name: str, cutoff: float, root_device: int,
+) -> tuple[str, RetentionTreeEntry] | None:
+    provenance_name = name + ".supervisor-manifest.json"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(provenance_name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+            or metadata.st_dev != root_device or metadata.st_size > 4096
+            or metadata.st_mtime > cutoff
+        ):
+            raise RetentionError("artifact provenance is unsafe or too new")
+        payload = os.read(fd, 4097)
+        if len(payload) != metadata.st_size:
+            raise RetentionError("artifact provenance changed during read")
+        value = _strict_json_loads(
+            payload.decode("ascii", "strict"), max_bytes=4096,
+            error_type=RetentionError, message="invalid artifact provenance",
+        )
+        if (
+            type(value) is not dict
+            or set(value) != {"schema_version", "kind", "name", "owner", "id", "created_at"}
+            or value["schema_version"] != 1 or type(value["schema_version"]) is not int
+            or value["kind"] != kind or value["name"] != name
+            or value["owner"] != "hermes-supervisor"
+        ):
+            raise RetentionError("invalid artifact provenance")
+        _audit_id(value["id"], "artifact provenance id")
+        created_at = _audit_number(value["created_at"], "artifact created timestamp")
+        if created_at is None or created_at > cutoff:
+            return None
+        entry = RetentionTreeEntry(
+            provenance_name, metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_uid, metadata.st_nlink, metadata.st_mtime_ns, "file",
+        )
+        return provenance_name, entry
+    except (UnicodeError, AuditError) as error:
+        raise RetentionError("invalid artifact provenance") from error
+    finally:
+        os.close(fd)
+
+
+def _scan_retention_root(kind: str, root: Path, cutoff: float) -> list[RetentionArtifact]:
+    directory_fd = -1
+    try:
+        directory_fd = _open_control_private_directory(root, create=False)
+        root_metadata = os.fstat(directory_fd)
+        artifacts: list[RetentionArtifact] = []
+        for name in sorted(os.listdir(directory_fd)):
+            if _RETENTION_NAME.fullmatch(name) is None or name.endswith(
+                ".supervisor-manifest.json"
+            ):
+                continue
+            provenance = _read_artifact_provenance(
+                directory_fd, kind, name, cutoff, root_metadata.st_dev
+            )
+            if provenance is None:
+                continue
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            is_directory = stat.S_ISDIR(metadata.st_mode)
+            is_regular = stat.S_ISREG(metadata.st_mode)
+            if (
+                not (is_directory or is_regular) or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+            ):
+                raise RetentionError("retention artifact must be private owned data")
+            manifest = _retention_tree_manifest(
+                directory_fd, name, root_device=root_metadata.st_dev
+            )
+            if metadata.st_mtime > cutoff or any(
+                entry.mtime_ns > int(cutoff * 1_000_000_000) for entry in manifest
+            ):
+                continue
+            provenance_name, provenance_entry = provenance
+            artifacts.append(RetentionArtifact(
+                kind, root, name, root_metadata.st_dev, metadata.st_ino,
+                metadata.st_mtime, is_directory, manifest,
+                provenance_name, provenance_entry,
+            ))
+        return artifacts
+    except RetentionError:
+        raise
+    except (OSError, StateError, TypeError, ValueError) as error:
+        raise RetentionError("artifact retention planning failed") from error
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def plan_retention(
+    kanban_db: Path,
+    board: str,
+    artifact_roots: dict[str, Path],
+    *,
+    days: int,
+    now: int | float,
+) -> RetentionPlan:
+    board = _validate_retention_board(board)
+    if type(days) is not int or not 1 <= days <= 365_000:
+        raise RetentionError("retention days must be a positive integer")
+    if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+        raise RetentionError("retention time must be finite and nonnegative")
+    if (
+        type(artifact_roots) is not dict or len(artifact_roots) > len(_RETENTION_KINDS)
+        or not set(artifact_roots).issubset(_RETENTION_KINDS)
+    ):
+        raise RetentionError("invalid artifact roots")
+    cutoff = float(now) - days * 86400
+    artifacts: list[RetentionArtifact] = []
+    seen_roots: set[Path] = set()
+    for kind in sorted(artifact_roots):
+        root = artifact_roots[kind]
+        if type(root) is not type(Path()) or not root.is_absolute() or root in seen_roots:
+            raise RetentionError("artifact roots must be distinct absolute paths")
+        seen_roots.add(root)
+        artifacts.extend(_scan_retention_root(kind, root, cutoff))
+        if len(artifacts) > _RETENTION_MAX_CANDIDATES:
+            raise RetentionError("too many artifact candidates")
+    return RetentionPlan(
+        board, kanban_db, cutoff, _retention_archive_ids(kanban_db, board, cutoff),
+        tuple(artifacts),
+    )
+
+
+class HermesRetentionClient:
+    def __init__(
+        self, executable: str, board: str, *, runner: Callable[..., Any] | None = None,
+        timeout: float = 30.0,
+    ):
+        if type(executable) is not str or not executable or "\x00" in executable:
+            raise RetentionError("invalid Hermes executable")
+        _validate_retention_board(board)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise RetentionError("invalid Hermes timeout")
+        self.executable = executable
+        self.board = board
+        self.runner = runner
+        self.timeout = timeout
+
+    def archive(self, task_id: str) -> None:
+        _audit_id(task_id, "archive task id")
+        argv = [self.executable, "kanban", "--board", self.board, "archive", task_id]
+        try:
+            environment = dict(os.environ)
+            environment.pop("HERMES_KANBAN_BOARD", None)
+            if self.runner is None:
+                result = _bounded_subprocess_run(
+                    argv, environment=environment, timeout=self.timeout, output_limit=65536
+                )
+            else:
+                result = self.runner(
+                    argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=self.timeout, check=False,
+                    shell=False, env=environment,
+                )
+            if (
+                type(getattr(result, "returncode", None)) is not int
+                or type(getattr(result, "stdout", None)) is not str
+                or type(getattr(result, "stderr", None)) is not str
+                or result.returncode != 0
+                or len(result.stdout.encode("utf-8", "strict")) > 65536
+                or len(result.stderr.encode("utf-8", "strict")) > 65536
+            ):
+                raise RetentionError("Hermes archive failed")
+        except RetentionError:
+            raise
+        except Exception as error:
+            raise RetentionError("Hermes archive failed") from error
+
+
+def _entry_matches(metadata: os.stat_result, expected: RetentionTreeEntry) -> bool:
+    return (
+        metadata.st_dev == expected.device and metadata.st_ino == expected.inode
+        and metadata.st_mode == expected.mode and metadata.st_uid == expected.uid
+        and metadata.st_nlink == expected.nlink and metadata.st_mtime_ns == expected.mtime_ns
+        and ("directory" if stat.S_ISDIR(metadata.st_mode) else "file") == expected.kind
+        and (expected.kind != "file" or metadata.st_nlink == 1)
+    )
+
+
+def _entry_identity_matches(metadata: os.stat_result, expected: RetentionTreeEntry) -> bool:
+    return (
+        metadata.st_dev == expected.device and metadata.st_ino == expected.inode
+        and metadata.st_mode == expected.mode and metadata.st_uid == expected.uid
+        and metadata.st_nlink == expected.nlink
+        and ("directory" if stat.S_ISDIR(metadata.st_mode) else "file") == expected.kind
+    )
+
+
+def _current_retention_manifest(artifact: RetentionArtifact) -> tuple[RetentionTreeEntry, ...]:
+    directory_fd = -1
+    try:
+        directory_fd = _open_control_private_directory(artifact.root, create=False)
+        root_metadata = os.fstat(directory_fd)
+        if root_metadata.st_dev != artifact.device:
+            raise RetentionError("retention root device changed after planning")
+        return _retention_tree_manifest(
+            directory_fd, artifact.name, root_device=artifact.device
+        )
+    except RetentionError:
+        raise
+    except (OSError, StateError) as error:
+        raise RetentionError("retention artifact changed after planning") from error
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def _remove_retention_tree(
+    parent_fd: int,
+    name: str,
+    expected: dict[str, RetentionTreeEntry],
+    *,
+    relative: str = ".",
+) -> None:
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    entry = expected.get(relative)
+    if entry is None or not _entry_matches(metadata, entry) or entry.kind != "directory":
+        raise RetentionError("retention artifact changed during deletion")
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    child_fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        if not _entry_matches(os.fstat(child_fd), entry):
+            raise RetentionError("retention artifact changed during directory open")
+        actual_children = sorted(os.listdir(child_fd))
+        expected_children = sorted(
+            path.rsplit("/", 1)[-1] for path in expected
+            if path != "." and (
+                (relative == "." and "/" not in path)
+                or (relative != "." and path.startswith(relative + "/")
+                    and "/" not in path[len(relative) + 1:])
+            )
+        )
+        if actual_children != expected_children:
+            raise RetentionError("retention artifact changed during deletion")
+        for child in actual_children:
+            child_relative = child if relative == "." else f"{relative}/{child}"
+            child_entry = expected[child_relative]
+            child_metadata = os.stat(child, dir_fd=child_fd, follow_symlinks=False)
+            if not _entry_matches(child_metadata, child_entry):
+                raise RetentionError("retention artifact changed during deletion")
+            if child_entry.kind == "directory":
+                _remove_retention_tree(
+                    child_fd, child, expected, relative=child_relative
+                )
+            elif child_entry.kind == "file":
+                if not _entry_matches(
+                    os.stat(child, dir_fd=child_fd, follow_symlinks=False), child_entry
+                ):
+                    raise RetentionError("retention artifact changed before unlink")
+                os.unlink(child, dir_fd=child_fd)
+            else:
+                raise RetentionError("unsupported retention artifact entry")
+    finally:
+        os.close(child_fd)
+    if not _entry_identity_matches(
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False), entry
+    ):
+        raise RetentionError("retention artifact changed before rmdir")
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _archive_retention_task(
+    repository: RetentionTaskRepository,
+    adapter: Any,
+    task_id: str,
+    cutoff: float,
+) -> None:
+    _, status_value, owner, completed_at = repository.status(task_id)
+    if owner not in _RETENTION_OWNERS:
+        raise RetentionError("retention task owner changed")
+    if status_value == "archived":
+        return
+    if status_value != "done" or completed_at is None or completed_at > cutoff:
+        raise RetentionError("retention task is no longer eligible")
+    archive_error: RetentionError | None = None
+    try:
+        adapter.archive(task_id)
+    except RetentionError as error:
+        archive_error = error
+    _, final_status, final_owner, _ = repository.status(task_id)
+    if final_owner in _RETENTION_OWNERS and final_status == "archived":
+        return
+    if archive_error is not None:
+        raise archive_error
+    raise RetentionError("Hermes archive postcondition was not reached")
+
+
+def apply_retention(plan: RetentionPlan, adapter: Any, *, dry_run: bool) -> RetentionResult:
+    if type(plan) is not RetentionPlan or type(dry_run) is not bool:
+        raise RetentionError("invalid retention application")
+    if not callable(getattr(adapter, "archive", None)):
+        raise RetentionError("invalid retention archive adapter")
+    _validate_retention_board(plan.board)
+    if getattr(adapter, "board", None) != plan.board:
+        raise RetentionError("retention archive adapter board mismatch")
+    repository = RetentionTaskRepository(plan.kanban_db)
+    if dry_run:
+        return RetentionResult(plan, (), ())
+
+    # Global preflight: every card and every complete artifact/provenance tree must
+    # still match before the first external archive or unlink.
+    for task_id in plan.archive_ids:
+        _, status_value, owner, completed_at = repository.status(task_id)
+        if (
+            owner not in _RETENTION_OWNERS or status_value not in ("done", "archived")
+            or (status_value == "done" and (
+                completed_at is None or completed_at > plan.cutoff
+            ))
+        ):
+            raise RetentionError("retention task is no longer eligible")
+    for artifact in plan.artifacts:
+        if _current_retention_manifest(artifact) != artifact.manifest:
+            raise RetentionError("retention artifact changed after planning")
+        directory_fd = _open_control_private_directory(artifact.root, create=False)
+        try:
+            provenance = os.stat(
+                artifact.provenance_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if not _entry_matches(provenance, artifact.provenance):
+                raise RetentionError("retention provenance changed after planning")
+        finally:
+            os.close(directory_fd)
+
+    archived: list[str] = []
+    for task_id in plan.archive_ids:
+        _archive_retention_task(repository, adapter, task_id, plan.cutoff)
+        archived.append(task_id)
+
+    deleted: list[str] = []
+    for artifact in plan.artifacts:
+        directory_fd = -1
+        try:
+            directory_fd = _open_control_private_directory(artifact.root, create=False)
+            if artifact.is_directory:
+                _remove_retention_tree(
+                    directory_fd, artifact.name,
+                    {entry.path: entry for entry in artifact.manifest},
+                )
+            else:
+                metadata = os.stat(
+                    artifact.name, dir_fd=directory_fd, follow_symlinks=False
+                )
+                if len(artifact.manifest) != 1 or not _entry_matches(
+                    metadata, artifact.manifest[0]
+                ):
+                    raise RetentionError("retention artifact changed during deletion")
+                # Recheck the parent entry immediately before unlink.
+                if not _entry_matches(
+                    os.stat(artifact.name, dir_fd=directory_fd, follow_symlinks=False),
+                    artifact.manifest[0],
+                ):
+                    raise RetentionError("retention artifact changed before unlink")
+                os.unlink(artifact.name, dir_fd=directory_fd)
+            provenance = os.stat(
+                artifact.provenance_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if not _entry_matches(provenance, artifact.provenance):
+                raise RetentionError("retention provenance changed before unlink")
+            os.unlink(artifact.provenance_name, dir_fd=directory_fd)
+            deleted.append(f"{artifact.kind}:{artifact.name}")
+            os.fsync(directory_fd)
+        except RetentionError:
+            raise
+        except (OSError, StateError) as error:
+            raise RetentionError("artifact retention apply failed") from error
+        finally:
+            if directory_fd >= 0:
+                os.close(directory_fd)
+    return RetentionResult(plan, tuple(archived), tuple(deleted))
+
+
+def _watch_pre_operation(store: StateStore) -> tuple[SupervisorState, dict[str, Any]]:
+    state_present = store.path.exists()
+    state = store.read() if state_present else initial_supervisor_state()
+    return state, {
+        "state_present": state_present,
+        "mode": state.mode,
+        "control_state": state.control_state,
+        "last_message_id": state.last_message_id,
+        "last_event_id": state.last_event_id,
+        "last_supervisor_message_id": state.last_supervisor_message_id,
+        "last_supervisor_event_id": state.last_supervisor_event_id,
+    }
+
+
+def _pending_watch_audit_record(
+    batch_id: str, invocation_at: float, pre_operation: dict[str, Any], state: SupervisorState,
+) -> dict[str, Any]:
+    return validate_run_audit_record({
+        "schema_version": 2,
+        "batch_id": batch_id,
+        "status": "pending",
+        "invocation_at": invocation_at,
+        "failure_code": None,
+        "started_at": invocation_at,
+        "finished_at": invocation_at,
+        "pre_operation": pre_operation,
+        "input_message_ids": [],
+        "input_event_ids": [],
+        "source_ids": [],
+        "capture_relations": [],
+        "primary_goal_id": state.last_accepted_primary_goal_id,
+        "primary_card_id": None,
+        "skipped_candidates": [],
+        "risk": {"level": "none", "reason_code": "pending"},
+        "gate": {"decision": "not_evaluated", "reason_code": "pending"},
+        "budget": {
+            "supervisor_runs": state.daily_budget.supervisor_runs,
+            "strong_calls": 0,
+            "cheap_calls": 0,
+        },
+        "changed_plan_fields": [],
+        "confidence": 0.0,
+        "unresolved_assumptions": [],
+        "calls": [],
+        "source_change_count": 0,
+        "accepted_result_ids": [],
+        "human_corrections": 0,
+        "review_duration_supplied_seconds": None,
+        "review_reply_started_at": None,
+        "review_reply_finished_at": None,
+        "procedure_conversions": 0,
+    })
+
+
+def _watch_audit_record(
+    result: "WatchCycleResult | None", pending: dict[str, Any], *, status: str = "completed",
+    failure_code: str | None = None,
+) -> dict[str, Any]:
+    if status == "failed":
+        return validate_run_audit_record(dict(
+            pending, status="failed", failure_code=failure_code,
+        ))
+    if status != "completed" or failure_code is not None:
+        raise AuditError("invalid watch audit finalization")
+    if result is None:
+        raise AuditError("completed watch audit requires a result")
+    batch = _validate_batch_result(result.batch)
+    cards = tuple(_validate_card_ref(card) for card in result.capture.cards)
+    if (
+        type(result.capture.relations) is not tuple
+        or len(result.capture.relations) != len(cards)
+        or any(type(relation) is not CaptureAuditRelation for relation in result.capture.relations)
+    ):
+        raise AuditError("invalid capture audit relations")
+    message_ids = list(batch.message_ids)
+    event_ids = list(batch.event_ids)
+    call_count = len(cards) + (1 if batch.action == "enqueued" else 0)
+    calls = []
+    accepted_result_ids = []
+    for index in range(call_count):
+        attempt_id = f"{pending['batch_id']}:attempt:{index + 1}"
+        result_id = f"{pending['batch_id']}:result:{index + 1}"
+        calls.append({
+            "attempt_id": attempt_id, "result_id": result_id,
+            "kind": "api", "model_tier": "none",
+            "retry": False, "escalation": False, "input_tokens": 0,
+            "output_tokens": 0, "total_tokens": 0,
+            "estimated_cost": None, "actual_cost": None,
+        })
+        accepted_result_ids.append(result_id)
+    gate = (
+        {"decision": "not_evaluated", "reason_code": batch.reason_code}
+        if batch.gate is None
+        else {"decision": batch.gate.action, "reason_code": batch.gate.reason_code}
+    )
+    risk_level = "none"
+    risk_reason = "no_changes" if not message_ids and not event_ids else "routine_batch"
+    if batch.projection is not None and (
+        batch.projection.emergency or batch.projection.safety_critical or batch.projection.data_loss_risk
+    ):
+        risk_level = "high"
+        risk_reason = "safety_signal"
+    record = dict(pending)
+    record.update({
+        "status": "completed",
+        "failure_code": None,
+        "input_message_ids": message_ids,
+        "input_event_ids": event_ids,
+        "source_ids": sorted(
+            [f"message:{item}" for item in message_ids]
+            + [f"event:{item}" for item in event_ids]
+        ),
+        "capture_relations": [
+            {
+                "source_message_id": relation.source_message_id,
+                "card_id": relation.card_id,
+                "relation_kind": relation.relation_kind,
+            }
+            for relation in result.capture.relations
+        ],
+        "primary_goal_id": batch.state.last_accepted_primary_goal_id,
+        "primary_card_id": None if batch.card is None else batch.card.id,
+        "skipped_candidates": (
+            [] if batch.action == "enqueued"
+            else [{"card_id": None, "reason_code": batch.reason_code}]
+        ),
+        "risk": {"level": risk_level, "reason_code": risk_reason},
+        "gate": gate,
+        "budget": {
+            "supervisor_runs": batch.state.daily_budget.supervisor_runs,
+            "strong_calls": 0,
+            "cheap_calls": 0,
+        },
+        "changed_plan_fields": ["mode"] if result.mode_changed else [],
+        "confidence": 1.0 if batch.action in ("no_change", "enqueued") else 0.0,
+        "calls": calls,
+        "source_change_count": len(message_ids) + len(event_ids),
+        "accepted_result_ids": sorted(accepted_result_ids),
+        "human_corrections": len({
+            relation.source_message_id
+            for relation in result.capture.relations
+            if relation.relation_kind in {
+                "correction_candidate", "retraction_candidate"
+            }
+        }),
+    })
+    return validate_run_audit_record(record)
+
+
 @dataclass(frozen=True)
 class WatchCycleResult:
     mode_changed: bool
@@ -5963,8 +7351,9 @@ def run_watch_cycle(
     *,
     profile: str = "default",
     mode: str | None = None,
+    audit: RunAuditLog | None = None,
 ) -> WatchCycleResult:
-    """Run exactly one Capture pass followed by one Supervisor batch pass."""
+    """Run one Capture/batch pass and atomically append its structured audit."""
     if type(store) is not StateStore:
         raise StateError("state store: invalid")
     path_type = type(Path())
@@ -5976,19 +7365,53 @@ def run_watch_cycle(
         raise CaptureError("source profile must be 'default'")
     if mode is not None and (type(mode) is not str or mode not in ("shadow", "limited", "eco")):
         raise StateError("mode: invalid")
+    if audit is not None and type(audit) is not RunAuditLog:
+        raise AuditError("watch audit: invalid")
     _validate_watch_client(client)
-    SupervisorBatchService._epoch(now)
+    invocation_epoch = float(SupervisorBatchService._epoch(now))
+    scheduled_epoch = float(int(invocation_epoch) // 600 * 600)
+    pending: dict[str, Any] | None = None
+    if audit is not None:
+        pre_state, pre_operation = _watch_pre_operation(store)
+        pending = _pending_watch_audit_record(
+            f"watch-poll-{int(scheduled_epoch)}", scheduled_epoch, pre_operation, pre_state
+        )
+        pending = audit.append(pending)
+        if pending["status"] != "pending":
+            raise AuditError("watch poll is already finalized")
 
-    mode_changed = False
-    if mode is not None:
-        _, mode_changed = store.set_mode(mode)
-    capture = CaptureService(client).run_once(
-        store, state_db, kanban_db, profile=profile
-    )
-    batch = SupervisorBatchService(client).run_once(
-        store, state_db, kanban_db, policy, now, profile=profile
-    )
-    return WatchCycleResult(mode_changed, batch.state.mode, capture, batch)
+    try:
+        mode_changed = False
+        if mode is not None:
+            _, mode_changed = store.set_mode(mode)
+        capture = CaptureService(client).run_once(
+            store, state_db, kanban_db, profile=profile
+        )
+        batch = SupervisorBatchService(client).run_once(
+            store, state_db, kanban_db, policy, now, profile=profile
+        )
+        result = WatchCycleResult(mode_changed, batch.state.mode, capture, batch)
+    except Exception as error:
+        if audit is not None and pending is not None:
+            if isinstance(error, CaptureError):
+                failure_code = "capture_failed"
+            elif isinstance(error, BatchError):
+                failure_code = "batch_failed"
+            elif isinstance(error, DetectionError):
+                failure_code = "detection_failed"
+            elif isinstance(error, GateError):
+                failure_code = "gate_failed"
+            elif isinstance(error, StateError):
+                failure_code = "state_failed"
+            else:
+                failure_code = "watch_failed"
+            audit.append(_watch_audit_record(
+                None, pending, status="failed", failure_code=failure_code,
+            ))
+        raise
+    if audit is not None and pending is not None:
+        audit.append(_watch_audit_record(result, pending))
+    return result
 
 
 def _validate_card_ref(card: Any) -> CreatedCardRef:
@@ -6109,10 +7532,24 @@ def main() -> int:
     watch.add_argument("--board", default="supervisor")
     watch.add_argument("--hermes", default="hermes")
     watch.add_argument("--mode", choices=("shadow", "limited", "eco"))
+    watch.add_argument("--audit", type=Path)
     gc = subparsers.add_parser("gc")
     gc.add_argument("--older-than", required=True)
     gc.add_argument("--state-root", type=Path, required=True)
+    gc.add_argument("--kanban-db", type=Path)
+    gc.add_argument("--board")
+    gc.add_argument("--hermes")
+    gc.add_argument("--artifact-root", action="append", default=[])
     gc.add_argument("--dry-run", action="store_true")
+    eco = subparsers.add_parser("eco-report")
+    eco.add_argument("--audit", type=Path, required=True)
+    annotate = subparsers.add_parser("audit-annotate")
+    annotate.add_argument("--audit", type=Path, required=True)
+    annotate.add_argument("--batch-id", required=True)
+    annotate.add_argument("--review-duration-seconds", type=float)
+    annotate.add_argument("--reply-started-at", type=float)
+    annotate.add_argument("--reply-finished-at", type=float)
+    annotate.add_argument("--procedure-conversions", type=int)
     brief = subparsers.add_parser("brief")
     brief.add_argument("--kanban-db", type=Path, required=True)
     brief.add_argument("--state-root", type=Path, required=True)
@@ -6151,6 +7588,34 @@ def main() -> int:
         print("watch: --state is required for actual runs", file=sys.stderr)
         return 2
 
+    if args.command == "audit-annotate":
+        try:
+            record = RunAuditLog(args.audit).annotate(
+                args.batch_id,
+                review_duration_supplied_seconds=args.review_duration_seconds,
+                review_reply_started_at=args.reply_started_at,
+                review_reply_finished_at=args.reply_finished_at,
+                procedure_conversions=args.procedure_conversions,
+            )
+        except AuditError as error:
+            print(f"audit-annotate: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps({
+            "batch_id": record["batch_id"],
+            "status": record["status"],
+            "annotated": True,
+        }, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if args.command == "eco-report":
+        try:
+            report = build_eco_report(RunAuditLog(args.audit).read_records())
+        except AuditError as error:
+            print(f"eco-report: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        return 0
+
     if args.command == "brief":
         try:
             if args.date is None:
@@ -6186,14 +7651,63 @@ def main() -> int:
 
     if args.command == "gc":
         try:
+            days = parse_older_than(args.older_than)
+            now_value = time.time()
+            retention_plan = None
+            retention_result = None
+            retention_adapter = None
+            retention_args = (args.kanban_db, args.board, args.hermes)
+            if any(value is not None for value in retention_args):
+                if any(value is None for value in retention_args):
+                    raise RetentionError(
+                        "--kanban-db, --board, and --hermes must be supplied together"
+                    )
+                roots: dict[str, Path] = {}
+                for item in args.artifact_root:
+                    if type(item) is not str or item.count("=") != 1:
+                        raise RetentionError("--artifact-root must be KIND=/absolute/path")
+                    kind, raw_path = item.split("=", 1)
+                    path = Path(raw_path)
+                    if kind in roots:
+                        raise RetentionError("duplicate artifact root kind")
+                    roots[kind] = path
+                retention_plan = plan_retention(
+                    args.kanban_db, args.board, roots, days=days, now=now_value
+                )
+                retention_adapter = HermesRetentionClient(args.hermes, args.board)
+            elif args.artifact_root:
+                raise RetentionError(
+                    "--artifact-root requires --kanban-db, --board, and --hermes"
+                )
+            # Every argument and the complete read-only retention plan are valid before
+            # the first state-temp deletion or external archive operation.
             result = collect_stale_state_temps(
-                args.state_root, parse_older_than(args.older_than),
-                now=time.time(), dry_run=args.dry_run,
+                args.state_root, days, now=now_value, dry_run=args.dry_run,
             )
-        except (GCError, StateError) as error:
+            if retention_plan is not None and retention_adapter is not None:
+                retention_result = apply_retention(
+                    retention_plan, retention_adapter, dry_run=args.dry_run,
+                )
+        except (GCError, StateError, RetentionError) as error:
             print(f"gc: {error}", file=sys.stderr)
             return 2
-        if result.candidates:
+        if retention_plan is not None and retention_result is not None:
+            print(json.dumps(
+                {
+                    "archive_candidates": list(retention_plan.archive_ids),
+                    "archived": list(retention_result.archived_ids),
+                    "artifact_candidates": [
+                        {"kind": item.kind, "name": item.name}
+                        for item in retention_plan.artifacts
+                    ],
+                    "deleted_artifacts": list(retention_result.deleted_artifacts),
+                    "state_temp_candidates": list(result.candidates),
+                    "deleted_state_temps": list(result.deleted),
+                    "dry_run": args.dry_run,
+                },
+                ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+            ))
+        elif result.candidates:
             print(json.dumps(
                 {"candidates": list(result.candidates), "deleted": list(result.deleted)},
                 ensure_ascii=True, sort_keys=True, separators=(",", ":"),
@@ -6281,9 +7795,10 @@ def main() -> int:
             result = run_watch_cycle(
                 StateStore(args.state), args.state_db, args.kanban_db, policy, client,
                 datetime.now(timezone.utc), profile=args.profile, mode=args.mode,
+                audit=None if args.audit is None else RunAuditLog(args.audit),
             )
             report = watch_cycle_report(result)
-        except (CaptureError, BatchError, DetectionError, GateError, StateError) as error:
+        except (AuditError, CaptureError, BatchError, DetectionError, GateError, StateError) as error:
             print(f"watch: {error}", file=sys.stderr)
             return 2
         if report is not None:

@@ -6980,5 +6980,734 @@ class BriefingReplyParserTests(unittest.TestCase):
                     hermes_supervisor.parse_briefing_reply(invalid, decisions)
 
 
+class Task11AuditEcoRetentionTests(unittest.TestCase):
+    def audit_record(self, **updates: Any) -> dict[str, Any]:
+        record = {
+            "schema_version": 2,
+            "batch_id": "watch-100-7",
+            "status": "completed",
+            "invocation_at": 100.0,
+            "failure_code": None,
+            "started_at": 100.0,
+            "finished_at": 107.0,
+            "pre_operation": {
+                "state_present": True, "mode": "shadow", "control_state": "running",
+                "last_message_id": 0, "last_event_id": 0,
+                "last_supervisor_message_id": 0, "last_supervisor_event_id": 0,
+            },
+            "input_message_ids": [1, 2],
+            "input_event_ids": [7],
+            "source_ids": ["event:7", "message:1", "message:2"],
+            "capture_relations": [
+                {"source_message_id": 1, "card_id": "capture-1", "relation_kind": "capture"}
+            ],
+            "primary_goal_id": "goal-a",
+            "primary_card_id": "batch-a",
+            "skipped_candidates": [
+                {"card_id": "card-b", "reason_code": "lower_priority"}
+            ],
+            "risk": {"level": "low", "reason_code": "routine_batch"},
+            "gate": {"decision": "allow", "reason_code": "supervisor_run_allowed"},
+            "budget": {"supervisor_runs": 1, "strong_calls": 1, "cheap_calls": 0},
+            "changed_plan_fields": ["primary_goal_id"],
+            "confidence": 0.75,
+            "unresolved_assumptions": ["owner_confirmation_pending"],
+            "calls": [
+                {
+                    "attempt_id": "attempt-1", "result_id": "result-1",
+                    "kind": "llm", "model_tier": "strong",
+                    "retry": False, "escalation": False, "input_tokens": 10,
+                    "output_tokens": 5, "total_tokens": 15,
+                    "estimated_cost": {"amount": 0.25, "currency": "USD"},
+                    "actual_cost": None,
+                }
+            ],
+            "source_change_count": 3,
+            "accepted_result_ids": ["result-1"],
+            "human_corrections": 0,
+            "review_duration_supplied_seconds": None,
+            "review_reply_started_at": None,
+            "review_reply_finished_at": None,
+            "procedure_conversions": 1,
+        }
+        record.update(updates)
+        return record
+
+    def test_run_audit_is_strict_private_and_rejects_forbidden_or_unknown_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            audit = hermes_supervisor.RunAuditLog(root / "run-audit.jsonl")
+            record = self.audit_record()
+            audit.append(record)
+            self.assertEqual(audit.read_records(), (record,))
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(audit.path.stat().st_mode & 0o777, 0o600)
+            for hostile in (
+                dict(record, raw_message="secret"),
+                dict(record, reasoning="hidden"),
+                dict(record, confidence=True),
+                dict(record, confidence=float("nan")),
+                dict(record, confidence=-0.1),
+                dict(record, human_corrections=True),
+            ):
+                with self.subTest(keys=hostile.keys()), self.assertRaises(
+                    hermes_supervisor.AuditError
+                ):
+                    audit.append(hostile)
+            audit.path.write_text('{"schema_version":1,"schema_version":1}\n', encoding="ascii")
+            os.chmod(audit.path, 0o600)
+            with self.assertRaises(hermes_supervisor.AuditError):
+                audit.read_records()
+
+    def test_watch_writes_structured_idle_audit_without_client_or_llm_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            client = WatchCycleTests.Client()
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            result = hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY), client,
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
+            )
+            record = audit.read_records()[0]
+        self.assertEqual(result.batch.action, "no_change")
+        self.assertEqual(client.capture_calls, [])
+        self.assertEqual(client.batch_calls, [])
+        self.assertEqual(record["source_change_count"], 0)
+        self.assertEqual(record["calls"], [])
+        self.assertEqual(record["input_message_ids"], [])
+        self.assertEqual(record["input_event_ids"], [])
+        self.assertNotIn("reasoning", json.dumps(record))
+
+    def test_watch_audits_capture_correction_relation_without_raw_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "UPDATE messages SET content = ? WHERE id = 1",
+                    ("訂正: RAW PRIVATE INTENT",),
+                )
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(Path(directory) / "state.json"),
+                state_db, kanban_db, load_policy(POLICY), WatchCycleTests.Client(),
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
+            )
+            record = audit.read_records()[0]
+        self.assertEqual(record["capture_relations"], [{
+            "source_message_id": 1,
+            "card_id": "capture-1",
+            "relation_kind": "correction_candidate",
+        }])
+        self.assertNotIn("RAW PRIVATE INTENT", json.dumps(record))
+        self.assertEqual(record["human_corrections"], 1)
+
+    def test_terminal_audit_accepts_explicit_human_metrics_annotation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audit = hermes_supervisor.RunAuditLog(
+                Path(directory) / "run-audit.jsonl"
+            )
+            audit.append(self.audit_record(procedure_conversions=0))
+            argv = [
+                "hermes-supervisor", "audit-annotate",
+                "--audit", str(audit.path),
+                "--batch-id", "watch-100-7",
+                "--review-duration-seconds", "9",
+                "--procedure-conversions", "2",
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch(
+                "builtins.print"
+            ) as printed:
+                self.assertEqual(hermes_supervisor.main(), 0)
+            self.assertIn('"annotated":true', printed.call_args.args[0])
+            updated = audit.read_records()[0]
+            self.assertEqual(updated["review_duration_supplied_seconds"], 9.0)
+            self.assertEqual(updated["procedure_conversions"], 2)
+            conflicting_argv = [
+                "hermes-supervisor", "audit-annotate",
+                "--audit", str(audit.path),
+                "--batch-id", "watch-100-7",
+                "--review-duration-seconds", "10",
+                "--procedure-conversions", "3",
+            ]
+            with mock.patch.object(sys, "argv", conflicting_argv), mock.patch(
+                "builtins.print"
+            ):
+                self.assertEqual(hermes_supervisor.main(), 2)
+            self.assertEqual(audit.read_records()[0], updated)
+            report = hermes_supervisor.build_eco_report(audit.read_records())
+            self.assertEqual(
+                report["review_duration_chosen_seconds"],
+                {"total": 9.0, "count": 1},
+            )
+            self.assertEqual(report["procedure_conversions"], 2)
+
+    def test_run_audit_append_is_idempotent_and_conflicts_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            record = self.audit_record()
+            audit.append(record)
+            audit.append(dict(record))
+            self.assertEqual(audit.read_records(), (record,))
+            with self.assertRaises(hermes_supervisor.AuditError):
+                audit.append(dict(record, confidence=0.5))
+            self.assertEqual(audit.read_records(), (record,))
+
+    def test_run_audit_lifecycle_replaces_pending_and_rejects_conflicting_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            terminal = self.audit_record()
+            pending = self.audit_record(
+                status="pending", failure_code=None, finished_at=100.0,
+                capture_relations=[], primary_card_id=None, calls=[],
+                accepted_result_ids=[], human_corrections=0, procedure_conversions=0,
+            )
+            audit.append(pending)
+            audit.append(terminal)
+            audit.append(dict(terminal))
+            self.assertEqual(audit.read_records(), (terminal,))
+            with self.assertRaises(hermes_supervisor.AuditError):
+                audit.append(dict(terminal, confidence=0.5))
+            with self.assertRaises(hermes_supervisor.AuditError):
+                audit.append(dict(terminal, status="failed", failure_code="watch_failed"))
+
+    def test_watch_pending_survives_base_exception_and_retry_finalizes_same_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            root = Path(directory)
+            audit = hermes_supervisor.RunAuditLog(root / "run-audit.jsonl")
+
+            class CrashClient(WatchCycleTests.Client):
+                def create_supervisor_batch(self, projection):
+                    raise KeyboardInterrupt("raw crash must not be stored")
+
+            now = datetime(2026, 7, 22, 12, 4, tzinfo=timezone.utc)
+            with self.assertRaises(KeyboardInterrupt):
+                hermes_supervisor.run_watch_cycle(
+                    hermes_supervisor.StateStore(root / "state.json"), state_db, kanban_db,
+                    load_policy(POLICY), CrashClient(), now, audit=audit,
+                )
+            pending = audit.read_records()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["status"], "pending")
+            self.assertNotIn("raw crash", json.dumps(pending))
+
+            hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(root / "state.json"), state_db, kanban_db,
+                load_policy(POLICY), WatchCycleTests.Client(), now, audit=audit,
+            )
+            finalized = audit.read_records()
+            self.assertEqual(len(finalized), 1)
+            self.assertEqual(finalized[0]["batch_id"], pending[0]["batch_id"])
+            self.assertEqual(finalized[0]["pre_operation"], pending[0]["pre_operation"])
+            self.assertEqual(finalized[0]["status"], "completed")
+
+    def test_watch_caught_failure_finalizes_safe_code_and_ten_minute_buckets_are_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory)
+            root = Path(directory)
+            audit = hermes_supervisor.RunAuditLog(root / "run-audit.jsonl")
+            store = hermes_supervisor.StateStore(root / "state.json")
+            with mock.patch.object(
+                hermes_supervisor.CaptureService, "run_once",
+                side_effect=hermes_supervisor.CaptureError("RAW PRIVATE FAILURE"),
+            ):
+                with self.assertRaises(hermes_supervisor.CaptureError):
+                    hermes_supervisor.run_watch_cycle(
+                        store, state_db, kanban_db, load_policy(POLICY),
+                        WatchCycleTests.Client(),
+                        datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc), audit=audit,
+                    )
+            failed = audit.read_records()[0]
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["failure_code"], "capture_failed")
+            self.assertNotIn("RAW PRIVATE FAILURE", json.dumps(failed))
+
+            before_retry = (
+                store.path.read_bytes() if store.path.exists() else None
+            )
+            retry_client = WatchCycleTests.Client()
+            with self.assertRaises(hermes_supervisor.AuditError):
+                hermes_supervisor.run_watch_cycle(
+                    store, state_db, kanban_db, load_policy(POLICY), retry_client,
+                    datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc), audit=audit,
+                )
+            self.assertEqual(retry_client.capture_calls, [])
+            self.assertEqual(retry_client.batch_calls, [])
+            self.assertEqual(
+                store.path.read_bytes() if store.path.exists() else None,
+                before_retry,
+            )
+            self.assertEqual(audit.read_records()[0], failed)
+
+            second_audit = hermes_supervisor.RunAuditLog(root / "second-audit.jsonl")
+            for minute in (0, 10):
+                hermes_supervisor.run_watch_cycle(
+                    store, state_db, kanban_db, load_policy(POLICY), WatchCycleTests.Client(),
+                    datetime(2026, 7, 22, 13, minute, tzinfo=timezone.utc), audit=second_audit,
+                )
+            records = second_audit.read_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(len({record["batch_id"] for record in records}), 2)
+
+    def test_run_audit_cross_process_barrier_preserves_all_distinct_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit_path = root / "run-audit.jsonl"
+            gate = root / "gate"
+            scripts: list[subprocess.Popen[str]] = []
+            for index in range(12):
+                record = self.audit_record(batch_id=f"watch-concurrent-{index}")
+                program = (
+                    "import json,sys,time; from pathlib import Path; "
+                    "sys.path.insert(0,sys.argv[1]); import hermes_supervisor as h; "
+                    "gate=Path(sys.argv[3]); "
+                    "exec('while not gate.exists():\\n time.sleep(.001)'); "
+                    "h.RunAuditLog(Path(sys.argv[2])).append(json.loads(sys.argv[4]))"
+                )
+                scripts.append(subprocess.Popen(
+                    [sys.executable, "-c", program, str(CLI.parent), str(audit_path),
+                     str(gate), json.dumps(record, separators=(",", ":"))],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                ))
+            gate.write_text("go", encoding="ascii")
+            failures = []
+            for process in scripts:
+                stdout, stderr = process.communicate(timeout=15)
+                if process.returncode != 0:
+                    failures.append((process.returncode, stdout, stderr))
+            self.assertEqual(failures, [])
+            records = hermes_supervisor.RunAuditLog(audit_path).read_records()
+            self.assertEqual(
+                {record["batch_id"] for record in records},
+                {f"watch-concurrent-{index}" for index in range(12)},
+            )
+
+    def test_run_audit_failed_replace_and_stale_temp_preserve_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit = hermes_supervisor.RunAuditLog(root / "run-audit.jsonl")
+            first = self.audit_record()
+            audit.append(first)
+            stale = root / ".run-audit.jsonl.tmp.1.stale"
+            stale.write_bytes(b"partial")
+            os.chmod(stale, 0o600)
+            with mock.patch.object(
+                hermes_supervisor.os, "replace", side_effect=OSError("injected")
+            ), self.assertRaises(hermes_supervisor.AuditError):
+                audit.append(dict(first, batch_id="watch-101-8"))
+            self.assertEqual(audit.read_records(), (first,))
+            self.assertEqual(stale.read_bytes(), b"partial")
+
+    def test_eco_report_separates_review_evidence_and_exposes_ratio_operands(self) -> None:
+        idle = self.audit_record(
+            batch_id="watch-1-1", started_at=1.0, finished_at=3.0,
+            input_message_ids=[], input_event_ids=[], source_ids=[], capture_relations=[],
+            primary_goal_id=None, primary_card_id=None,
+            skipped_candidates=[{"card_id": None, "reason_code": "no_changes"}],
+            risk={"level": "none", "reason_code": "no_changes"},
+            gate={"decision": "not_evaluated", "reason_code": "no_changes"},
+            budget={"supervisor_runs": 0, "strong_calls": 0, "cheap_calls": 0},
+            changed_plan_fields=[], confidence=0.0, unresolved_assumptions=[],
+            calls=[], source_change_count=0, accepted_result_ids=[],
+            review_duration_supplied_seconds=None,
+            review_reply_started_at=None, review_reply_finished_at=None,
+            procedure_conversions=0,
+        )
+        second = self.audit_record(
+            batch_id="watch-2-2", input_message_ids=[1], input_event_ids=[7],
+            source_ids=["event:7", "message:1"], calls=[
+                {
+                    "attempt_id": "attempt-retry", "result_id": "result-shared",
+                    "kind": "llm", "model_tier": "cheap",
+                    "retry": True, "escalation": True, "input_tokens": 4,
+                    "output_tokens": 6, "total_tokens": 10,
+                    "estimated_cost": {"amount": 0.1, "currency": "USD"},
+                    "actual_cost": {"amount": 0.08, "currency": "USD"},
+                },
+                {
+                    "attempt_id": "attempt-api", "result_id": "result-shared",
+                    "kind": "api", "model_tier": "none",
+                    "retry": False, "escalation": False, "input_tokens": 0,
+                    "output_tokens": 0, "total_tokens": 0,
+                    "estimated_cost": None, "actual_cost": None,
+                },
+            ], source_change_count=2, accepted_result_ids=["result-shared"],
+            human_corrections=2, review_duration_supplied_seconds=9.0,
+            review_reply_started_at=200.0, review_reply_finished_at=204.0,
+            procedure_conversions=2,
+        )
+        expected = {
+            "schema_version": 1, "batches": 2, "source_changes": 2,
+            "idle_polls": 1, "idle_llm_calls": 0,
+            "batches_per_source_change": {"numerator": 2, "denominator": 2, "value": 1.0},
+            "strong_invocations": 0, "cheap_invocations": 1,
+            "input_tokens": 4, "output_tokens": 6, "total_tokens": 10,
+            "estimated_cost": {
+                "amount": 0.1, "currency": "USD", "known_count": 1, "unknown_count": 1,
+            },
+            "actual_cost": {
+                "amount": 0.08, "currency": "USD", "known_count": 1, "unknown_count": 1,
+            },
+            "accepted_results": 1,
+            "tokens_per_accepted_result": {"numerator": 10, "denominator": 1, "value": 10.0},
+            "estimated_cost_per_accepted_result": {
+                "numerator": 0.1, "denominator": 1, "value": None,
+            },
+            "actual_cost_per_accepted_result": {
+                "numerator": 0.08, "denominator": 1, "value": None,
+            },
+            "retries": 1, "escalations": 1, "human_corrections": 2,
+            "review_duration_supplied_seconds": {"total": 9.0, "count": 1},
+            "review_duration_fallback_seconds": {"total": None, "count": 0},
+            "review_duration_chosen_seconds": {"total": 9.0, "count": 1},
+            "procedure_conversions": 2,
+        }
+        self.assertEqual(hermes_supervisor.build_eco_report((second, idle)), expected)
+        self.assertEqual(hermes_supervisor.build_eco_report((idle, second)), expected)
+        zero = hermes_supervisor.build_eco_report((idle,))
+        for key in (
+            "batches_per_source_change", "tokens_per_accepted_result",
+            "estimated_cost_per_accepted_result", "actual_cost_per_accepted_result",
+        ):
+            self.assertEqual(zero[key]["denominator"], 0)
+            self.assertIsNone(zero[key]["value"])
+        self.assertEqual(zero["review_duration_supplied_seconds"], {"total": None, "count": 0})
+        self.assertEqual(zero["review_duration_fallback_seconds"], {"total": None, "count": 0})
+        self.assertEqual(zero["review_duration_chosen_seconds"], {"total": None, "count": 0})
+
+    def test_eco_report_deduplicates_sources_and_results_and_rejects_mixed_currency(self) -> None:
+        first = self.audit_record()
+        duplicate = self.audit_record(
+            batch_id="watch-200-7", calls=[dict(first["calls"][0], attempt_id="attempt-2")]
+        )
+        report = hermes_supervisor.build_eco_report((first, duplicate))
+        self.assertEqual(report["source_changes"], 3)
+        self.assertEqual(report["accepted_results"], 1)
+        self.assertEqual(report["actual_cost"], {
+            "amount": None, "currency": None, "known_count": 0, "unknown_count": 2,
+        })
+        mixed = self.audit_record(
+            batch_id="watch-300-7",
+            calls=[dict(
+                first["calls"][0], attempt_id="attempt-3",
+                estimated_cost={"amount": 1.0, "currency": "EUR"},
+            )],
+        )
+        with self.assertRaises(hermes_supervisor.AuditError):
+            hermes_supervisor.build_eco_report((first, mixed))
+
+    def test_review_evidence_rejects_negative_or_reversed_clocks(self) -> None:
+        for updates in (
+            {"review_duration_supplied_seconds": -1.0},
+            {"review_reply_started_at": 10.0, "review_reply_finished_at": None},
+            {"review_reply_started_at": 10.0, "review_reply_finished_at": 9.0},
+        ):
+            with self.subTest(updates=updates), self.assertRaises(hermes_supervisor.AuditError):
+                hermes_supervisor.validate_run_audit_record(self.audit_record(**updates))
+
+    @staticmethod
+    def make_retention_db(path: Path) -> None:
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.executescript(
+                """
+                CREATE TABLE tasks (
+                  id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, assignee TEXT,
+                  status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT,
+                  created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER,
+                  workspace_kind TEXT NOT NULL DEFAULT 'scratch', workspace_path TEXT,
+                  branch_name TEXT, claim_lock TEXT, claim_expires INTEGER, tenant TEXT,
+                  result TEXT, idempotency_key TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                  worker_pid INTEGER, last_failure_error TEXT, max_runtime_seconds INTEGER,
+                  last_heartbeat_at INTEGER, current_run_id INTEGER, workflow_template_id TEXT,
+                  current_step_key TEXT, skills TEXT, model_override TEXT, max_retries INTEGER,
+                  goal_mode INTEGER NOT NULL DEFAULT 0, goal_max_turns INTEGER, session_id TEXT,
+                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO tasks (id,title,status,created_by,created_at,completed_at) VALUES
+                  ('old-owned', 'old', 'done', 'supervisor-watcher', 1, 100),
+                  ('new-owned', 'new', 'done', 'supervisor-watcher', 1, 3999999),
+                  ('old-human', 'human', 'done', 'human', 1, 100),
+                  ('old-running', 'running', 'running', 'supervisor-watcher', 1, 100);
+                """
+            )
+
+    @staticmethod
+    def write_artifact_manifest(path: Path, kind: str, *, created_at: float = 1.0) -> Path:
+        manifest = path.with_name(path.name + ".supervisor-manifest.json")
+        manifest.write_text(json.dumps({
+            "schema_version": 1, "kind": kind, "name": path.name,
+            "owner": "hermes-supervisor", "id": "fixture-artifact", "created_at": created_at,
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="ascii")
+        os.chmod(manifest, 0o600)
+        os.utime(manifest, (created_at, created_at))
+        return manifest
+
+    def test_retention_plan_and_apply_are_scoped_explicit_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "kanban.db"
+            self.make_retention_db(database)
+            logs = root / "logs"
+            sandboxes = root / "sandboxes"
+            logs.mkdir(mode=0o700)
+            sandboxes.mkdir(mode=0o700)
+            old_log = logs / "supervisor-run-a.log"
+            kept_log = logs / "conversation.log"
+            old_box = sandboxes / "supervisor-run-b"
+            old_log.write_text("detail", encoding="utf-8")
+            kept_log.write_text("preserve", encoding="utf-8")
+            os.chmod(old_log, 0o600)
+            os.chmod(kept_log, 0o600)
+            old_box.mkdir(mode=0o700)
+            detail = old_box / "detail.log"
+            detail.write_text("detail", encoding="utf-8")
+            os.chmod(detail, 0o600)
+            cutoff = 4_000_000 - 30 * 86400
+            for path in (old_log, old_box, detail):
+                os.utime(path, (cutoff - 1, cutoff - 1))
+            self.write_artifact_manifest(old_log, "detailed_logs", created_at=cutoff - 1)
+            self.write_artifact_manifest(old_box, "sandboxes", created_at=cutoff - 1)
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {"detailed_logs": logs, "sandboxes": sandboxes},
+                days=30, now=4_000_000,
+            )
+            calls: list[list[str]] = []
+
+            def archive_runner(argv: list[str], **kwargs: Any) -> Any:
+                calls.append(argv)
+                with closing(sqlite3.connect(database)) as connection, connection:
+                    connection.execute(
+                        "UPDATE tasks SET status='archived' WHERE id=?", (argv[-1],)
+                    )
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            adapter = hermes_supervisor.HermesRetentionClient(
+                "/fake/hermes", "supervisor", runner=archive_runner,
+            )
+            dry = hermes_supervisor.apply_retention(plan, adapter, dry_run=True)
+            self.assertEqual(dry.archived_ids, ())
+            self.assertTrue(old_log.exists())
+            self.assertEqual(calls, [])
+            applied = hermes_supervisor.apply_retention(plan, adapter, dry_run=False)
+            self.assertEqual(applied.archived_ids, ("old-owned",))
+            self.assertEqual(
+                calls, [["/fake/hermes", "kanban", "--board", "supervisor", "archive", "old-owned"]]
+            )
+            self.assertFalse(old_log.exists())
+            self.assertFalse(old_box.exists())
+            self.assertTrue(kept_log.exists())
+            self.assertEqual(
+                [candidate.kind for candidate in plan.artifacts],
+                ["detailed_logs", "sandboxes"],
+            )
+
+    def test_retention_schema_matches_installed_projection_without_board_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "kanban.db"
+            self.make_retention_db(database)
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {}, days=30, now=4_000_000
+            )
+            self.assertEqual(plan.archive_ids, ("old-owned",))
+            with closing(sqlite3.connect(database)) as source:
+                create_sql = source.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+                ).fetchone()[0]
+            incompatible = Path(directory) / "incompatible.db"
+            with closing(sqlite3.connect(incompatible)) as connection, connection:
+                connection.execute(create_sql.replace("status TEXT NOT NULL", "status TEXT"))
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    incompatible, "supervisor", {}, days=30, now=4_000_000
+                )
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute("ALTER TABLE tasks ADD COLUMN surprise_secret TEXT")
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    database, "supervisor", {}, days=30, now=4_000_000
+                )
+        source = Path(hermes_supervisor.__file__).read_text(encoding="utf-8")
+        self.assertIn("mode=ro", source)
+        self.assertNotIn("WHERE board = ?", source)
+
+    def test_archive_timeout_reconciles_archived_but_wrong_state_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "kanban.db"
+            self.make_retention_db(database)
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {}, days=30, now=4_000_000
+            )
+            calls: list[list[str]] = []
+
+            def ambiguous(argv: list[str], **kwargs: Any) -> Any:
+                calls.append(argv)
+                with closing(sqlite3.connect(database)) as connection, connection:
+                    connection.execute("UPDATE tasks SET status='archived' WHERE id='old-owned'")
+                raise subprocess.TimeoutExpired(argv, 1)
+
+            adapter = hermes_supervisor.HermesRetentionClient(
+                "/fake/hermes", "supervisor", runner=ambiguous
+            )
+            result = hermes_supervisor.apply_retention(plan, adapter, dry_run=False)
+            self.assertEqual(result.archived_ids, ("old-owned",))
+            self.assertEqual(len(calls), 1)
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute(
+                    "UPDATE tasks SET status='running', created_by='human' WHERE id='old-owned'"
+                )
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.apply_retention(plan, adapter, dry_run=False)
+            self.assertEqual(len(calls), 1)
+
+    def test_retention_rejects_nested_hardlink_and_post_plan_tree_mutation_before_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "kanban.db"
+            self.make_retention_db(database)
+            cache = root / "cache"
+            cache.mkdir(mode=0o700)
+            candidate = cache / "supervisor-run-hardlink"
+            candidate.mkdir(mode=0o700)
+            victim = root / "victim"
+            victim.write_text("keep", encoding="utf-8")
+            os.chmod(victim, 0o600)
+            os.link(victim, candidate / "nested")
+            os.utime(candidate, (1, 1))
+            hardlink_manifest = self.write_artifact_manifest(candidate, "cache")
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    database, "supervisor", {"cache": cache}, days=30, now=4_000_000
+                )
+            self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+
+            (candidate / "nested").unlink()
+            candidate.rmdir()
+            hardlink_manifest.unlink()
+            first = cache / "supervisor-run-a"
+            second = cache / "supervisor-run-b"
+            for item in (first, second):
+                item.mkdir(mode=0o700)
+                child = item / "data"
+                child.write_text("data", encoding="utf-8")
+                os.chmod(child, 0o600)
+                os.utime(child, (1, 1))
+                os.utime(item, (1, 1))
+                self.write_artifact_manifest(item, "cache")
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {"cache": cache}, days=30, now=4_000_000
+            )
+            os.chmod(second / "data", 0o400)
+            adapter = hermes_supervisor.HermesRetentionClient(
+                "/fake/hermes", "supervisor",
+                runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+            )
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.apply_retention(plan, adapter, dry_run=False)
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_artifact_requires_provenance_and_all_descendants_old(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "kanban.db"
+            self.make_retention_db(database)
+            cache = root / "cache"
+            cache.mkdir(mode=0o700)
+            user_data = cache / "supervisor-user-data"
+            user_data.write_text("keep", encoding="utf-8")
+            os.chmod(user_data, 0o600)
+            os.utime(user_data, (1, 1))
+            young_tree = cache / "supervisor-young-child"
+            young_tree.mkdir(mode=0o700)
+            child = young_tree / "recent"
+            child.write_text("keep", encoding="utf-8")
+            os.chmod(child, 0o600)
+            os.utime(young_tree, (1, 1))
+            self.write_artifact_manifest(young_tree, "cache")
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {"cache": cache}, days=30, now=4_000_000
+            )
+            self.assertEqual(plan.artifacts, ())
+            self.assertTrue(user_data.exists())
+            self.assertTrue(child.exists())
+
+    def test_retention_rejects_symlinks_outside_roots_and_hostile_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "kanban.db"
+            self.make_retention_db(database)
+            real = root / "real"
+            real.mkdir(mode=0o700)
+            linked = root / "linked"
+            linked.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    database, "supervisor", {"cache": linked}, days=30, now=4_000_000
+                )
+            hostile = root / "cache"
+            hostile.mkdir(mode=0o700)
+            (hostile / "supervisor-run-x").symlink_to(root / "outside")
+            hostile_manifest = self.write_artifact_manifest(
+                hostile / "supervisor-run-x", "cache"
+            )
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    database, "supervisor", {"cache": hostile}, days=30, now=4_000_000
+                )
+            (hostile / "supervisor-run-x").unlink()
+            hostile_manifest.unlink()
+            nested = hostile / "supervisor-run-nested"
+            nested.mkdir(mode=0o700)
+            (nested / "escape").symlink_to(root / "outside")
+            os.utime(nested, (1, 1))
+            self.write_artifact_manifest(nested, "cache")
+            with self.assertRaises(hermes_supervisor.RetentionError):
+                hermes_supervisor.plan_retention(
+                    database, "supervisor", {"cache": hostile}, days=30, now=4_000_000
+                )
+            for kwargs in ({"days": True}, {"now": float("inf")}, {"board": "../other"}):
+                call = dict(
+                    kanban_db=database, board="supervisor", artifact_roots={},
+                    days=30, now=4_000_000,
+                )
+                call.update(kwargs)
+                with self.assertRaises(hermes_supervisor.RetentionError):
+                    hermes_supervisor.plan_retention(**call)
+
+    def test_task11_cli_and_nix_contracts_wire_private_paths_without_global_gc(self) -> None:
+        module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text(encoding="utf-8")
+        for fragment in (
+            "--audit ${stateRoot}/run-audit.jsonl", "eco-report",
+            "--kanban-db", "--artifact-root", "--board",
+            "${stateRoot}/run-audit.jsonl", "--dry-run",
+        ):
+            self.assertIn(fragment, module)
+        self.assertIn("kanbanDb =", module)
+        self.assertIn('if cfg.board == "default" then', module)
+        self.assertIn('/.hermes/kanban/boards/${cfg.board}/kanban.db', module)
+        self.assertNotIn("hermes kanban gc", module)
+        self.assertNotIn(" kanban gc ", module)
+        self.assertNotIn("enable = true", module)
+        self.assertIn("retention.apply.enable", module)
+        self.assertIn("lib.optionalString (!cfg.retention.apply.enable) \"--dry-run\"", module)
+
+    def test_gc_invalid_retention_arguments_do_not_delete_state_temps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stale = root / ".state.json.tmp.1.0123456789abcdef"
+            stale.write_text("partial", encoding="ascii")
+            os.utime(stale, (1, 1))
+            argv = [
+                "hermes-supervisor", "gc", "--older-than", "30d",
+                "--state-root", str(root), "--kanban-db", str(root / "missing.db"),
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                hermes_supervisor.time, "time", return_value=4_000_000,
+            ), mock.patch("builtins.print"):
+                self.assertEqual(hermes_supervisor.main(), 2)
+            self.assertTrue(stale.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
