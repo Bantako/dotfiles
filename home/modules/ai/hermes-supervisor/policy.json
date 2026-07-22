@@ -1,0 +1,40 @@
+{
+  "stage": {
+    "name": "bootstrap",
+    "active_goal_limit": 1
+  },
+  "scheduling": {
+    "worker_concurrency": 3,
+    "daily_dispatch_limit": 6,
+    "daily_supervisor_limit": 12,
+    "task_runtime_seconds": 1800,
+    "normal_retry_limit": 1,
+    "replan_limit": 1,
+    "model_escalation_limit": 1,
+    "watcher_interval_seconds": 600,
+    "batch_cooldown_seconds": 1800
+  },
+  "budget": {
+    "paid_worker_soft_limit_usd": 2
+  },
+  "capture": {
+    "source_profile": "default"
+  },
+  "permissions": {
+    "denied_paths": [
+      "05-Private/"
+    ]
+  },
+  "briefing": {
+    "time": "21:00",
+    "timezone": "Asia/Tokyo"
+  },
+  "retention": {
+    "event_days": 30
+  },
+  "models": {
+    "supervisor": "strong_supervisor",
+    "verifier": "strong_verifier",
+    "worker": "cheap_worker"
+  }
+}
