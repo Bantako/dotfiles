@@ -69,6 +69,46 @@ let
       --webui-url ${lib.escapeShellArg cfg.webuiUrl} \
       --prompt ${./hermes-supervisor/prompts/briefing.md}
   '';
+  controlCommand = pkgs.writeShellApplication {
+    name = "hermes-supervisor-control";
+    runtimeInputs = [ pkgs.util-linux ];
+    text = ''
+      if [ "$#" -ne 1 ]; then
+        echo "usage: hermes-supervisor-control pause|freeze|resume|emergency-stop" >&2
+        exit 2
+      fi
+      action="$1"
+      common_args=(
+        --state '${stateRoot}/state.json'
+        --audit '${stateRoot}/control-audit.jsonl'
+        --board ${lib.escapeShellArg cfg.board}
+        --hermes ${hermesPkg}/bin/hermes
+      )
+      case "$action" in
+        pause|freeze|resume)
+          exec ${pkgs.util-linux}/bin/flock \
+            --nonblock --conflict-exit-code 75 \
+            "${runtimeRoot}/watch.lock" \
+            ${supervisorCli}/bin/hermes-supervisor state control \
+            "''${common_args[@]}" "$action"
+          ;;
+        emergency-stop)
+          exec ${pkgs.util-linux}/bin/flock \
+            --nonblock --conflict-exit-code 75 \
+            "${runtimeRoot}/watch.lock" \
+            ${supervisorCli}/bin/hermes-supervisor state control \
+            "''${common_args[@]}" \
+            --ntfy-url ${lib.escapeShellArg cfg.control.ntfyUrl} \
+            --curl ${pkgs.curl}/bin/curl \
+            "$action"
+          ;;
+        *)
+          echo "unsupported control action" >&2
+          exit 2
+          ;;
+      esac
+    '';
+  };
   commonService = {
     Type = "oneshot";
     UMask = "0077";
@@ -90,6 +130,18 @@ in
       type = lib.types.bool;
       default = false;
       description = "Enable the Hermes Supervisor watch and minimal GC timers.";
+    };
+    control = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Install the manual audited Supervisor control command.";
+      };
+      ntfyUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://192.168.11.9:8080/nas-alerts";
+        description = "Dedicated non-secret emergency ntfy endpoint.";
+      };
     };
     board = lib.mkOption {
       type = lib.types.str;
@@ -125,9 +177,15 @@ in
         assertion = builtins.match "https?://[^[:space:]]+" cfg.webuiUrl != null;
         message = "services.hermes-supervisor.webuiUrl must be an HTTP(S) URL without whitespace";
       }
+      {
+        assertion =
+          builtins.stringLength cfg.control.ntfyUrl <= 2048
+          && builtins.match "https?://[^[:space:]]+" cfg.control.ntfyUrl != null;
+        message = "services.hermes-supervisor.control.ntfyUrl must be a bounded HTTP(S) URL without whitespace";
+      }
     ];
 
-    home.packages = [ supervisorCli ];
+    home.packages = [ supervisorCli ] ++ lib.optional cfg.control.enable controlCommand;
 
     xdg.configFile."hermes-supervisor/policy.json".source = ./hermes-supervisor/policy.json;
     xdg.configFile."hermes-supervisor/prompts" = {

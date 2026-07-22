@@ -1697,7 +1697,14 @@ class SupervisorStateTests(unittest.TestCase):
             self.assertEqual(init.returncode, 0, init.stderr)
             self.assertEqual(json.loads(init.stdout)["control_state"], "running")
             paused = subprocess.run(
-                [sys.executable, str(CLI), "state", "control", "--state", str(path), "pause"],
+                [
+                    sys.executable, str(CLI), "state", "control",
+                    "--state", str(path),
+                    "--audit", str(path.parent / "audit.jsonl"),
+                    "--board", "fixture",
+                    "--hermes", "/fake/hermes",
+                    "pause",
+                ],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(paused.returncode, 0, paused.stderr)
@@ -4161,8 +4168,10 @@ class SupervisorBatchServiceTests(unittest.TestCase):
             paused = hermes_supervisor.SupervisorBatchService(client).run_once(
                 store, state_db, kanban_db, load_policy(POLICY), now
             )
-            self.assertEqual(paused.action, "scheduled")
-            self.assertEqual(paused.reason, "control_paused")
+            self.assertEqual(paused.action, "enqueued")
+            self.assertEqual(paused.reason, "supervisor_batch_enqueued")
+            self.assertEqual(len(client.projections), 1)
+            self.assertEqual(paused.state.control_state, "paused")
 
     def test_create_failure_retains_inputs_and_state_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5195,6 +5204,10 @@ h-chat model-c off yes local
         attached = hermes_supervisor.parse_profile_list(self.LISTING)
         self.assertEqual(attached.profiles, ("default", "discord-safe", "h-chat"))
         self.assertEqual(attached.active_profile, "default")
+        live_spacing = hermes_supervisor.parse_profile_list(
+            "\n" + self.LISTING + "\n"
+        )
+        self.assertEqual(live_spacing, attached)
         with self.assertRaises(FrozenInstanceError):
             attached.profiles = ()  # type: ignore[misc]
 
@@ -5830,6 +5843,40 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertEqual(persisted["cursor"], 0)
             self.assertEqual(persisted["pending"]["cursor"], 2)
 
+    def test_projection_caps_each_human_readable_section_and_reports_omissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            root = Path(directory) / "state"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                for index in range(1, 257):
+                    task_id = f"outcome-{index:03d}"
+                    title = f"完了項目{index:03d}-abcdefghijklmnopqrstuvwxy"
+                    connection.execute(
+                        "INSERT INTO tasks VALUES (?, ?, NULL, NULL, 'done', "
+                        "'supervisor', '2026-07-22', ?, NULL, NULL)",
+                        (task_id, title, json.dumps({"summary": f"要約{index:03d}"})),
+                    )
+                    connection.execute(
+                        "INSERT INTO task_events VALUES (?, ?, NULL, 'completed', '{}', '2026-07-22')",
+                        (index, task_id),
+                    )
+
+            prepared = hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+
+            if prepared is None:
+                self.fail("expected capped briefing")
+            changed = prepared.markdown.split("## changed outcomes\n", 1)[1].split(
+                "\n\n## Decisions", 1
+            )[0]
+            bullets = [line for line in changed.splitlines() if line.startswith("- ")]
+            self.assertLessEqual(len(bullets), 21)
+            self.assertIn("236件省略", changed)
+            self.assertLessEqual(
+                len(prepared.markdown.encode("utf-8")),
+                hermes_supervisor._BRIEFING_ARTIFACT_MAX_BYTES,
+            )
+
     def test_empty_briefing_day_is_noop_without_creating_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "kanban.db"
@@ -6464,6 +6511,454 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertEqual(len(client.projections), 1)
             self.assertIn("D1 適用", client.projections[0].body)
             self.assertEqual(result.state.last_message_id, 2)
+
+
+class Task10SupervisorControlTests(unittest.TestCase):
+    @staticmethod
+    def task(identifier: str, owner: str) -> dict[str, object]:
+        return {
+            "id": identifier, "title": "private title", "body": "PRIVATE BODY",
+            "assignee": "builder", "status": "running", "priority": 0,
+            "tenant": None, "workspace_kind": "scratch", "workspace_path": None,
+            "branch_name": None, "project_id": None, "created_by": owner,
+            "created_at": 1, "started_at": 2, "completed_at": None,
+            "result": None, "skills": [], "max_retries": 2,
+            "session_id": None, "workflow_template_id": None,
+            "current_step_key": None,
+        }
+
+    def test_exact_natural_language_mapping_and_rejection(self) -> None:
+        running = hermes_supervisor.initial_supervisor_state()
+        expected = {
+            "一時停止": "pause", "凍結": "freeze", "緊急停止": "emergency-stop",
+            "再開": "resume", "pause": "pause", "freeze": "freeze",
+            "emergency stop": "emergency-stop", "emergency-stop": "emergency-stop",
+            "resume": "resume",
+        }
+        for text, action in expected.items():
+            with self.subTest(text=text):
+                mapped = hermes_supervisor.map_control_request(text, running)
+                self.assertEqual((mapped.action, mapped.needs_clarification), (action, False))
+        ambiguous = hermes_supervisor.map_control_request("止めて", running)
+        self.assertEqual(
+            (ambiguous.action, ambiguous.needs_clarification, ambiguous.reason_code),
+            (None, True, "control_level_required"),
+        )
+        emergency = replace(
+            running, control_state="emergency_stopped", emergency_stop_requested_at=9
+        )
+        fail_closed = hermes_supervisor.map_control_request("止めて", emergency)
+        self.assertEqual(fail_closed.action, "emergency-stop")
+        self.assertEqual(fail_closed.reason_code, "active_emergency_fail_closed")
+        for hostile in (None, True, "", "stop", "PAUSE", " pause", "pause\n",
+                        "pause\x00", "pause\u202e", "x" * 65):
+            with self.subTest(hostile=repr(hostile)), self.assertRaises(
+                hermes_supervisor.ControlError
+            ):
+                hermes_supervisor.map_control_request(hostile, running)
+
+    def test_pause_organizes_but_does_not_dispatch(self) -> None:
+        policy = load_policy(POLICY)
+        state = replace(hermes_supervisor.initial_supervisor_state(), control_state="paused")
+        decision = hermes_supervisor.decide_gate(
+            policy, state, hermes_supervisor.GateRequest("supervisor_run"),
+            datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual((decision.action, decision.reason_code),
+                         ("allow", "supervisor_run_allowed"))
+        self.assertTrue(hermes_supervisor.card_formation_allowed(state))
+        self.assertFalse(hermes_supervisor.dispatch_allowed(state))
+
+    def test_audit_is_private_bounded_and_rejects_intermediate_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            audit = hermes_supervisor.ControlAuditLog(private / "audit.jsonl")
+            audit.append({"schema_version": 1, "kind": "checkpoint"})
+            self.assertEqual(audit.read_records()[0]["kind"], "checkpoint")
+            self.assertEqual(audit.path.stat().st_mode & 0o777, 0o600)
+            linked = root / "linked"
+            linked.symlink_to(private, target_is_directory=True)
+            hostile = hermes_supervisor.ControlAuditLog(linked / "audit.jsonl")
+            with self.assertRaises(hermes_supervisor.StateError):
+                hostile.read_records()
+            with self.assertRaises(hermes_supervisor.StateError):
+                hostile.append({"schema_version": 1, "kind": "hostile"})
+
+    def test_list_schema_managed_ownership_and_exact_board_argv(self) -> None:
+        calls = []
+        response = [
+            self.task("managed-a", "supervisor"),
+            self.task("managed-b", "supervisor-watcher"),
+            self.task("spoofed", "supervisor-evil"),
+            self.task("user-a", "user"),
+            self.task("unsafe", "supervisor--bad"),
+        ]
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture", runner=runner, base_env={"SAFE": "1"}
+        )
+        self.assertEqual(adapter.list_managed_running(), ("managed-a", "managed-b"))
+        self.assertEqual(calls[0][0], [
+            "/fake/hermes", "kanban", "--board", "fixture", "list",
+            "--status", "running", "--json",
+        ])
+        valid = self.task("managed-a", "supervisor")
+        for field, value in {
+            "title": 1, "body": [], "assignee": True, "priority": False,
+            "tenant": 1, "workspace_kind": None, "workspace_path": 1,
+            "branch_name": [], "project_id": {}, "created_at": float("nan"),
+            "started_at": "now", "completed_at": False, "result": "PRIVATE",
+            "skills": [1], "max_retries": True, "session_id": 1,
+            "workflow_template_id": [], "current_step_key": {},
+        }.items():
+            hostile = [{**valid, field: value}]
+            malformed = hermes_supervisor.HermesControlAdapter(
+                "/fake/hermes", "fixture",
+                runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+                    argv, 0, json.dumps(hostile), ""
+                ),
+            )
+            with self.subTest(field=field), self.assertRaises(
+                hermes_supervisor.ControlError
+            ):
+                malformed.list_managed_running()
+
+    def test_emergency_status_reconciliation_uses_explicit_bounded_board_reads(self) -> None:
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            status = argv[argv.index("--status") + 1]
+            response = []
+            if status == "ready":
+                task = self.task("task-a", "supervisor-control")
+                task["status"] = "ready"
+                response = [task]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture", runner=runner, base_env={}
+        )
+        self.assertEqual(adapter.emergency_task_status("task-a"), "ready")
+        self.assertEqual(
+            [argv[argv.index("--status") + 1] for argv in calls],
+            ["running", "ready", "blocked", "triage"],
+        )
+        for argv in calls:
+            self.assertEqual(argv[:5], [
+                "/fake/hermes", "kanban", "--board", "fixture", "list",
+            ])
+            self.assertEqual(argv[-1], "--json")
+
+    def test_emergency_exact_reclaim_block_and_external_calls_hold_no_state_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            calls = []
+            outer = self
+            class Adapter:
+                def list_managed_running(self):
+                    kinds = [record["kind"] for record in audit.read_records()]
+                    outer.assertIn("emergency_enumeration_intent", kinds)
+                    with hermes_supervisor.StateLock(store.lock_path):
+                        pass
+                    return ("task-a",)
+                def reclaim_task(self, task_id):
+                    with hermes_supervisor.StateLock(store.lock_path):
+                        pass
+                    calls.append(("reclaim", task_id))
+                def block_task(self, task_id):
+                    with hermes_supervisor.StateLock(store.lock_path):
+                        pass
+                    calls.append(("block", task_id))
+            class Notifier:
+                def send(self, summary):
+                    with hermes_supervisor.StateLock(store.lock_path):
+                        pass
+            result = hermes_supervisor.execute_control(
+                store, audit, Adapter(), Notifier(), "emergency-stop", now=123
+            )
+            self.assertEqual(calls, [("reclaim", "task-a"), ("block", "task-a")])
+            self.assertEqual((result.succeeded, result.failed), (1, 0))
+            self.assertEqual(store.read().emergency_stop_requested_at, 123)
+            kinds = [record["kind"] for record in audit.read_records()]
+            self.assertLess(kinds.index("emergency_reclaim_intent"),
+                            kinds.index("emergency_reclaim_result"))
+            self.assertLess(kinds.index("emergency_block_intent"),
+                            kinds.index("emergency_block_result"))
+
+        argv_calls = []
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture",
+            runner=lambda argv, **kwargs: (
+                argv_calls.append(argv) or subprocess.CompletedProcess(argv, 0, "ok", "")
+            ),
+        )
+        adapter.reclaim_task("task-a")
+        adapter.block_task("task-a")
+        self.assertEqual(argv_calls, [
+            ["/fake/hermes", "kanban", "--board", "fixture", "reclaim", "task-a",
+             "--reason", "supervisor_emergency_stop"],
+            ["/fake/hermes", "kanban", "--board", "fixture", "block", "task-a",
+             "supervisor_emergency_stop", "--kind", "transient"],
+        ])
+
+    def test_emergency_retries_block_after_reclaim_succeeded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self):
+                    self.calls = []
+                    self.list_calls = 0
+                    self.block_calls = 0
+                def list_managed_running(self):
+                    self.list_calls += 1
+                    return ("task-a",) if self.list_calls == 1 else ()
+                def reclaim_task(self, task_id):
+                    self.calls.append(("reclaim", task_id))
+                def block_task(self, task_id):
+                    self.calls.append(("block", task_id))
+                    self.block_calls += 1
+                    if self.block_calls == 1:
+                        raise hermes_supervisor.ControlError("fixture block failure")
+            class Notifier:
+                def send(self, summary): pass
+            adapter = Adapter()
+            with self.assertRaisesRegex(
+                hermes_supervisor.ControlError,
+                "one or more managed tasks could not be stopped",
+            ):
+                hermes_supervisor.execute_control(
+                    store, audit, adapter, Notifier(), "emergency-stop", now=150
+                )
+            result = hermes_supervisor.execute_control(
+                store, audit, adapter, Notifier(), "emergency-stop", now=151
+            )
+            self.assertEqual(result.failed, 0)
+            self.assertEqual(adapter.calls, [
+                ("reclaim", "task-a"),
+                ("block", "task-a"),
+                ("block", "task-a"),
+            ])
+            self.assertEqual(adapter.list_calls, 1)
+
+    def test_emergency_reconciles_reclaim_success_before_missing_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self):
+                    self.phase = "running"
+                    self.reclaims = 0
+                    self.blocks = 0
+                    self.list_calls = 0
+                def list_managed_running(self):
+                    self.list_calls += 1
+                    return ("task-a",)
+                def reclaim_task(self, task_id):
+                    self.reclaims += 1
+                    if self.phase != "running":
+                        raise hermes_supervisor.ControlError("not running")
+                    self.phase = "ready"
+                    raise KeyboardInterrupt("after reclaim before checkpoint")
+                def block_task(self, task_id):
+                    self.blocks += 1
+                    self.phase = "blocked"
+                def emergency_task_status(self, task_id):
+                    return self.phase
+            class Notifier:
+                def send(self, summary): pass
+            adapter = Adapter()
+            with self.assertRaises(KeyboardInterrupt):
+                hermes_supervisor.execute_control(
+                    store, audit, adapter, Notifier(), "emergency-stop", now=160
+                )
+            result = hermes_supervisor.execute_control(
+                store, audit, adapter, Notifier(), "emergency-stop", now=161
+            )
+            self.assertEqual((result.succeeded, result.failed), (1, 0))
+            self.assertEqual((adapter.reclaims, adapter.blocks, adapter.list_calls), (2, 1, 1))
+
+    def test_emergency_reconciles_block_success_before_missing_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self):
+                    self.phase = "running"
+                    self.blocks = 0
+                def list_managed_running(self): return ("task-a",)
+                def reclaim_task(self, task_id): self.phase = "ready"
+                def block_task(self, task_id):
+                    self.blocks += 1
+                    if self.phase != "ready":
+                        raise hermes_supervisor.ControlError("not blockable")
+                    self.phase = "blocked"
+                    raise KeyboardInterrupt("after block before checkpoint")
+                def emergency_task_status(self, task_id): return self.phase
+            class Notifier:
+                def send(self, summary): pass
+            adapter = Adapter()
+            with self.assertRaises(KeyboardInterrupt):
+                hermes_supervisor.execute_control(
+                    store, audit, adapter, Notifier(), "emergency-stop", now=170
+                )
+            result = hermes_supervisor.execute_control(
+                store, audit, adapter, Notifier(), "emergency-stop", now=171
+            )
+            self.assertEqual((result.succeeded, result.failed), (1, 0))
+            self.assertEqual(adapter.blocks, 2)
+
+    def test_alert_attempt_checkpoint_prevents_ambiguous_crash_resend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def list_managed_running(self): return ()
+                def reclaim_task(self, task_id): raise AssertionError(task_id)
+                def block_task(self, task_id): raise AssertionError(task_id)
+            class Notifier:
+                calls = 0
+                def send(self, summary):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise KeyboardInterrupt("ambiguous")
+            notifier = Notifier()
+            with self.assertRaises(KeyboardInterrupt):
+                hermes_supervisor.execute_control(
+                    store, audit, Adapter(), notifier, "emergency-stop", now=200
+                )
+            self.assertIn("emergency_alert_attempted",
+                          [record["kind"] for record in audit.read_records()])
+            retried = hermes_supervisor.execute_control(
+                store, audit, Adapter(), notifier, "emergency-stop", now=201
+            )
+            self.assertEqual(retried.state.emergency_stop_requested_at, 200)
+            self.assertEqual(notifier.calls, 1)
+
+    def test_ntfy_failure_is_ambiguous_and_never_automatically_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def list_managed_running(self): return ()
+                def reclaim_task(self, task_id): raise AssertionError(task_id)
+                def block_task(self, task_id): raise AssertionError(task_id)
+            class Notifier:
+                def __init__(self): self.calls = 0
+                def send(self, summary):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise hermes_supervisor.ControlError("ambiguous fixture failure")
+            notifier = Notifier()
+            with self.assertRaisesRegex(hermes_supervisor.ControlError, "emergency alert failed"):
+                hermes_supervisor.execute_control(
+                    store, audit, Adapter(), notifier, "emergency-stop", now=250
+                )
+            result = hermes_supervisor.execute_control(
+                store, audit, Adapter(), notifier, "emergency-stop", now=251
+            )
+            self.assertEqual(result.failed, 0)
+            self.assertEqual(notifier.calls, 1)
+            kinds = [record["kind"] for record in audit.read_records()]
+            self.assertIn("emergency_alert_ambiguous", kinds)
+            self.assertNotIn("emergency_alert_failed", kinds)
+
+    def test_resume_crash_retry_is_idempotent_and_clears_only_after_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(frozen=True),
+                last_message_id=7, pending_message_ids=(7,),
+            ))
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self):
+                    self.calls = []
+                    self.visible_states = []
+                def schedule_reevaluation(self, messages, events):
+                    self.visible_states.append(store.read().control_state)
+                    self.calls.append((messages, events))
+                    if len(self.calls) == 1:
+                        raise KeyboardInterrupt("after idempotent create")
+                    return "resume-task"
+            adapter = Adapter()
+            with self.assertRaises(KeyboardInterrupt):
+                hermes_supervisor.execute_control(
+                    store, audit, adapter, None, "resume", now=300
+                )
+            self.assertEqual(store.read().pending_message_ids, (7,))
+            result = hermes_supervisor.execute_control(
+                store, audit, adapter, None, "resume", now=301
+            )
+            self.assertEqual(adapter.calls, [((7,), ()), ((7,), ())])
+            self.assertEqual(adapter.visible_states, ["frozen", "frozen"])
+            self.assertEqual(result.state.pending_message_ids, ())
+            self.assertEqual(result.reevaluation_task_id, "resume-task")
+
+    def test_transaction_lock_is_private_and_nonblocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transaction.lock"
+            with hermes_supervisor.ControlTransactionLock(path):
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                with self.assertRaises(hermes_supervisor.StateBusyError):
+                    with hermes_supervisor.ControlTransactionLock(path):
+                        pass
+
+    def test_cli_control_uses_transaction_and_non_emergency_has_no_notifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = replace(hermes_supervisor.initial_supervisor_state(), control_state="paused")
+            result = hermes_supervisor.ControlExecutionResult("pause", state)
+            argv = [
+                "hermes-supervisor", "state", "control", "--state", str(root / "state"),
+                "--audit", str(root / "audit"), "--board", "fixture",
+                "--hermes", "/fake/hermes", "pause",
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                hermes_supervisor, "execute_control", return_value=result
+            ) as execute, mock.patch.object(
+                hermes_supervisor, "NtfyEmergencyNotifier"
+            ) as notifier, mock.patch("builtins.print") as printed:
+                self.assertEqual(hermes_supervisor.main(), 0)
+            notifier.assert_not_called()
+            self.assertIsNone(execute.call_args.args[3])
+            summary = json.loads(printed.call_args.args[0])
+            self.assertEqual(summary["control_state"], "paused")
+            for forbidden in ("body", "result", "path", "secret"):
+                self.assertNotIn(forbidden, json.dumps(summary).casefold())
+
+    def test_module_wrapper_and_prompt_control_contract(self) -> None:
+        module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text()
+        for fragment in (
+            "control.enable", "default = false", "controlCommand", "watch.lock",
+            "--audit", "--board", "--hermes", "--ntfy-url", "--curl",
+            "http://192.168.11.9:8080/nas-alerts",
+        ):
+            self.assertIn(fragment, module)
+        control_module = module[module.index("controlCommand"):]
+        self.assertNotIn("--conflict-exit-code 0", control_module)
+        self.assertIn("--conflict-exit-code 75", control_module)
+        self.assertIn("--state '${stateRoot}/state.json'", module)
+        self.assertIn("--audit '${stateRoot}/control-audit.jsonl'", module)
+        self.assertNotIn("hermes-supervisor-control.timer", module)
+        prompt = (REPO_ROOT / "home/modules/ai/hermes-supervisor/prompts/supervisor.md").read_text()
+        for fragment in (
+            "一時停止", "pause", "凍結", "freeze", "緊急停止", "emergency stop",
+            "再開", "resume", "止めて", "clarification", "tools enforce",
+            "does not implement",
+        ):
+            self.assertIn(fragment, prompt)
 
 
 class BriefingReplyParserTests(unittest.TestCase):

@@ -48,6 +48,10 @@ class StateError(ValueError):
     """Supervisor state cannot be safely read or changed."""
 
 
+class ControlError(ValueError):
+    """A Supervisor control operation failed closed."""
+
+
 class StateBusyError(StateError):
     """Another process owns the supervisor state lock."""
 
@@ -220,7 +224,7 @@ _PROMPT_SIZE_LIMIT = 16_384
 _PROMPT_VERSION = "hermes-supervisor-role/v1"
 _PROMPT_VERSION_HEADER = f"Prompt-Version: {_PROMPT_VERSION}"
 _APPROVED_PROMPT_DIGESTS = {
-    "supervisor": "c88ba3744f2271f9d5771dfeccd2ac1fb00632ce169dd4298ac7dfd06d65416b",
+    "supervisor": "3957ffd07c037255e231b864734d53468627a235568337a1fc22ea116ae49425",
     "researcher": "c8e1b4200b542c6546a504b5c02a889876e0e3b75a505cb41d3a0b19c1a93a05",
     "builder": "9b322b92db0a6ef416ff473c752096ff8f38f337c9ba9c6eb82d71d5712b7369",
     "verifier": "9e7e5cd59cbb2a6422335d913e7be429e4f023732d4ddbbd4dc2a3e964cf5f32",
@@ -439,7 +443,9 @@ def parse_profile_list(text: str) -> ProfileList:
     ):
         raise ProfileBootstrapError("profile list output has control data")
     lines = cleaned.split("\n")
-    if lines and lines[-1] == "":
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
         lines.pop()
     if len(lines) < 3 or lines[0].split() != [
         "Profile", "Model", "Gateway", "Alias", "Distribution",
@@ -2000,6 +2006,387 @@ class HermesKanbanClient:
         return card
 
 
+_CONTROL_TASK_KEYS = {
+    "id", "title", "body", "assignee", "status", "priority", "tenant",
+    "workspace_kind", "workspace_path", "branch_name", "project_id", "created_by",
+    "created_at", "started_at", "completed_at", "result", "skills", "max_retries",
+    "session_id", "workflow_template_id", "current_step_key",
+}
+_CONTROL_OWNERS = frozenset({
+    "supervisor",
+    "supervisor-capture",
+    "supervisor-watcher",
+    "supervisor-control",
+})
+_CONTROL_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _control_json_text(value: Any, maximum: int, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    if type(value) is not str:
+        raise ControlError("invalid running-task text")
+    try:
+        size = len(value.encode("utf-8", "strict"))
+    except UnicodeError as error:
+        raise ControlError("invalid running-task text") from error
+    if size > maximum:
+        raise ControlError("running-task text exceeds limit")
+
+
+def _validate_control_task(
+    task: Any, *, expected_status: str = "running"
+) -> tuple[str, str]:
+    if expected_status not in ("running", "ready", "blocked", "triage"):
+        raise ControlError("invalid expected task status")
+    if type(task) is not dict or set(task) != _CONTROL_TASK_KEYS:
+        raise ControlError("unknown running-task JSON shape")
+    identifier = task["id"]
+    owner = task["created_by"]
+    if type(identifier) is not str or _CONTROL_TASK_ID.fullmatch(identifier) is None:
+        raise ControlError("invalid running-task metadata")
+    for field, maximum in (
+        ("title", 512), ("body", 65_536), ("assignee", 128),
+        ("workspace_kind", 64), ("created_by", 128),
+    ):
+        _control_json_text(task[field], maximum)
+    for field, maximum in (
+        ("tenant", 128), ("workspace_path", 4096), ("branch_name", 512),
+        ("project_id", 256), ("session_id", 256),
+        ("workflow_template_id", 256), ("current_step_key", 256),
+    ):
+        _control_json_text(task[field], maximum, nullable=True)
+    if task["status"] != expected_status or type(task["status"]) is not str:
+        raise ControlError("invalid running-task metadata")
+    if type(task["priority"]) is not int or not -100 <= task["priority"] <= 100:
+        raise ControlError("invalid running-task priority")
+    if (
+        type(task["max_retries"]) is not int
+        or not 0 <= task["max_retries"] <= 100
+    ):
+        raise ControlError("invalid running-task retry count")
+    for field in ("created_at", "started_at", "completed_at"):
+        value = task[field]
+        if value is not None and (
+            type(value) not in (int, float) or not math.isfinite(value) or value < 0
+        ):
+            raise ControlError("invalid running-task timestamp")
+    skills = task["skills"]
+    if type(skills) is not list or len(skills) > 32:
+        raise ControlError("invalid running-task skills")
+    for skill in skills:
+        _control_json_text(skill, 128)
+    result = task["result"]
+    if result is not None and type(result) is not dict:
+        raise ControlError("invalid running-task result")
+    return identifier, owner
+
+
+class HermesControlAdapter:
+    """Public Hermes CLI repository pinned to one explicit Kanban board."""
+
+    def __init__(
+        self,
+        executable: str,
+        board: str,
+        *,
+        runner: Callable[..., Any] | None = None,
+        timeout: float = 30.0,
+        output_limit: int = 65536,
+        base_env: Mapping[str, str] | None = None,
+    ):
+        if type(executable) is not str or not executable or "\x00" in executable:
+            raise ControlError("invalid Hermes executable")
+        if (
+            type(board) is not str or len(board) > 64
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", board) is None
+        ):
+            raise ControlError("invalid explicit Kanban board")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ControlError("invalid control subprocess timeout")
+        if type(output_limit) is not int or output_limit <= 0:
+            raise ControlError("invalid control subprocess output limit")
+        try:
+            environment = dict(os.environ if base_env is None else base_env)
+        except (TypeError, ValueError) as error:
+            raise ControlError("invalid control subprocess environment") from error
+        if any(type(key) is not str or type(value) is not str for key, value in environment.items()):
+            raise ControlError("invalid control subprocess environment")
+        environment.pop("HERMES_KANBAN_BOARD", None)
+        self.executable = executable
+        self.board = board
+        self.runner = runner
+        self.timeout = float(timeout)
+        self.output_limit = output_limit
+        self.environment = environment
+
+    def _invoke(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        argv = [self.executable, "kanban", "--board", self.board, *arguments]
+        if any(type(item) is not str or not item or "\x00" in item for item in argv):
+            raise ControlError("invalid Hermes control argument")
+        try:
+            if self.runner is None:
+                completed = _bounded_subprocess_run(
+                    argv, environment=self.environment, timeout=self.timeout,
+                    output_limit=self.output_limit,
+                )
+            else:
+                completed = self.runner(
+                    argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=self.timeout, check=False,
+                    shell=False, env=dict(self.environment),
+                )
+        except ControlError:
+            raise
+        except (_BoundedOutputError, subprocess.TimeoutExpired, UnicodeError) as error:
+            raise ControlError("Hermes control subprocess failed closed") from error
+        except Exception as error:
+            raise ControlError(
+                f"Hermes control subprocess failed ({type(error).__name__})"
+            ) from error
+        if type(getattr(completed, "returncode", None)) is not int:
+            raise ControlError("Hermes control returned invalid result")
+        stdout = getattr(completed, "stdout", None)
+        stderr = getattr(completed, "stderr", None)
+        if type(stdout) is not str or type(stderr) is not str:
+            raise ControlError("Hermes control returned invalid output")
+        try:
+            if (
+                len(stdout.encode("utf-8", "strict")) > self.output_limit
+                or len(stderr.encode("utf-8", "strict")) > self.output_limit
+            ):
+                raise ControlError("Hermes control output exceeds limit")
+        except UnicodeError as error:
+            raise ControlError("Hermes control returned invalid output") from error
+        if completed.returncode != 0:
+            raise ControlError(f"Hermes control exited with status {completed.returncode}")
+        return completed
+
+    def _list_managed(self, status: str) -> tuple[str, ...]:
+        if status not in ("running", "ready", "blocked", "triage"):
+            raise ControlError("invalid task status query")
+        completed = self._invoke(["list", "--status", status, "--json"])
+        try:
+            value = _strict_json_loads(
+                completed.stdout,
+                max_bytes=self.output_limit,
+                error_type=ControlError,
+                message="invalid running-task JSON",
+            )
+        except ControlError:
+            raise
+        if type(value) is not list or len(value) > 256:
+            raise ControlError("invalid running-task list")
+        managed: list[str] = []
+        seen: set[str] = set()
+        for task in value:
+            identifier, owner = _validate_control_task(task, expected_status=status)
+            if identifier in seen:
+                raise ControlError("duplicate running task id")
+            seen.add(identifier)
+            if owner in _CONTROL_OWNERS:
+                managed.append(identifier)
+        return tuple(sorted(managed))
+
+    def list_managed_running(self) -> tuple[str, ...]:
+        return self._list_managed("running")
+
+    def emergency_task_status(self, task_id: str) -> str:
+        """Reconcile an ambiguous emergency operation through bounded public reads."""
+        self._validate_emergency_task_id(task_id)
+        matches = [
+            status for status in ("running", "ready", "blocked", "triage")
+            if task_id in self._list_managed(status)
+        ]
+        if len(matches) != 1:
+            raise ControlError("emergency task status is unavailable or ambiguous")
+        return matches[0]
+
+    @staticmethod
+    def _validate_emergency_task_id(task_id: str) -> None:
+        if type(task_id) is not str or _CONTROL_TASK_ID.fullmatch(task_id) is None:
+            raise ControlError("invalid emergency task id")
+
+    def reclaim_task(self, task_id: str) -> None:
+        self._validate_emergency_task_id(task_id)
+        self._invoke([
+            "reclaim", task_id, "--reason", "supervisor_emergency_stop",
+        ])
+
+    def block_task(self, task_id: str) -> None:
+        self._validate_emergency_task_id(task_id)
+        self._invoke([
+            "block", task_id, "supervisor_emergency_stop", "--kind", "transient",
+        ])
+
+    @staticmethod
+    def _reevaluation_ids(values: Any, label: str) -> tuple[int, ...]:
+        if type(values) is not tuple:
+            raise ControlError(f"invalid {label}")
+        checked = tuple(_state_int(value, label) for value in values)
+        if len(checked) != len(set(checked)) or tuple(sorted(checked)) != checked:
+            raise ControlError(f"invalid {label}")
+        return checked
+
+    def schedule_reevaluation(
+        self, message_ids: tuple[int, ...], event_ids: tuple[int, ...]
+    ) -> str:
+        messages = self._reevaluation_ids(message_ids, "resume message ids")
+        events = self._reevaluation_ids(event_ids, "resume event ids")
+        if not messages and not events:
+            raise ControlError("resume re-evaluation requires pending ids")
+        if len(messages) + len(events) > _CAPTURE_PENDING_ID_CAP:
+            raise ControlError("resume re-evaluation exceeds bounded id limit")
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": list(messages),
+                "event_ids": list(events),
+            },
+            ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        )
+        if len(body.encode("ascii")) > 65536:
+            raise ControlError("resume re-evaluation body exceeds limit")
+        key = "supervisor-resume-" + hashlib.sha256(body.encode("ascii")).hexdigest()
+        completed = self._invoke([
+            "create", "Supervisor resume re-evaluation",
+            "--body", body,
+            "--assignee", "supervisor",
+            "--workspace", "scratch",
+            "--idempotency-key", key,
+            "--created-by", "supervisor-control",
+            "--initial-status", "blocked",
+            "--json",
+        ])
+        value = _strict_json_loads(
+            completed.stdout,
+            max_bytes=self.output_limit,
+            error_type=ControlError,
+            message="invalid resume task JSON",
+        )
+        if type(value) is not dict or set(value) != _CONTROL_TASK_KEYS:
+            raise ControlError("unknown resume task JSON shape")
+        task_id = value["id"]
+        if (
+            type(task_id) is not str or _CONTROL_TASK_ID.fullmatch(task_id) is None
+            or value["title"] != "Supervisor resume re-evaluation"
+            or value["body"] != body
+            or value["assignee"] != "supervisor"
+            or value["created_by"] != "supervisor-control"
+            or value["status"] not in ("blocked", "scheduled")
+        ):
+            raise ControlError("resume task acknowledgement mismatch")
+        if value["status"] == "blocked":
+            self._invoke(["schedule", task_id, "supervisor_resume_reevaluation"])
+        return task_id
+
+
+class NtfyEmergencyNotifier:
+    """Dedicated HTTP ntfy route; never delegates to Hermes nightly delivery."""
+
+    _SUMMARY_KEYS = {"action", "managed", "succeeded", "failed", "result"}
+
+    def __init__(
+        self,
+        curl_executable: str,
+        url: str,
+        *,
+        runner: Callable[..., Any] | None = None,
+        timeout: float = 20.0,
+        output_limit: int = 4096,
+        base_env: Mapping[str, str] | None = None,
+    ):
+        if (
+            type(curl_executable) is not str or not curl_executable
+            or "\x00" in curl_executable
+        ):
+            raise ControlError("invalid curl executable")
+        if (
+            type(url) is not str or len(url.encode("utf-8", "strict")) > 2048
+            or re.fullmatch(r"https?://[^\s\x00]+", url) is None
+        ):
+            raise ControlError("invalid dedicated ntfy URL")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ControlError("invalid ntfy timeout")
+        if type(output_limit) is not int or output_limit <= 0:
+            raise ControlError("invalid ntfy output limit")
+        try:
+            environment = dict(os.environ if base_env is None else base_env)
+        except (TypeError, ValueError) as error:
+            raise ControlError("invalid ntfy environment") from error
+        if any(type(key) is not str or type(value) is not str for key, value in environment.items()):
+            raise ControlError("invalid ntfy environment")
+        self.curl_executable = curl_executable
+        self.url = url
+        self.runner = runner
+        self.timeout = float(timeout)
+        self.output_limit = output_limit
+        self.environment = environment
+
+    def send(self, summary: dict[str, Any]) -> None:
+        if type(summary) is not dict or set(summary) != self._SUMMARY_KEYS:
+            raise ControlError("invalid emergency ntfy summary")
+        if summary["action"] != "emergency-stop":
+            raise ControlError("invalid emergency ntfy action")
+        for key in ("managed", "succeeded", "failed"):
+            if type(summary[key]) is not int or not 0 <= summary[key] <= 256:
+                raise ControlError("invalid emergency ntfy count")
+        if summary["succeeded"] + summary["failed"] != summary["managed"]:
+            raise ControlError("inconsistent emergency ntfy counts")
+        if summary["result"] not in ("completed", "partial_failure"):
+            raise ControlError("invalid emergency ntfy result")
+        payload = json.dumps(
+            summary, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        if len(payload.encode("ascii")) > 512:
+            raise ControlError("emergency ntfy payload exceeds limit")
+        argv = [
+            self.curl_executable,
+            "--fail", "--silent", "--show-error",
+            "--connect-timeout", "5", "--max-time", "15",
+            "-H", "Title: Hermes Supervisor emergency stop",
+            "-H", "Priority: urgent",
+            "-H", "Tags: rotating_light,hermes",
+            "-H", "Content-Type: application/json",
+            "--data-binary", payload,
+            self.url,
+        ]
+        try:
+            if self.runner is None:
+                completed = _bounded_subprocess_run(
+                    argv, environment=self.environment, timeout=self.timeout,
+                    output_limit=self.output_limit,
+                )
+            else:
+                completed = self.runner(
+                    argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=self.timeout, check=False,
+                    shell=False, env=dict(self.environment),
+                )
+        except Exception as error:
+            raise ControlError(
+                f"ntfy delivery failed ({type(error).__name__})"
+            ) from error
+        if type(getattr(completed, "returncode", None)) is not int:
+            raise ControlError("ntfy delivery returned invalid result")
+        stdout = getattr(completed, "stdout", None)
+        stderr = getattr(completed, "stderr", None)
+        if type(stdout) is not str or type(stderr) is not str:
+            raise ControlError("ntfy delivery returned invalid output")
+        try:
+            oversized = (
+                len(stdout.encode("utf-8", "strict")) > self.output_limit
+                or len(stderr.encode("utf-8", "strict")) > self.output_limit
+            )
+        except UnicodeError as error:
+            raise ControlError("ntfy delivery returned invalid output") from error
+        if oversized:
+            raise ControlError("ntfy delivery output exceeds limit")
+        if completed.returncode != 0:
+            raise ControlError(f"ntfy delivery exited with status {completed.returncode}")
+
+
 @dataclass(frozen=True)
 class EventChange:
     id: int
@@ -2026,6 +2413,10 @@ def transition_control(
         raise StateError("invalid current control state")
     targets = {"pause": "paused", "freeze": "frozen", "resume": "running"}
     if action == "emergency-stop":
+        if state.control_state == "emergency_stopped":
+            if state.emergency_stop_requested_at is None:
+                raise StateError("active emergency is missing its timestamp")
+            return state
         if now is None:
             raise StateError("emergency-stop requires a timestamp")
         return replace(
@@ -2045,6 +2436,783 @@ def dispatch_allowed(state: SupervisorState) -> bool:
 
 def card_formation_allowed(state: SupervisorState) -> bool:
     return state.control_state in ("running", "paused")
+
+
+@dataclass(frozen=True)
+class ControlRequestMapping:
+    action: str | None
+    needs_clarification: bool
+    reason_code: str
+
+
+_CONTROL_REQUEST_ALLOWLIST = {
+    "一時停止": "pause",
+    "凍結": "freeze",
+    "緊急停止": "emergency-stop",
+    "再開": "resume",
+    "pause": "pause",
+    "freeze": "freeze",
+    "emergency stop": "emergency-stop",
+    "emergency-stop": "emergency-stop",
+    "resume": "resume",
+}
+_CONTROL_REQUEST_MAX_BYTES = 64
+
+
+def map_control_request(text: Any, state: SupervisorState) -> ControlRequestMapping:
+    """Map only exact approved control phrases; ambiguous stop requests stay explicit."""
+    if type(text) is not str or type(state) is not SupervisorState:
+        raise ControlError("invalid control request")
+    try:
+        encoded = text.encode("utf-8", "strict")
+    except UnicodeError as error:
+        raise ControlError("invalid control request") from error
+    if (
+        not encoded
+        or len(encoded) > _CONTROL_REQUEST_MAX_BYTES
+        or any(unicodedata.category(character).startswith("C") for character in text)
+    ):
+        raise ControlError("invalid control request")
+    if text == "止めて":
+        if state.control_state == "emergency_stopped":
+            if state.emergency_stop_requested_at is None:
+                raise ControlError("active emergency is missing its timestamp")
+            return ControlRequestMapping(
+                "emergency-stop", False, "active_emergency_fail_closed"
+            )
+        return ControlRequestMapping(None, True, "control_level_required")
+    action = _CONTROL_REQUEST_ALLOWLIST.get(text)
+    if action is None:
+        raise ControlError("unknown control request")
+    return ControlRequestMapping(action, False, "mapped_exact_control")
+
+
+_CONTROL_AUDIT_RECORD_MAX_BYTES = 4096
+_CONTROL_AUDIT_FILE_MAX_BYTES = 1024 * 1024
+_CONTROL_AUDIT_FORBIDDEN_KEYS = {
+    "body", "content", "error", "log", "payload", "reasoning", "secret",
+}
+
+
+def _open_control_private_directory(path: Path, *, create: bool) -> int:
+    """Open every path component by descriptor without following symlinks."""
+    if (
+        type(path) is not type(Path())
+        or not path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
+        raise StateError("invalid control audit directory")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if type(nofollow) is not int or type(directory) is not int:
+        raise StateError("control audit requires descriptor-safe directories")
+    flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open("/", flags)
+        for component in path.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise StateError("invalid control audit directory")
+        return descriptor
+    except StateError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise StateError("invalid control audit directory") from error
+
+
+class ControlTransactionLock:
+    """Bounded cross-process operator lock; acquire before any short StateLock."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fd = -1
+        self._directory_fd = -1
+
+    def __enter__(self) -> ControlTransactionLock:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if type(nofollow) is not int:
+            raise StateError("control transaction lock requires O_NOFOLLOW")
+        try:
+            self._directory_fd = _open_control_private_directory(
+                self.path.parent, create=True
+            )
+            self._fd = os.open(
+                self.path.name,
+                os.O_RDWR | os.O_CREAT | nofollow | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=self._directory_fd,
+            )
+            metadata = os.fstat(self._fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise StateError("invalid control transaction lock")
+            os.fchmod(self._fd, 0o600)
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise StateBusyError("control transaction is busy") from error
+            return self
+        except BaseException:
+            if self._fd >= 0:
+                os.close(self._fd)
+                self._fd = -1
+            if self._directory_fd >= 0:
+                os.close(self._directory_fd)
+                self._directory_fd = -1
+            raise
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            os.close(self._directory_fd)
+            self._fd = -1
+            self._directory_fd = -1
+
+
+class ControlAuditLog:
+    """Append-only private JSONL checkpoints containing control metadata only."""
+
+    def __init__(self, path: Path):
+        if type(path) is not type(Path()) or not path.is_absolute():
+            raise StateError("control audit path must be absolute")
+        self.path = path
+
+    @staticmethod
+    def _encode(record: dict[str, Any]) -> bytes:
+        if type(record) is not dict or not record:
+            raise StateError("control audit record must be an object")
+        for key in record:
+            if (
+                type(key) is not str or not key
+                or key.casefold() in _CONTROL_AUDIT_FORBIDDEN_KEYS
+            ):
+                raise StateError("control audit record contains a forbidden key")
+        try:
+            canonical = json.dumps(
+                record, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
+            checked = _strict_json_loads(
+                canonical,
+                max_bytes=_CONTROL_AUDIT_RECORD_MAX_BYTES,
+                error_type=StateError,
+                message="invalid control audit record",
+            )
+            _json_depth(checked)
+            encoded = (canonical + "\n").encode("ascii")
+        except StateError:
+            raise
+        except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+            raise StateError("invalid control audit record") from error
+        if len(encoded) > _CONTROL_AUDIT_RECORD_MAX_BYTES:
+            raise StateError("control audit record exceeds limit")
+        return encoded
+
+    def append(self, record: dict[str, Any]) -> None:
+        payload = self._encode(record)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if type(nofollow) is not int:
+            raise StateError("control audit requires O_NOFOLLOW")
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_fd = -1
+        fd = -1
+        try:
+            directory_fd = _open_control_private_directory(self.path.parent, create=True)
+            fd = os.open(self.path.name, flags, 0o600, dir_fd=directory_fd)
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+            ):
+                raise StateError("control audit must be a private single-link regular file")
+            if metadata.st_size + len(payload) > _CONTROL_AUDIT_FILE_MAX_BYTES:
+                raise StateError("control audit file exceeds limit")
+            os.fchmod(fd, 0o600)
+            written = 0
+            while written < len(payload):
+                count = os.write(fd, payload[written:])
+                if count <= 0:
+                    raise OSError("short audit write")
+                written += count
+            os.fsync(fd)
+            os.fsync(directory_fd)
+        except StateError:
+            raise
+        except OSError as error:
+            raise StateError("control audit append failed") from error
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+
+    def read_records(self) -> tuple[dict[str, Any], ...]:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if type(nofollow) is not int:
+            raise StateError("control audit requires O_NOFOLLOW")
+        directory_fd = -1
+        fd = -1
+        try:
+            directory_fd = _open_control_private_directory(self.path.parent, create=False)
+            fd = os.open(
+                self.path.name,
+                os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
+            )
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_size < 0
+                or metadata.st_size > _CONTROL_AUDIT_FILE_MAX_BYTES
+            ):
+                raise StateError("invalid control audit file")
+            chunks: list[bytes] = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(fd, min(remaining, 64 * 1024))
+                if not chunk:
+                    raise StateError("control audit changed during read")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1):
+                raise StateError("control audit changed during read")
+            payload = b"".join(chunks)
+        except StateError:
+            raise
+        except OSError as error:
+            raise StateError("control audit read failed") from error
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+        records: list[dict[str, Any]] = []
+        for line in payload.splitlines():
+            try:
+                text = line.decode("ascii", "strict")
+            except UnicodeError as error:
+                raise StateError("invalid control audit record") from error
+            value = _strict_json_loads(
+                text,
+                max_bytes=_CONTROL_AUDIT_RECORD_MAX_BYTES,
+                error_type=StateError,
+                message="invalid control audit record",
+            )
+            if type(value) is not dict:
+                raise StateError("invalid control audit record")
+            records.append(value)
+        return tuple(records)
+
+
+def apply_control_transition(
+    store: StateStore,
+    audit: ControlAuditLog,
+    action: str,
+    *,
+    now: int,
+) -> SupervisorState:
+    """Checkpoint a bounded transition record, then persist the state under one lock."""
+    if type(store) is not StateStore or type(audit) is not ControlAuditLog:
+        raise StateError("invalid control transition repository")
+    timestamp = _state_int(now, "control transition timestamp")
+    with StateLock(store.lock_path):
+        if store.path.exists():
+            try:
+                state = store.read()
+            except StateError:
+                state = store._recover_unlocked()
+        else:
+            state = initial_supervisor_state()
+        changed = transition_control(state, action, now=timestamp)
+        audit.append({
+            "schema_version": 1,
+            "kind": "control_transition",
+            "timestamp": timestamp,
+            "action": action,
+            "from_state": state.control_state,
+            "to_state": changed.control_state,
+            "changed": changed != state,
+            "pending_message_count": len(state.pending_message_ids),
+            "pending_event_count": len(state.pending_event_ids),
+        })
+        store._write_unlocked(changed)
+        return changed
+
+
+@dataclass(frozen=True)
+class ControlExecutionResult:
+    action: str
+    state: SupervisorState
+    managed_task_ids: tuple[str, ...] = ()
+    succeeded: int = 0
+    failed: int = 0
+    reevaluation_task_id: str | None = None
+
+
+def _control_transition_record(
+    state: SupervisorState, changed: SupervisorState, action: str, timestamp: int
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "control_transition",
+        "timestamp": timestamp,
+        "action": action,
+        "from_state": state.control_state,
+        "to_state": changed.control_state,
+        "changed": changed != state,
+        "pending_message_count": len(state.pending_message_ids),
+        "pending_event_count": len(state.pending_event_ids),
+    }
+
+
+def _control_load_unlocked(store: StateStore) -> SupervisorState:
+    if store.path.exists():
+        try:
+            return store.read()
+        except StateError:
+            return store._recover_unlocked()
+    return initial_supervisor_state()
+
+
+def _validate_managed_ids(value: Any) -> tuple[str, ...]:
+    if (
+        type(value) is not tuple
+        or len(value) > 256
+        or len(value) != len(set(value))
+        or any(
+            type(identifier) is not str
+            or _CONTROL_TASK_ID.fullmatch(identifier) is None
+            for identifier in value
+        )
+    ):
+        raise ControlError("invalid managed running task enumeration")
+    return value
+
+
+def _resume_intent_key(message_ids: tuple[int, ...], event_ids: tuple[int, ...]) -> str:
+    canonical = json.dumps(
+        [list(message_ids), list(event_ids)],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def execute_control(
+    store: StateStore,
+    audit: ControlAuditLog,
+    adapter: Any,
+    notifier: Any,
+    action: str,
+    *,
+    now: int,
+) -> ControlExecutionResult:
+    """Run one durable control transaction; external calls never hold StateLock.
+
+    Lock order is the nonblocking cross-process ControlTransactionLock first,
+    followed by short StateLock phases.  The transaction lock is intentionally
+    held across external calls to preserve one-operator semantics.
+    """
+    if type(store) is not StateStore or type(audit) is not ControlAuditLog:
+        raise ControlError("invalid control repository")
+    if type(action) is not str or action not in (
+        "pause", "freeze", "resume", "emergency-stop"
+    ):
+        raise ControlError("invalid control action")
+    timestamp = _state_int(now, "control timestamp")
+    transaction_path = store.path.with_name(
+        store.path.name + ".control-transaction.lock"
+    )
+    with ControlTransactionLock(transaction_path):
+        with StateLock(store.lock_path):
+            state = _control_load_unlocked(store)
+            changed = transition_control(state, action, now=timestamp)
+            pending_messages = state.pending_message_ids
+            pending_events = state.pending_event_ids
+            staged = changed
+            if action == "resume" and (pending_messages or pending_events):
+                # Keep dispatch fail-closed until the bounded re-evaluation card is
+                # acknowledged.  Publishing running before that ACK would expose the
+                # backlog to a concurrent watch cycle.
+                staged = replace(changed, control_state="frozen")
+            audit.append(_control_transition_record(state, staged, action, timestamp))
+            store._write_unlocked(staged)
+            if action == "resume" and (pending_messages or pending_events):
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "resume_intent",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "message_count": len(pending_messages),
+                    "event_count": len(pending_events),
+                    "intent_key": _resume_intent_key(pending_messages, pending_events),
+                })
+
+        if action in ("pause", "freeze"):
+            return ControlExecutionResult(action, changed)
+        if action == "resume":
+            if not pending_messages and not pending_events:
+                return ControlExecutionResult(action, changed)
+            schedule = getattr(adapter, "schedule_reevaluation", None)
+            if not callable(schedule):
+                error: Exception = ControlError(
+                    "control adapter cannot schedule re-evaluation"
+                )
+            else:
+                try:
+                    task_id = schedule(pending_messages, pending_events)
+                    if (
+                        type(task_id) is not str
+                        or _CONTROL_TASK_ID.fullmatch(task_id) is None
+                    ):
+                        raise ControlError("invalid re-evaluation task id")
+                except Exception as caught:
+                    error = caught
+                else:
+                    with StateLock(store.lock_path):
+                        current = _control_load_unlocked(store)
+                        if (
+                            current.pending_message_ids != pending_messages
+                            or current.pending_event_ids != pending_events
+                        ):
+                            raise ControlError("resume pending ids changed")
+                        committed = replace(
+                            current,
+                            control_state="running",
+                            pending_message_ids=(),
+                            pending_event_ids=(),
+                        )
+                        store._write_unlocked(committed)
+                        audit.append({
+                            "schema_version": 1,
+                            "kind": "resume_result",
+                            "timestamp": timestamp,
+                            "action": action,
+                            "message_count": len(pending_messages),
+                            "event_count": len(pending_events),
+                            "outcome": "scheduled",
+                            "task_id": task_id,
+                        })
+                    return ControlExecutionResult(
+                        action, committed, reevaluation_task_id=task_id
+                    )
+            with StateLock(store.lock_path):
+                current = _control_load_unlocked(store)
+                failed_closed = replace(current, control_state="frozen")
+                store._write_unlocked(failed_closed)
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "resume_result",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "message_count": len(pending_messages),
+                    "event_count": len(pending_events),
+                    "outcome": "failed_closed",
+                })
+            raise ControlError("resume re-evaluation scheduling failed") from error
+
+        list_running = getattr(adapter, "list_managed_running", None)
+        reclaim_task = getattr(adapter, "reclaim_task", None)
+        block_task = getattr(adapter, "block_task", None)
+        if not all(callable(operation) for operation in (list_running, reclaim_task, block_task)):
+            raise ControlError("invalid emergency control adapter")
+        emergency_at = changed.emergency_stop_requested_at
+        if emergency_at is None:
+            raise ControlError("emergency stop is missing its timestamp")
+
+        records = audit.read_records()
+        emergency_records = tuple(
+            record for record in records
+            if record.get("emergency_requested_at") == emergency_at
+        )
+        enumeration_complete = any(
+            record.get("kind") == "emergency_enumeration_result"
+            for record in emergency_records
+        )
+        if not enumeration_complete:
+            with StateLock(store.lock_path):
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "emergency_enumeration_intent",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "emergency_requested_at": emergency_at,
+                })
+            managed = _validate_managed_ids(list_running())
+            with StateLock(store.lock_path):
+                for task_id in managed:
+                    audit.append({
+                        "schema_version": 1,
+                        "kind": "emergency_task_planned",
+                        "timestamp": timestamp,
+                        "action": action,
+                        "task_id": task_id,
+                        "emergency_requested_at": emergency_at,
+                    })
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "emergency_enumeration_result",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "managed_count": len(managed),
+                    "outcome": "completed",
+                    "emergency_requested_at": emergency_at,
+                })
+            emergency_records = tuple(
+                record for record in audit.read_records()
+                if record.get("emergency_requested_at") == emergency_at
+            )
+        else:
+            managed = _validate_managed_ids(tuple(sorted({
+                record["task_id"] for record in emergency_records
+                if record.get("kind") == "emergency_task_planned"
+                and type(record.get("task_id")) is str
+            })))
+
+        def completed_tasks(kind: str) -> set[str]:
+            return {
+                record["task_id"] for record in emergency_records
+                if record.get("kind") == kind
+                and record.get("outcome") == "completed"
+                and type(record.get("task_id")) is str
+            }
+
+        def ambiguous_tasks(intent_kind: str, result_kind: str) -> set[str]:
+            attempts: dict[str, int] = {}
+            results: dict[str, int] = {}
+            for record in emergency_records:
+                task_id = record.get("task_id")
+                if type(task_id) is not str:
+                    continue
+                if record.get("kind") == intent_kind:
+                    attempts[task_id] = attempts.get(task_id, 0) + 1
+                elif record.get("kind") == result_kind:
+                    results[task_id] = results.get(task_id, 0) + 1
+            return {
+                task_id for task_id, count in attempts.items()
+                if count > results.get(task_id, 0)
+            }
+
+        reclaimed = completed_tasks("emergency_reclaim_result")
+        blocked = completed_tasks("emergency_block_result")
+        ambiguous_reclaims = ambiguous_tasks(
+            "emergency_reclaim_intent", "emergency_reclaim_result"
+        )
+        ambiguous_blocks = ambiguous_tasks(
+            "emergency_block_intent", "emergency_block_result"
+        )
+        reconcile_status = getattr(adapter, "emergency_task_status", None)
+
+        def record_task_result(
+            kind: str, task_id: str, outcome: str, *, reconciled_status: str | None = None
+        ) -> None:
+            record: dict[str, Any] = {
+                "schema_version": 1,
+                "kind": kind,
+                "timestamp": timestamp,
+                "action": action,
+                "task_id": task_id,
+                "outcome": outcome,
+                "emergency_requested_at": emergency_at,
+            }
+            if reconciled_status is not None:
+                record["reconciled_status"] = reconciled_status
+            with StateLock(store.lock_path):
+                audit.append(record)
+
+        failed = 0
+        for task_id in managed:
+            if task_id not in reclaimed:
+                with StateLock(store.lock_path):
+                    audit.append({
+                        "schema_version": 1,
+                        "kind": "emergency_reclaim_intent",
+                        "timestamp": timestamp,
+                        "action": action,
+                        "task_id": task_id,
+                        "emergency_requested_at": emergency_at,
+                    })
+                try:
+                    reclaim_task(task_id)
+                except Exception:
+                    status = None
+                    if task_id in ambiguous_reclaims and callable(reconcile_status):
+                        try:
+                            status = reconcile_status(task_id)
+                        except Exception:
+                            status = None
+                    if status in ("ready", "blocked", "triage"):
+                        record_task_result(
+                            "emergency_reclaim_result", task_id, "completed",
+                            reconciled_status=status,
+                        )
+                        reclaimed.add(task_id)
+                        if status in ("blocked", "triage"):
+                            record_task_result(
+                                "emergency_block_result", task_id, "completed",
+                                reconciled_status=status,
+                            )
+                            blocked.add(task_id)
+                    else:
+                        record_task_result(
+                            "emergency_reclaim_result", task_id, "failed"
+                        )
+                        failed += 1
+                        continue
+                else:
+                    record_task_result(
+                        "emergency_reclaim_result", task_id, "completed"
+                    )
+                    reclaimed.add(task_id)
+            if task_id not in blocked:
+                with StateLock(store.lock_path):
+                    audit.append({
+                        "schema_version": 1,
+                        "kind": "emergency_block_intent",
+                        "timestamp": timestamp,
+                        "action": action,
+                        "task_id": task_id,
+                        "emergency_requested_at": emergency_at,
+                    })
+                try:
+                    block_task(task_id)
+                except Exception:
+                    status = None
+                    if task_id in ambiguous_blocks and callable(reconcile_status):
+                        try:
+                            status = reconcile_status(task_id)
+                        except Exception:
+                            status = None
+                    if status in ("blocked", "triage"):
+                        record_task_result(
+                            "emergency_block_result", task_id, "completed",
+                            reconciled_status=status,
+                        )
+                        blocked.add(task_id)
+                    else:
+                        record_task_result(
+                            "emergency_block_result", task_id, "failed"
+                        )
+                        failed += 1
+                        continue
+                else:
+                    record_task_result(
+                        "emergency_block_result", task_id, "completed"
+                    )
+                    blocked.add(task_id)
+        succeeded = len(blocked.intersection(managed))
+        failed = len(managed) - succeeded
+        outcome = "completed" if failed == 0 else "partial_failure"
+        with StateLock(store.lock_path):
+            current = _control_load_unlocked(store)
+            if current.control_state != "emergency_stopped":
+                current = replace(current, control_state="emergency_stopped")
+                store._write_unlocked(current)
+            audit.append({
+                "schema_version": 1,
+                "kind": "emergency_result",
+                "timestamp": timestamp,
+                "action": action,
+                "managed_count": len(managed),
+                "succeeded": succeeded,
+                "failed": failed,
+                "outcome": outcome,
+                "emergency_requested_at": emergency_at,
+            })
+
+        alert_records = tuple(
+            record for record in audit.read_records()
+            if record.get("emergency_requested_at") == emergency_at
+            and record.get("kind") in {
+                "emergency_alert_attempted", "emergency_alert_ambiguous",
+                "emergency_alert_sent",
+            }
+        )
+        alert_sent = any(
+            record.get("kind") == "emergency_alert_sent" for record in alert_records
+        )
+        alert_attempted = any(
+            record.get("kind") == "emergency_alert_attempted" for record in alert_records
+        )
+        if not alert_sent and not alert_attempted:
+            send = getattr(notifier, "send", None)
+            if not callable(send):
+                raise ControlError("invalid emergency notifier")
+            summary = {
+                "action": action,
+                "managed": len(managed),
+                "succeeded": succeeded,
+                "failed": failed,
+                "result": outcome,
+            }
+            with StateLock(store.lock_path):
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "emergency_alert_attempted",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "managed_count": len(managed),
+                    "outcome": outcome,
+                    "emergency_requested_at": emergency_at,
+                })
+            try:
+                send(summary)
+            except Exception as error:
+                with StateLock(store.lock_path):
+                    audit.append({
+                        "schema_version": 1,
+                        "kind": "emergency_alert_ambiguous",
+                        "timestamp": timestamp,
+                        "action": action,
+                        "managed_count": len(managed),
+                        "outcome": "ambiguous",
+                        "emergency_requested_at": emergency_at,
+                    })
+                raise ControlError("emergency alert failed") from error
+            with StateLock(store.lock_path):
+                audit.append({
+                    "schema_version": 1,
+                    "kind": "emergency_alert_sent",
+                    "timestamp": timestamp,
+                    "action": action,
+                    "managed_count": len(managed),
+                    "outcome": outcome,
+                    "emergency_requested_at": emergency_at,
+                })
+        result = ControlExecutionResult(
+            action, current, managed, succeeded, failed
+        )
+        if failed:
+            raise ControlError("one or more managed tasks could not be stopped")
+        return result
 
 
 def _record_observed_ids(
@@ -3431,7 +4599,7 @@ def decide_gate(
             "needs_human", "emergency_stop_active", budget,
             state.last_accepted_primary_goal_id,
         )
-    if state.control_state == "paused":
+    if state.control_state == "paused" and request.kind != "supervisor_run":
         return GateDecision(
             "schedule", "control_paused", budget,
             state.last_accepted_primary_goal_id,
@@ -3833,6 +5001,21 @@ class SupervisorBatchService:
                 emergency, safety, data_loss = _batch_flags(changes.events)
                 source_message_ids = tuple(sorted(message.id for message in changes.messages))
                 source_event_ids = tuple(sorted(event.id for event in changes.events))
+                if state.control_state in ("frozen", "emergency_stopped"):
+                    control_result = {
+                        "frozen": ("scheduled", "schedule", "control_frozen"),
+                        "emergency_stopped": (
+                            "needs_human", "needs_human", "emergency_stop_active"
+                        ),
+                    }[state.control_state]
+                    gate = GateDecision(
+                        control_result[1], control_result[2], state.daily_budget,
+                        state.last_accepted_primary_goal_id,
+                    )
+                    return _validate_batch_result(SupervisorBatchResult(
+                        control_result[0], control_result[2], state, gate=gate,
+                        message_ids=source_message_ids, event_ids=source_event_ids,
+                    ))
                 last_enqueued = state.last_supervisor_enqueued_at
                 if last_enqueued is not None:
                     if last_enqueued > epoch:
@@ -3932,6 +5115,9 @@ _BRIEFING_FIELD_MAX_BYTES = 512
 _BRIEFING_TOTAL_RAW_BYTES = 256 * 1024
 _BRIEFING_MAX_DECISION_MAPPINGS = 128
 _BRIEFING_ARTIFACT_MAX_BYTES = 32 * 1024
+_BRIEFING_MAX_OUTCOMES = 20
+_BRIEFING_MAX_ANOMALIES = 10
+_BRIEFING_MAX_HUMAN_ACTIONS = 10
 _BRIEFING_OWNER = re.compile(r"supervisor(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?")
 _BRIEFING_DECISION_KEYS = {
     "key", "question", "options", "recommendation", "dangerous", "importance",
@@ -4316,6 +5502,15 @@ def _read_briefing_rows(
         raise BriefingError("Kanban briefing read failed") from error
 
 
+def _bounded_briefing_items(items: list[str], maximum: int) -> tuple[str, ...]:
+    unique = tuple(sorted(set(items)))
+    shown = unique[:maximum]
+    omitted = len(unique) - len(shown)
+    if omitted:
+        return shown + (f"… {omitted}件省略（詳細はKanbanを参照）",)
+    return shown
+
+
 def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBriefing | None:
     """Persist one deterministic bounded daily projection before any delivery."""
     try:
@@ -4424,11 +5619,14 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
             candidates.items(), key=lambda item: (-item[1][4], item[0])
         )[:10]
     )
+    shown_outcomes = _bounded_briefing_items(outcomes, _BRIEFING_MAX_OUTCOMES)
+    shown_anomalies = _bounded_briefing_items(anomalies, _BRIEFING_MAX_ANOMALIES)
+    shown_actions = _bounded_briefing_items(actions, _BRIEFING_MAX_HUMAN_ACTIONS)
     marker = f"<!-- supervisor-briefing:{day}:e{highwater} -->"
     title = f"Supervisor Console — {month}"
     lines = [f"# {title}", marker, "", "## changed outcomes"]
-    lines.extend(f"- {item}" for item in sorted(set(outcomes)))
-    if not outcomes:
+    lines.extend(f"- {item}" for item in shown_outcomes)
+    if not shown_outcomes:
         lines.append("- なし")
     lines.extend(["", "## Decisions"])
     for decision in decisions:
@@ -4437,12 +5635,12 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
     if not decisions:
         lines.append("- なし")
     lines.extend(["", "## anomalies"])
-    lines.extend(f"- {item}" for item in sorted(set(anomalies)))
-    if not anomalies:
+    lines.extend(f"- {item}" for item in shown_anomalies)
+    if not shown_anomalies:
         lines.append("- なし")
     lines.extend(["", "## Human Actions"])
-    lines.extend(f"- {item}" for item in sorted(set(actions)))
-    if not actions:
+    lines.extend(f"- {item}" for item in shown_actions)
+    if not shown_actions:
         lines.append("- なし")
     markdown = "\n".join(lines) + "\n"
     encoded = markdown.encode("utf-8")
@@ -4458,7 +5656,7 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
     }
     _write_briefing_state(state_path, state, month)
     return PreparedBriefing(
-        title, markdown, decisions, tuple(sorted(set(actions))), highwater, marker,
+        title, markdown, decisions, shown_actions, highwater, marker,
         artifact_path, state_path,
     )
 
@@ -4879,6 +6077,21 @@ def _safe_state_summary(state: SupervisorState) -> dict[str, Any]:
     }
 
 
+def _safe_control_summary(result: ControlExecutionResult) -> dict[str, Any]:
+    if type(result) is not ControlExecutionResult or type(result.state) is not SupervisorState:
+        raise ControlError("invalid control execution result")
+    return {
+        "action": result.action,
+        "control_state": result.state.control_state,
+        "managed_count": len(result.managed_task_ids),
+        "succeeded": result.succeeded,
+        "failed": result.failed,
+        "pending_message_count": len(result.state.pending_message_ids),
+        "pending_event_count": len(result.state.pending_event_ids),
+        "reevaluation_scheduled": result.reevaluation_task_id is not None,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -4916,6 +6129,11 @@ def main() -> int:
     state_show.add_argument("--state", type=Path, required=True)
     state_control = state_commands.add_parser("control")
     state_control.add_argument("--state", type=Path, required=True)
+    state_control.add_argument("--audit", type=Path, required=True)
+    state_control.add_argument("--board", required=True)
+    state_control.add_argument("--hermes", required=True)
+    state_control.add_argument("--ntfy-url")
+    state_control.add_argument("--curl")
     state_control.add_argument(
         "action", choices=("pause", "freeze", "resume", "emergency-stop")
     )
@@ -5019,14 +6237,31 @@ def main() -> int:
             store = StateStore(args.state)
             if args.state_command == "init":
                 supervisor_state = store.initialize()
+                report = _safe_state_summary(supervisor_state)
             elif args.state_command == "show":
                 supervisor_state = store.read()
+                report = _safe_state_summary(supervisor_state)
             else:
-                supervisor_state = store.control(args.action)
-        except StateError as error:
+                notifier = None
+                if args.action == "emergency-stop":
+                    if args.ntfy_url is None or args.curl is None:
+                        raise ControlError(
+                            "emergency-stop requires --ntfy-url and --curl"
+                        )
+                    notifier = NtfyEmergencyNotifier(args.curl, args.ntfy_url)
+                result = execute_control(
+                    store,
+                    ControlAuditLog(args.audit),
+                    HermesControlAdapter(args.hermes, args.board),
+                    notifier,
+                    args.action,
+                    now=int(time.time()),
+                )
+                report = _safe_control_summary(result)
+        except (ControlError, StateError) as error:
             print(f"state: {error}", file=sys.stderr)
             return 2
-        print(json.dumps(_safe_state_summary(supervisor_state), ensure_ascii=True,
+        print(json.dumps(report, ensure_ascii=True,
                          sort_keys=True, separators=(",", ":")))
         return 0
 

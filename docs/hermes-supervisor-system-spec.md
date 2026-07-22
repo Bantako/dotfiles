@@ -187,6 +187,8 @@ Supervisorは実装を行わない。
 - write: Kanbanの形成・assign・comment・schedule、構造化監査ログ
 - 禁止: 実装、実環境適用、権限拡大の自己承認
 
+Supervisor管理cardの運用上の所有境界は、明示pinされた専用Kanban boardとする。board内では完全一致の`created_by`を誤操作防止の識別子として使うが、これは認証情報ではない。同じUNIX userとしてHermes homeへwriteできる人が公開CLI metadataまたはDBを意図的に偽装する脅威はMVP外とし、人間の無関係なcardは別boardへ置く。停止処理はglobal current boardへ依存しない。
+
 ### Researcher
 
 - read-only調査

@@ -532,6 +532,8 @@ Cover:
 
 Use `hermes kanban list --json`, `block`, `schedule`, `reclaim`, or other documented commands. Confirm exact termination/reclaim semantics against current Hermes docs before touching live tasks. Couple the emergency audit result to a dedicated ntfy oneshot/adapter; never route emergency payloads through the nightly Discord briefing.
 
+The pinned dedicated Supervisor board is the operational ownership boundary. Within that board, exact `created_by` values identify Supervisor-managed cards and protect against accidental overlap; they are not an authentication mechanism. A local user with write access to the same Hermes home can deliberately forge public CLI metadata or edit the Kanban database, so malicious same-UID forgery is outside this MVP threat model. Unrelated human work must remain on another board; Emergency control never consults or mutates the global current board.
+
 **Step 3: Expose natural-language control through Supervisor prompt**
 
 Map unambiguous commands to the adapter. Ambiguous “止めて” asks which level unless an active emergency makes fail-closed Emergency stop appropriate.
