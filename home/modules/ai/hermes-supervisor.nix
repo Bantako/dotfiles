@@ -113,6 +113,7 @@ let
         exit 2
       fi
       action="$1"
+      ${pkgs.coreutils}/bin/install -d -m 0700 "${runtimeRoot}"
       common_args=(
         --state '${stateRoot}/state.json'
         --audit '${stateRoot}/control-audit.jsonl'
@@ -153,6 +154,7 @@ let
         exit 2
       fi
       goal_id="$1"
+      ${pkgs.coreutils}/bin/install -d -m 0700 "${runtimeRoot}"
       exec ${pkgs.util-linux}/bin/flock \
         --nonblock --conflict-exit-code 75 \
         "${runtimeRoot}/watch.lock" \

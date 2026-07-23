@@ -7628,6 +7628,10 @@ class Task10SupervisorControlTests(unittest.TestCase):
         ):
             self.assertIn(fragment, module)
         control_module = module[module.index("controlCommand"):]
+        self.assertGreaterEqual(
+            control_module.count('${pkgs.coreutils}/bin/install -d -m 0700 "${runtimeRoot}"'),
+            2,
+        )
         self.assertNotIn("--conflict-exit-code 0", control_module)
         self.assertIn("--conflict-exit-code 75", control_module)
         self.assertIn("--state '${stateRoot}/state.json'", module)
