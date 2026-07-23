@@ -5840,6 +5840,12 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertEqual(first.artifact_path.stat().st_mode & 0o777, 0o600)
             persisted = json.loads(first.state_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["decision_ids"], {"apply": "D1"})
+            self.assertEqual(
+                persisted["decision_targets"],
+                {"apply": {"task_id": "t1", "event_id": 1}},
+            )
+            self.assertEqual(persisted["closed_decisions"], {})
+            self.assertEqual(persisted["reply_cursor"], 0)
             self.assertEqual(persisted["cursor"], 0)
             self.assertEqual(persisted["pending"]["cursor"], 2)
 
@@ -5904,6 +5910,7 @@ class BriefingProjectionTests(unittest.TestCase):
             state = hermes_supervisor._briefing_default_state("2026-07")
             state.update({
                 "cursor": 300,
+                "reply_cursor": 99,
                 "next_decision": 8,
                 "decision_ids": {"carry": "D7"},
                 "open_decisions": {"carry": decision},
@@ -5919,6 +5926,7 @@ class BriefingProjectionTests(unittest.TestCase):
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["month"], "2026-08")
             self.assertEqual(persisted["cursor"], 300)
+            self.assertEqual(persisted["reply_cursor"], 0)
             self.assertEqual(persisted["pending"]["cursor"], 300)
 
     def test_month_rollover_resumes_previous_pending_artifact_first(self) -> None:
@@ -6511,6 +6519,476 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertEqual(len(client.projections), 1)
             self.assertIn("D1 適用", client.projections[0].body)
             self.assertEqual(result.state.last_message_id, 2)
+
+
+class Task9ConsoleReplyTests(unittest.TestCase):
+    MONTH = "2026-07"
+
+    @staticmethod
+    def make_console(path: Path, *, session_id: str = "supervisor-console-2026-07",
+                     title: str = "Supervisor Console — 2026-07", source: str = "cli",
+                     archived: object = 0) -> None:
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.executescript("""
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, source TEXT, title TEXT, archived, ended_at REAL
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+                    timestamp REAL, active, compacted INTEGER,
+                    reasoning TEXT, tool_calls TEXT
+                );
+            """)
+            connection.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, NULL)",
+                (session_id, source, title, archived),
+            )
+
+    @staticmethod
+    def open_state(root: Path, *, dangerous: bool = False,
+                   second: bool = False) -> Path:
+        state = hermes_supervisor._briefing_default_state("2026-07")
+        decisions = [
+            ("safe", "D1", "task-1", 11, dangerous),
+        ]
+        if second:
+            decisions.append(("other", "D2", "task-2", 12, False))
+        for key, identifier, task_id, event_id, is_dangerous in decisions:
+            state["decision_ids"][key] = identifier
+            state["open_decisions"][key] = {
+                "key": key, "question": "判断?", "options": ["A", "B"],
+                "recommendation": "B", "dangerous": is_dangerous, "importance": 5,
+            }
+            state["decision_targets"][key] = {"task_id": task_id, "event_id": event_id}
+        state["next_decision"] = len(decisions) + 1
+        path = root / "briefings" / "state.json"
+        hermes_supervisor._write_briefing_state(path, state, "2026-07")
+        return path
+
+    class Repository:
+        def __init__(self, fail_task: str | None = None):
+            self.confirmed: set[tuple[str, str]] = set()
+            self.calls: list[tuple[str, str, str]] = []
+            self.fail_task = fail_task
+
+        def confirm_comment(self, task_id: str, body: str, marker: str) -> None:
+            self.calls.append((task_id, body, marker))
+            if (task_id, marker) in self.confirmed:
+                return
+            if task_id == self.fail_task:
+                raise hermes_supervisor.BriefingError("comment_postcondition_unconfirmed")
+            self.confirmed.add((task_id, marker))
+
+    @staticmethod
+    def shown(task_id: str = "task-1", owner: str = "supervisor",
+              status: str = "review", comments: list[dict[str, object]] | None = None
+              ) -> dict[str, object]:
+        task = {
+            "id": task_id, "title": "private", "body": "PRIVATE", "assignee": "supervisor",
+            "status": status, "priority": 0, "tenant": None, "workspace_kind": "scratch",
+            "workspace_path": None, "branch_name": None, "created_by": owner,
+            "created_at": 1, "started_at": None, "completed_at": None, "result": None,
+            "skills": [], "max_retries": 2, "session_id": None,
+            "workflow_template_id": None, "current_step_key": None,
+        }
+        return {
+            "task": task, "latest_summary": None, "parents": [], "children": [],
+            "comments": comments or [], "events": [], "runs": [],
+        }
+
+    def test_repository_reads_exact_active_session_in_id_order_and_skips_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (3, "supervisor-console-2026-07", "user", "D1 B", 3, 1, 0, "SECRET", "SECRET"),
+                        (1, "supervisor-console-2026-07", "user", hermes_supervisor.BRIEFING_MACHINE_SEED, 1, 1, 0, "SECRET", "SECRET"),
+                        (2, "supervisor-console-2026-07", "assistant", "private", 2, 1, 0, "SECRET", "SECRET"),
+                        (4, "supervisor-console-2026-07", "user", "inactive", 4, 0, 0, "SECRET", "SECRET"),
+                    ],
+                )
+            self.assertEqual(
+                hermes_supervisor._read_console_replies(db, self.MONTH, 0),
+                [(1, hermes_supervisor.BRIEFING_MACHINE_SEED), (3, "D1 B")],
+            )
+
+    def test_repository_rejects_session_identity_schema_limits_and_bad_values(self) -> None:
+        variants = (
+            {"session_id": "other"}, {"title": "Supervisor Console — 2026-06"},
+            {"source": "web"}, {"archived": 1},
+        )
+        missing = variants[0]
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "state.db"
+            self.make_console(db, **missing)
+            self.assertEqual(hermes_supervisor._read_console_replies(db, self.MONTH, 0), [])
+        for variant in variants[1:]:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                db = Path(directory) / "state.db"
+                self.make_console(db, **variant)
+                with self.assertRaises(hermes_supervisor.BriefingError):
+                    hermes_supervisor._read_console_replies(db, self.MONTH, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 'supervisor-console-2026-07', 'user', 'D1 A', ?, 1, 0, NULL, NULL)",
+                    [(index, index) for index in range(1, 258)],
+                )
+            with self.assertRaisesRegex(hermes_supervisor.BriefingError, "limit"):
+                hermes_supervisor._read_console_replies(db, self.MONTH, 0)
+
+    def test_safe_answer_comments_then_atomically_closes_and_advances_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            state_path = self.open_state(root)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (7, 'supervisor-console-2026-07', 'user', 'D1 A', 7, 1, 0, NULL, NULL)"
+                )
+            repository = self.Repository()
+
+            report = hermes_supervisor.run_briefing_reply_cycle(
+                db, root, self.MONTH, repository
+            )
+
+            state = json.loads(state_path.read_text())
+            self.assertEqual(report, {"closed": 1, "ignored": 0, "processed": 1})
+            self.assertEqual(state["reply_cursor"], 7)
+            self.assertEqual(state["open_decisions"], {})
+            self.assertEqual(state["decision_targets"], {})
+            closed = state["closed_decisions"]["safe"]
+            self.assertEqual((closed["id"], closed["answer"], closed["reply_message_id"]),
+                             ("D1", "A", 7))
+            body = json.loads(repository.calls[0][1])
+            self.assertEqual(set(body), {
+                "schema_version", "decision_id", "decision_key", "selected_option",
+                "origin_task_id", "origin_event_id", "reply_message_id", "marker",
+            })
+            self.assertEqual(body["origin_task_id"], "task-1")
+            self.assertEqual(body["marker"], repository.calls[0][2])
+            self.assertNotIn("D1 A", repository.calls[0][1])
+
+    def test_new_month_request_with_old_pending_reads_and_writes_old_console_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            state_path = self.open_state(root)
+            state = json.loads(state_path.read_text())
+            state["pending"] = {
+                "date": "2026-07-31", "cursor": 11,
+                "marker": "<!-- supervisor-briefing:2026-07-31:e11 -->",
+                "artifact": "2026-07-31.md", "discord_status": "none",
+                "session_done": False, "included_anomalies": [],
+            }
+            hermes_supervisor._write_briefing_state(state_path, state, self.MONTH)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (7, 'supervisor-console-2026-07', 'user', 'D1 A', 7, 1, 0, NULL, NULL)"
+                )
+            repository = self.Repository()
+
+            report = hermes_supervisor.run_briefing_reply_cycle(
+                db, root, "2026-08", repository
+            )
+
+            persisted = json.loads(state_path.read_text())
+            self.assertEqual(report, {"closed": 1, "ignored": 0, "processed": 1})
+            self.assertEqual(persisted["month"], self.MONTH)
+            self.assertEqual(persisted["reply_cursor"], 7)
+            self.assertEqual(persisted["open_decisions"], {})
+            self.assertEqual(len(repository.calls), 1)
+
+    def test_dangerous_unresolved_and_invalid_replies_advance_without_comments(self) -> None:
+        for content in ("残りは推奨", "D9 A", "malformed"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "private"
+                root.mkdir(mode=0o700)
+                db = Path(directory) / "state.db"
+                self.make_console(db)
+                state_path = self.open_state(root, dangerous=True)
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO messages VALUES (9, 'supervisor-console-2026-07', 'user', ?, 9, 1, 0, NULL, NULL)",
+                        (content,),
+                    )
+                repository = self.Repository()
+                report = hermes_supervisor.run_briefing_reply_cycle(db, root, self.MONTH, repository)
+                state = json.loads(state_path.read_text())
+                self.assertEqual((report["closed"], report["ignored"]), (0, 1))
+                self.assertEqual(state["reply_cursor"], 9)
+                self.assertEqual(repository.calls, [])
+                self.assertNotIn(content, json.dumps(report))
+
+    def test_partial_multi_answer_and_state_write_crash_converge_without_duplicate_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            state_path = self.open_state(root, second=True)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (10, 'supervisor-console-2026-07', 'user', 'D1 A / D2 B', 10, 1, 0, NULL, NULL)"
+                )
+            repository = self.Repository(fail_task="task-2")
+            with self.assertRaises(hermes_supervisor.BriefingError):
+                hermes_supervisor.run_briefing_reply_cycle(db, root, self.MONTH, repository)
+            self.assertEqual(json.loads(state_path.read_text())["reply_cursor"], 0)
+            repository.fail_task = None
+            hermes_supervisor.run_briefing_reply_cycle(db, root, self.MONTH, repository)
+            first_task_calls = [call for call in repository.calls if call[0] == "task-1"]
+            self.assertEqual(len(first_task_calls), 2)
+            self.assertEqual(len({call[2] for call in first_task_calls}), 1)
+            self.assertEqual(len(repository.confirmed), 2)
+
+    def test_public_adapter_uses_explicit_board_show_comment_show_and_strict_owner(self) -> None:
+        calls: list[list[str]] = []
+        comments: list[dict[str, object]] = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if "comment" in argv:
+                comments.append({"author": "supervisor-reply", "body": argv[-3], "created_at": 3})
+                return subprocess.CompletedProcess(argv, 0, "commented\n", "")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.shown(comments=comments)), "")
+        adapter = hermes_supervisor.HermesDecisionRepository(
+            "/fake/hermes", "pinned-board", runner=runner, base_env={}
+        )
+        body = '{"marker":"supervisor-decision-reply:' + "a" * 64 + '"}'
+        marker = "supervisor-decision-reply:" + "a" * 64
+
+        adapter.confirm_comment("task-1", body, marker)
+
+        self.assertEqual(calls, [
+            ["/fake/hermes", "kanban", "--board", "pinned-board", "show", "task-1", "--json"],
+            ["/fake/hermes", "kanban", "--board", "pinned-board", "comment", "task-1", body,
+             "--author", "supervisor-reply"],
+            ["/fake/hermes", "kanban", "--board", "pinned-board", "show", "task-1", "--json"],
+        ])
+        for owner, status in (
+            ("user", "review"), ("supervisor-evil", "review"),
+            ("supervisor", "bogus"), ("supervisor", "archived"),
+        ):
+            refused_calls: list[list[str]] = []
+            refused = hermes_supervisor.HermesDecisionRepository(
+                "/fake/hermes", "pinned-board",
+                runner=lambda argv, owner=owner, status=status, **kwargs: (
+                    refused_calls.append(argv)
+                    or subprocess.CompletedProcess(
+                        argv, 0, json.dumps(self.shown(owner=owner, status=status)), ""
+                    )
+                ), base_env={},
+            )
+            with self.subTest(owner=owner, status=status), self.assertRaises(
+                hermes_supervisor.BriefingError
+            ):
+                refused.confirm_comment("task-1", body, marker)
+            self.assertEqual(sum("comment" in call for call in refused_calls), 0)
+
+        duplicate_calls: list[list[str]] = []
+        duplicate = [
+            {"author": "supervisor-reply", "body": body, "created_at": 3},
+            {"author": "supervisor-reply", "body": body, "created_at": 4},
+        ]
+        duplicate_adapter = hermes_supervisor.HermesDecisionRepository(
+            "/fake/hermes", "pinned-board",
+            runner=lambda argv, **kwargs: (
+                duplicate_calls.append(argv)
+                or subprocess.CompletedProcess(
+                    argv, 0, json.dumps(self.shown(comments=duplicate)), ""
+                )
+            ),
+            base_env={},
+        )
+        with self.assertRaisesRegex(hermes_supervisor.BriefingError, "marker"):
+            duplicate_adapter.confirm_comment("task-1", body, marker)
+        self.assertEqual(sum("comment" in call for call in duplicate_calls), 0)
+
+    def test_comment_timeout_reconciles_but_unconfirmed_ambiguity_fails_closed(self) -> None:
+        marker = "supervisor-decision-reply:" + "b" * 64
+        body = json.dumps({"marker": marker}, separators=(",", ":"))
+        comments: list[dict[str, object]] = []
+        def reconciled(argv, **kwargs):
+            if "comment" in argv:
+                comments.append({"author": "supervisor-reply", "body": body, "created_at": 2})
+                raise subprocess.TimeoutExpired(argv, 1, output="PRIVATE")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.shown(comments=comments)), "")
+        hermes_supervisor.HermesDecisionRepository(
+            "/fake/hermes", "board", runner=reconciled, base_env={}
+        ).confirm_comment("task-1", body, marker)
+
+        calls = []
+        def ambiguous(argv, **kwargs):
+            calls.append(argv)
+            if "comment" in argv:
+                raise subprocess.TimeoutExpired(argv, 1, output="PRIVATE")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.shown()), "")
+        with self.assertRaisesRegex(hermes_supervisor.BriefingError, "postcondition") as caught:
+            hermes_supervisor.HermesDecisionRepository(
+                "/fake/hermes", "board", runner=ambiguous, base_env={}
+            ).confirm_comment("task-1", body, marker)
+        self.assertNotIn("PRIVATE", str(caught.exception))
+        self.assertEqual(sum("comment" in call for call in calls), 1)
+
+    def test_duplicate_marker_and_unknown_repository_fields_are_rejected_without_comment(self) -> None:
+        marker = "supervisor-decision-reply:" + "d" * 64
+        body = json.dumps({"marker": marker}, separators=(",", ":"))
+        duplicate = {"author": "supervisor-reply", "body": body, "created_at": 1}
+        for shown in (
+            self.shown(comments=[duplicate, duplicate]),
+            {**self.shown(), "unknown": True},
+            {**self.shown(), "comments": [{**duplicate, "unknown": True}]},
+        ):
+            calls = []
+            repository = hermes_supervisor.HermesDecisionRepository(
+                "/fake/hermes", "board", base_env={},
+                runner=lambda argv, shown=shown, **kwargs: (
+                    calls.append(argv)
+                    or subprocess.CompletedProcess(argv, 0, json.dumps(shown), "")
+                ),
+            )
+            with self.subTest(shape=set(shown)), self.assertRaises(
+                hermes_supervisor.BriefingError
+            ):
+                repository.confirm_comment("task-1", body, marker)
+            self.assertFalse(any("comment" in call for call in calls))
+
+    def test_state_write_crash_after_comment_converges_on_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            state_path = self.open_state(root)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (13, 'supervisor-console-2026-07', 'user', 'D1 A', 13, 1, 0, NULL, NULL)"
+                )
+            repository = self.Repository()
+            real_write = hermes_supervisor._write_briefing_state
+            with mock.patch.object(
+                hermes_supervisor, "_write_briefing_state",
+                side_effect=hermes_supervisor.BriefingError("simulated_state_write_crash"),
+            ):
+                with self.assertRaises(hermes_supervisor.BriefingError):
+                    hermes_supervisor.run_briefing_reply_cycle(db, root, self.MONTH, repository)
+            self.assertEqual(json.loads(state_path.read_text())["reply_cursor"], 0)
+            real_write  # retain an explicit reference across the patched crash boundary
+            hermes_supervisor.run_briefing_reply_cycle(db, root, self.MONTH, repository)
+            self.assertEqual(json.loads(state_path.read_text())["reply_cursor"], 13)
+            self.assertEqual(len(repository.confirmed), 1)
+
+    def test_cli_is_sanitized_and_absent_state_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            argv = [
+                "hermes-supervisor", "replies", "--state-db", str(db),
+                "--state-root", str(root), "--board", "board", "--hermes", "/fake/hermes",
+                "--month", self.MONTH,
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch("builtins.print") as printed:
+                self.assertEqual(hermes_supervisor.main(), 0)
+            printed.assert_not_called()
+
+            root.mkdir(mode=0o700)
+            self.open_state(root)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (8, 'supervisor-console-2026-07', 'user', 'malformed PRIVATE', 8, 1, 0, NULL, NULL)"
+                )
+            with mock.patch.object(sys, "argv", argv), mock.patch("builtins.print") as printed:
+                self.assertEqual(hermes_supervisor.main(), 0)
+            payload = json.loads(printed.call_args.args[0])
+            self.assertEqual(payload, {"closed": 0, "ignored": 1, "processed": 1})
+            self.assertNotIn("PRIVATE", json.dumps(payload))
+
+    def test_nix_wires_replies_before_watch_inside_one_flock_and_stays_opt_in(self) -> None:
+        module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text()
+        cycle = module[module.index("watchCycleCommand ="):module.index("watchCommand =")]
+        self.assertIn("set -euo pipefail", cycle)
+        self.assertLess(cycle.index("set -euo pipefail"), cycle.index(" replies "))
+        replies = module.index(" replies ")
+        watch = module.index(" watch ", replies)
+        flock = module.index("flock", watch)
+        cycle_reference = module.index("${watchCycleCommand}", flock)
+        self.assertLess(replies, watch)
+        self.assertLess(flock, cycle_reference)
+        for fragment in ("--state-db", "--state-root", "--board", "--hermes"):
+            self.assertIn(fragment, module[replies:watch])
+        self.assertNotIn("enable = true", module)
+
+    def test_legacy_open_decision_without_source_target_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            state = hermes_supervisor._briefing_default_state(self.MONTH)
+            state["schema_version"] = 1
+            state["decision_ids"] = {"safe": "D1"}
+            state["next_decision"] = 2
+            state["open_decisions"] = {"safe": {
+                "key": "safe", "question": "判断?", "options": ["A", "B"],
+                "recommendation": "B", "dangerous": False, "importance": 5,
+            }}
+            for key in ("decision_targets", "closed_decisions", "reply_cursor"):
+                del state[key]
+            path = root / "briefings" / "state.json"
+            hermes_supervisor._atomic_private_write(
+                path,
+                (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            )
+            with self.assertRaisesRegex(hermes_supervisor.BriefingError, "re-projection"):
+                hermes_supervisor._read_briefing_state(path, self.MONTH)
+
+    def test_closed_old_event_is_not_reopened_and_cross_task_key_conflicts(self) -> None:
+        for task_id, should_fail in (("task-1", False), ("task-other", True)):
+            with self.subTest(task_id=task_id), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "private"
+                root.mkdir(mode=0o700)
+                db = Path(directory) / "kanban.db"
+                BriefingProjectionTests.make_kanban(db)
+                decision = {
+                    "key": "safe", "question": "判断?", "options": ["A", "B"],
+                    "recommendation": "B", "dangerous": False, "importance": 5,
+                }
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO tasks VALUES (?, 'title', NULL, NULL, 'review', 'supervisor', NULL, ?, NULL, NULL)",
+                        (task_id, json.dumps({"decision": decision})),
+                    )
+                    connection.execute(
+                        "INSERT INTO task_events VALUES (20, ?, NULL, 'decision_required', '{}', '2026-07-01')",
+                        (task_id,),
+                    )
+                state = hermes_supervisor._briefing_default_state(self.MONTH)
+                state["decision_ids"] = {"safe": "D1"}
+                state["next_decision"] = 2
+                state["closed_decisions"] = {"safe": {
+                    "id": "D1", "answer": "A", "task_id": "task-1", "event_id": 11,
+                    "reply_message_id": 7,
+                    "marker": "supervisor-decision-reply:" + "c" * 64,
+                }}
+                path = root / "briefings" / "state.json"
+                hermes_supervisor._write_briefing_state(path, state, self.MONTH)
+                if should_fail:
+                    with self.assertRaisesRegex(hermes_supervisor.BriefingError, "target"):
+                        hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+                else:
+                    prepared = hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+                    self.assertIsNotNone(prepared)
+                    self.assertEqual(prepared.decisions, ())
+                    persisted = json.loads(path.read_text())
+                    self.assertEqual(persisted["open_decisions"], {})
 
 
 class Task10SupervisorControlTests(unittest.TestCase):

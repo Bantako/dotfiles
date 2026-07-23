@@ -5145,6 +5145,11 @@ _BRIEFING_DECISION_KEYS = {
     "key", "question", "options", "recommendation", "dangerous", "importance",
 }
 _BRIEFING_HUMAN_ACTION_KEYS = {"text"}
+_BRIEFING_DECISION_TARGET_KEYS = {"task_id", "event_id"}
+_BRIEFING_CLOSED_DECISION_KEYS = {
+    "id", "answer", "task_id", "event_id", "reply_message_id", "marker",
+}
+_BRIEFING_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 
 def _briefing_text(value: Any, label: str, *, maximum: int = _BRIEFING_FIELD_MAX_BYTES) -> str:
@@ -5196,6 +5201,21 @@ def _decision_contract(value: Any) -> tuple[str, str, tuple[str, ...], str, bool
     if type(importance) is not int or not 0 <= importance <= 100:
         raise BriefingError("invalid decision importance")
     return key, question, options, recommendation, value["dangerous"], importance
+
+
+def _decision_target(value: Any) -> tuple[str, int]:
+    if type(value) is not dict or set(value) != _BRIEFING_DECISION_TARGET_KEYS:
+        raise BriefingError("invalid decision target")
+    task_id = value["task_id"]
+    event_id = value["event_id"]
+    if (
+        type(task_id) is not str
+        or _BRIEFING_TASK_ID.fullmatch(task_id) is None
+        or type(event_id) is not int
+        or event_id <= 0
+    ):
+        raise BriefingError("invalid decision target")
+    return task_id, event_id
 
 
 def _human_action_contract(value: Any) -> str:
@@ -5332,9 +5352,10 @@ def _atomic_private_write(path: Path, payload: bytes) -> None:
 
 def _briefing_default_state(month: str) -> dict[str, Any]:
     return {
-        "schema_version": 1, "month": month, "cursor": 0, "next_decision": 1,
+        "schema_version": 2, "month": month, "cursor": 0, "next_decision": 1,
         "decision_ids": {}, "pin_action_recorded": False, "delivery_anomalies": [],
-        "open_decisions": {}, "last_delivered_date": None, "pending": None,
+        "open_decisions": {}, "decision_targets": {}, "closed_decisions": {},
+        "reply_cursor": 0, "last_delivered_date": None, "pending": None,
     }
 
 
@@ -5342,9 +5363,10 @@ def _validate_briefing_state(value: Any, month: str) -> dict[str, Any]:
     keys = {
         "schema_version", "month", "cursor", "next_decision", "decision_ids",
         "pin_action_recorded", "delivery_anomalies", "open_decisions",
+        "decision_targets", "closed_decisions", "reply_cursor",
         "last_delivered_date", "pending",
     }
-    if type(value) is not dict or set(value) != keys or value["schema_version"] != 1:
+    if type(value) is not dict or set(value) != keys or value["schema_version"] != 2:
         raise BriefingError("invalid briefing state")
     if value["month"] != month or type(value["cursor"]) is not int or value["cursor"] < 0:
         raise BriefingError("invalid briefing state")
@@ -5367,6 +5389,38 @@ def _validate_briefing_state(value: Any, month: str) -> dict[str, Any]:
         checked = _decision_contract(contract)
         if key != checked[0] or key not in mappings:
             raise BriefingError("invalid briefing state")
+    targets = value["decision_targets"]
+    if type(targets) is not dict or len(targets) > _BRIEFING_MAX_DECISION_MAPPINGS:
+        raise BriefingError("invalid briefing state")
+    for key, target in targets.items():
+        _decision_target(target)
+        if key not in open_decisions:
+            raise BriefingError("invalid briefing state")
+    closed = value["closed_decisions"]
+    if type(closed) is not dict or len(closed) > _BRIEFING_MAX_DECISION_MAPPINGS:
+        raise BriefingError("invalid briefing state")
+    for key, record in closed.items():
+        if type(record) is not dict or set(record) != _BRIEFING_CLOSED_DECISION_KEYS:
+            raise BriefingError("invalid briefing state")
+        _decision_target({"task_id": record["task_id"], "event_id": record["event_id"]})
+        try:
+            answer = _briefing_text(record["answer"], "closed decision answer", maximum=64)
+        except BriefingError:
+            raise
+        if (
+            key not in mappings
+            or key in open_decisions
+            or record["id"] != mappings[key]
+            or not answer
+            or type(record["reply_message_id"]) is not int
+            or record["reply_message_id"] <= 0
+            or type(record["marker"]) is not str
+            or re.fullmatch(r"supervisor-decision-reply:[0-9a-f]{64}", record["marker"])
+            is None
+        ):
+            raise BriefingError("invalid briefing state")
+    if type(value["reply_cursor"]) is not int or value["reply_cursor"] < 0:
+        raise BriefingError("invalid briefing state")
     delivered = value["last_delivered_date"]
     if delivered is not None:
         try:
@@ -5427,6 +5481,23 @@ def _read_briefing_state(path: Path, month: str) -> dict[str, Any]:
             payload.decode("utf-8", "strict"), max_bytes=_STATE_JSON_MAX_BYTES,
             error_type=BriefingError, message="invalid briefing state",
         )
+        if type(value) is dict and value.get("schema_version") == 1:
+            legacy_keys = {
+                "schema_version", "month", "cursor", "next_decision", "decision_ids",
+                "pin_action_recorded", "delivery_anomalies", "open_decisions",
+                "last_delivered_date", "pending",
+            }
+            if set(value) != legacy_keys:
+                raise BriefingError("invalid briefing state")
+            if value["open_decisions"]:
+                raise BriefingError("legacy open Decisions require re-projection")
+            value = dict(value)
+            value.update({
+                "schema_version": 2,
+                "decision_targets": {},
+                "closed_decisions": {},
+                "reply_cursor": 0,
+            })
         stored_month = value.get("month") if type(value) is dict else None
         if type(stored_month) is not str or re.fullmatch(r"[0-9]{4}-[0-9]{2}", stored_month) is None:
             raise BriefingError("invalid briefing state")
@@ -5436,6 +5507,7 @@ def _read_briefing_state(path: Path, month: str) -> dict[str, Any]:
         checked.update({
             "month": month,
             "pin_action_recorded": False,
+            "reply_cursor": 0,
             "last_delivered_date": None,
         })
         return _validate_briefing_state(checked, month)
@@ -5591,11 +5663,24 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
         for container in (payload, result):
             if "decision" in container:
                 key, question, options, recommendation, dangerous, importance = _decision_contract(container["decision"])
-                candidate = (question, options, recommendation, dangerous, importance)
-                if key in candidates and candidates[key] != candidate:
-                    raise BriefingError("conflicting structured decision")
-                candidates[key] = candidate
-                state["open_decisions"][key] = container["decision"]
+                closed_target = state["closed_decisions"].get(key)
+                if closed_target is not None:
+                    if closed_target["task_id"] != task_id:
+                        raise BriefingError("conflicting decision target")
+                else:
+                    candidate = (question, options, recommendation, dangerous, importance)
+                    if key in candidates and candidates[key] != candidate:
+                        raise BriefingError("conflicting structured decision")
+                    candidates[key] = candidate
+                    state["open_decisions"][key] = container["decision"]
+                    target = state["decision_targets"].get(key)
+                    if target is None:
+                        state["decision_targets"][key] = {
+                            "task_id": task_id,
+                            "event_id": identifier,
+                        }
+                    elif _decision_target(target)[0] != task_id:
+                        raise BriefingError("conflicting decision target")
             if "human_action" in container:
                 actions.append(_human_action_contract(container["human_action"]))
         summary = None
@@ -5685,12 +5770,364 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
 
 BRIEFING_MACHINE_SEED = "[supervisor-console-machine-seed:v1]"
 _BRIEFING_MAX_SESSION_MESSAGES = 4096
+_BRIEFING_MAX_REPLY_MESSAGES = 256
+_BRIEFING_REPLY_TOTAL_BYTES = 256 * 4096
+_BRIEFING_SHOW_KEYS = {
+    "task", "latest_summary", "parents", "children", "comments", "events", "runs",
+}
+_BRIEFING_SHOW_TASK_KEYS = {
+    "id", "title", "body", "assignee", "status", "priority", "tenant",
+    "workspace_kind", "workspace_path", "branch_name", "created_by", "created_at",
+    "started_at", "completed_at", "result", "skills", "max_retries", "session_id",
+    "workflow_template_id", "current_step_key",
+}
+_BRIEFING_COMMENT_KEYS = {"author", "body", "created_at"}
+_BRIEFING_REPLY_TASK_STATUSES = frozenset({
+    "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done",
+})
+
+
+class HermesDecisionRepository:
+    """Bounded public-CLI repository with read-back comment reconciliation."""
+
+    def __init__(
+        self, executable: str, board: str, *, runner: Callable[..., Any] | None = None,
+        timeout: float = 30.0, output_limit: int = 65536,
+        base_env: Mapping[str, str] | None = None,
+    ):
+        if type(executable) is not str or not executable or "\x00" in executable:
+            raise BriefingError("invalid Hermes executable")
+        if (
+            type(board) is not str or len(board) > 64
+            or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", board) is None
+        ):
+            raise BriefingError("invalid explicit Kanban board")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise BriefingError("invalid reply subprocess timeout")
+        if type(output_limit) is not int or not 1024 <= output_limit <= 1024 * 1024:
+            raise BriefingError("invalid reply subprocess output limit")
+        try:
+            environment = dict(os.environ if base_env is None else base_env)
+        except (TypeError, ValueError) as error:
+            raise BriefingError("invalid reply subprocess environment") from error
+        if any(type(key) is not str or type(value) is not str for key, value in environment.items()):
+            raise BriefingError("invalid reply subprocess environment")
+        environment.pop("HERMES_KANBAN_BOARD", None)
+        self.executable = executable
+        self.board = board
+        self.runner = runner
+        self.timeout = float(timeout)
+        self.output_limit = output_limit
+        self.environment = environment
+
+    def _invoke(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        argv = [self.executable, "kanban", "--board", self.board, *arguments]
+        if any(type(item) is not str or not item or "\x00" in item for item in argv):
+            raise BriefingError("invalid reply repository argument")
+        try:
+            if self.runner is None:
+                completed = _bounded_subprocess_run(
+                    argv, environment=self.environment, timeout=self.timeout,
+                    output_limit=self.output_limit,
+                )
+            else:
+                completed = self.runner(
+                    argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=self.timeout,
+                    check=False, shell=False, env=dict(self.environment),
+                )
+        except Exception as error:
+            raise BriefingError("reply repository invocation failed") from error
+        stdout = getattr(completed, "stdout", None)
+        stderr = getattr(completed, "stderr", None)
+        returncode = getattr(completed, "returncode", None)
+        if type(returncode) is not int or type(stdout) is not str or type(stderr) is not str:
+            raise BriefingError("invalid reply repository result")
+        try:
+            if (
+                len(stdout.encode("utf-8", "strict")) > self.output_limit
+                or len(stderr.encode("utf-8", "strict")) > self.output_limit
+            ):
+                raise BriefingError("reply repository output exceeds limit")
+        except UnicodeError as error:
+            raise BriefingError("invalid reply repository output") from error
+        if returncode != 0:
+            raise BriefingError("reply repository command failed")
+        return completed
+
+    def _show(self, task_id: str) -> list[dict[str, Any]]:
+        if type(task_id) is not str or _BRIEFING_TASK_ID.fullmatch(task_id) is None:
+            raise BriefingError("invalid decision task id")
+        completed = self._invoke(["show", task_id, "--json"])
+        value = _strict_json_loads(
+            completed.stdout, max_bytes=self.output_limit, error_type=BriefingError,
+            message="invalid decision task repository JSON",
+        )
+        if type(value) is not dict or set(value) != _BRIEFING_SHOW_KEYS:
+            raise BriefingError("unknown decision task repository shape")
+        task = value["task"]
+        if type(task) is not dict or set(task) != _BRIEFING_SHOW_TASK_KEYS:
+            raise BriefingError("unknown decision task shape")
+        if (
+            task["id"] != task_id or type(task["id"]) is not str
+            or type(task["created_by"]) is not str
+            or task["created_by"] not in _CONTROL_OWNERS
+            or type(task["status"]) is not str
+            or task["status"] not in _BRIEFING_REPLY_TASK_STATUSES
+        ):
+            raise BriefingError("decision task identity refused")
+        for field, maximum, nullable in (
+            ("title", 512, False), ("body", 65536, True), ("assignee", 128, True),
+            ("tenant", 128, True), ("workspace_kind", 64, False),
+            ("workspace_path", 4096, True), ("branch_name", 512, True),
+            ("created_by", 128, False), ("session_id", 256, True),
+            ("workflow_template_id", 256, True), ("current_step_key", 256, True),
+        ):
+            item = task[field]
+            if nullable and item is None:
+                continue
+            if type(item) is not str or len(item.encode("utf-8", "strict")) > maximum:
+                raise BriefingError("invalid decision task field")
+        if type(task["priority"]) is not int or not -100 <= task["priority"] <= 100:
+            raise BriefingError("invalid decision task priority")
+        if type(task["skills"]) is not list or len(task["skills"]) > 32 or any(
+            type(item) is not str or len(item.encode("utf-8", "strict")) > 128
+            for item in task["skills"]
+        ):
+            raise BriefingError("invalid decision task skills")
+        if type(task["max_retries"]) is not int or not 0 <= task["max_retries"] <= 100:
+            raise BriefingError("invalid decision task retry count")
+        for field in ("created_at", "started_at", "completed_at"):
+            item = task[field]
+            if item is not None and (
+                type(item) not in (int, float) or not math.isfinite(item) or item < 0
+            ):
+                raise BriefingError("invalid decision task timestamp")
+        if task["result"] is not None and type(task["result"]) is not dict:
+            raise BriefingError("invalid decision task result")
+        for field in ("parents", "children", "events", "runs"):
+            if type(value[field]) is not list or len(value[field]) > 256:
+                raise BriefingError("invalid decision task related records")
+        if value["latest_summary"] is not None and type(value["latest_summary"]) is not str:
+            raise BriefingError("invalid decision task summary")
+        comments = value["comments"]
+        if type(comments) is not list or len(comments) > 256:
+            raise BriefingError("invalid decision comments")
+        for comment in comments:
+            if type(comment) is not dict or set(comment) != _BRIEFING_COMMENT_KEYS:
+                raise BriefingError("unknown decision comment shape")
+            if (
+                type(comment["author"]) is not str
+                or len(comment["author"].encode("utf-8", "strict")) > 128
+                or type(comment["body"]) is not str
+                or len(comment["body"].encode("utf-8", "strict")) > 4096
+                or type(comment["created_at"]) not in (int, float)
+                or not math.isfinite(comment["created_at"])
+                or comment["created_at"] < 0
+            ):
+                raise BriefingError("invalid decision comment")
+        return comments
+
+    @staticmethod
+    def _reconciled(comments: list[dict[str, Any]], body: str, marker: str) -> bool:
+        matches = [comment for comment in comments if marker in comment["body"]]
+        if len(matches) > 1:
+            raise BriefingError("duplicate decision reply marker")
+        if any(
+            comment["author"] != "supervisor-reply" or comment["body"] != body
+            for comment in matches
+        ):
+            raise BriefingError("conflicting decision reply marker")
+        return len(matches) == 1
+
+    def confirm_comment(self, task_id: str, body: str, marker: str) -> None:
+        if (
+            type(body) is not str or not body or len(body.encode("utf-8", "strict")) > 2048
+            or type(marker) is not str
+            or re.fullmatch(r"supervisor-decision-reply:[0-9a-f]{64}", marker) is None
+            or marker not in body
+        ):
+            raise BriefingError("invalid deterministic reply comment")
+        if self._reconciled(self._show(task_id), body, marker):
+            return
+        try:
+            self._invoke(["comment", task_id, body, "--author", "supervisor-reply"])
+        except BriefingError:
+            try:
+                if self._reconciled(self._show(task_id), body, marker):
+                    return
+            except BriefingError:
+                pass
+            raise BriefingError("comment postcondition unconfirmed")
+        if not self._reconciled(self._show(task_id), body, marker):
+            raise BriefingError("comment postcondition unconfirmed")
 
 
 def _briefing_session_id(month: str) -> str:
     if re.fullmatch(r"[0-9]{4}-[0-9]{2}", month) is None:
         raise BriefingError("invalid briefing month")
     return f"supervisor-console-{month}"
+
+
+def _read_console_replies(
+    state_db: Path, month: str, cursor: int,
+) -> list[tuple[int, str]]:
+    """Read bounded active user text from the exact monthly console snapshot."""
+    session_id = _briefing_session_id(month)
+    if type(cursor) is not int or cursor < 0:
+        raise BriefingError("invalid reply cursor")
+    try:
+        connection = _open_readonly(state_db)
+        with contextlib.closing(connection):
+            connection.execute("BEGIN")
+            required = {
+                "sessions": {"id", "source", "title", "archived"},
+                "messages": {"id", "session_id", "role", "content", "active"},
+            }
+            for table, columns in required.items():
+                info = connection.execute(f"PRAGMA table_info({table})").fetchall()
+                if not info or not columns.issubset(
+                    {row[1] for row in info if type(row[1]) is str}
+                ):
+                    raise BriefingError("incompatible console repository schema")
+            sessions = connection.execute(
+                "SELECT id,source,title,archived FROM sessions WHERE id=? LIMIT 2",
+                (session_id,),
+            ).fetchall()
+            if not sessions:
+                connection.rollback()
+                return []
+            if len(sessions) != 1 or tuple(sessions[0]) != (
+                session_id, "cli", f"Supervisor Console — {month}", 0,
+            ):
+                raise BriefingError("invalid monthly console session")
+            metadata = connection.execute(
+                """SELECT id,length(cast(content AS blob)) FROM messages
+                   WHERE session_id=? AND role='user' AND active=1 AND id>?
+                   ORDER BY id LIMIT ?""",
+                (session_id, cursor, _BRIEFING_MAX_REPLY_MESSAGES + 1),
+            ).fetchall()
+            if len(metadata) > _BRIEFING_MAX_REPLY_MESSAGES:
+                raise BriefingError("console reply row limit exceeded")
+            total = 0
+            previous = cursor
+            for identifier, size in metadata:
+                if (
+                    type(identifier) is not int or identifier <= previous
+                    or type(size) is not int or not 0 < size <= 4096
+                ):
+                    raise BriefingError("invalid console reply metadata")
+                previous = identifier
+                total += size
+            if total > _BRIEFING_REPLY_TOTAL_BYTES:
+                raise BriefingError("console reply byte limit exceeded")
+            rows = connection.execute(
+                """SELECT id,content FROM messages
+                   WHERE session_id=? AND role='user' AND active=1 AND id>?
+                   ORDER BY id LIMIT ?""",
+                (session_id, cursor, _BRIEFING_MAX_REPLY_MESSAGES),
+            ).fetchall()
+            connection.rollback()
+        if len(rows) != len(metadata):
+            raise BriefingError("inconsistent console reply snapshot")
+        result: list[tuple[int, str]] = []
+        for row, meta in zip(rows, metadata, strict=True):
+            identifier, content = row
+            if identifier != meta[0] or type(content) is not str:
+                raise BriefingError("invalid console reply row")
+            content.encode("utf-8", "strict")
+            result.append((identifier, content))
+        return result
+    except BriefingError:
+        raise
+    except (OSError, sqlite3.Error, TypeError, UnicodeError, ValueError) as error:
+        raise BriefingError("console repository read failed") from error
+
+
+def _open_briefing_decisions(state: dict[str, Any]) -> tuple[BriefingDecision, ...]:
+    decisions: list[BriefingDecision] = []
+    for key, contract in state["open_decisions"].items():
+        checked = _decision_contract(contract)
+        decisions.append(BriefingDecision(state["decision_ids"][key], key, *checked[1:]))
+    return tuple(sorted(decisions, key=lambda item: int(item.id[1:])))
+
+
+def _reply_comment(
+    decision: BriefingDecision, answer: str, target: dict[str, Any], message_id: int,
+) -> tuple[str, str, str]:
+    task_id, event_id = _decision_target(target)
+    seed = {
+        "schema_version": 1, "decision_id": decision.id,
+        "decision_key": decision.key, "selected_option": answer,
+        "origin_task_id": task_id, "origin_event_id": event_id,
+        "reply_message_id": message_id,
+    }
+    canonical_seed = json.dumps(seed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    marker = "supervisor-decision-reply:" + hashlib.sha256(
+        canonical_seed.encode("ascii")
+    ).hexdigest()
+    body = json.dumps(
+        {**seed, "marker": marker}, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    if len(body.encode("ascii")) > 2048:
+        raise BriefingError("reply comment exceeds limit")
+    return task_id, body, marker
+
+
+def run_briefing_reply_cycle(
+    state_db: Path, state_root: Path, month: str, repository: Any,
+) -> dict[str, int] | None:
+    """Close decisions only after every deterministic comment postcondition holds."""
+    state_path = state_root / "briefings" / "state.json"
+    try:
+        _read_private_regular(state_path, _STATE_JSON_MAX_BYTES, "briefing state")
+    except FileNotFoundError:
+        return None
+    state = _read_briefing_state(state_path, month)
+    effective_month = state["month"]
+    replies = _read_console_replies(
+        state_db, effective_month, state["reply_cursor"]
+    )
+    if not replies:
+        return None
+    processed = ignored = closed_count = 0
+    for message_id, content in replies:
+        processed += 1
+        if content == BRIEFING_MACHINE_SEED:
+            state["reply_cursor"] = message_id
+            _write_briefing_state(state_path, state, effective_month)
+            continue
+        decisions = _open_briefing_decisions(state)
+        try:
+            parsed = parse_briefing_reply(content, decisions)
+        except BriefingError:
+            parsed = None
+        if parsed is None or not parsed.answers:
+            ignored += 1
+            state["reply_cursor"] = message_id
+            _write_briefing_state(state_path, state, effective_month)
+            continue
+        by_id = {decision.id: decision for decision in decisions}
+        confirmed: list[tuple[BriefingDecision, str, str]] = []
+        for identifier, answer in parsed.answers.items():
+            decision = by_id[identifier]
+            target = state["decision_targets"].get(decision.key)
+            if target is None:
+                raise BriefingError("missing decision target")
+            task_id, body, marker = _reply_comment(decision, answer, target, message_id)
+            repository.confirm_comment(task_id, body, marker)
+            confirmed.append((decision, answer, marker))
+        for decision, answer, marker in confirmed:
+            task_id, event_id = _decision_target(state["decision_targets"].pop(decision.key))
+            state["open_decisions"].pop(decision.key)
+            state["closed_decisions"][decision.key] = {
+                "id": decision.id, "answer": answer, "task_id": task_id,
+                "event_id": event_id, "reply_message_id": message_id, "marker": marker,
+            }
+        closed_count += len(confirmed)
+        state["reply_cursor"] = message_id
+        _write_briefing_state(state_path, state, effective_month)
+    return {"closed": closed_count, "ignored": ignored, "processed": processed}
 
 
 def _session_record(value: Any, *, title: str) -> str | None:
@@ -7558,6 +7995,12 @@ def main() -> int:
     brief.add_argument("--webui-url", default="https://ser7")
     brief.add_argument("--prompt", type=Path, required=True)
     brief.add_argument("--date")
+    replies = subparsers.add_parser("replies")
+    replies.add_argument("--state-db", type=Path, required=True)
+    replies.add_argument("--state-root", type=Path, required=True)
+    replies.add_argument("--board", required=True)
+    replies.add_argument("--hermes", required=True)
+    replies.add_argument("--month")
     state_parser = subparsers.add_parser("state")
     state_commands = state_parser.add_subparsers(dest="state_command", required=True)
     state_init = state_commands.add_parser("init")
@@ -7614,6 +8057,22 @@ def main() -> int:
             print(f"eco-report: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if args.command == "replies":
+        try:
+            month = args.month or datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m")
+            report = run_briefing_reply_cycle(
+                args.state_db, args.state_root, month,
+                HermesDecisionRepository(args.hermes, args.board),
+            )
+        except (BriefingError, OSError, UnicodeError, ValueError):
+            print("replies: failed_closed", file=sys.stderr)
+            return 2
+        if report is not None:
+            print(json.dumps(
+                report, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ))
         return 0
 
     if args.command == "brief":

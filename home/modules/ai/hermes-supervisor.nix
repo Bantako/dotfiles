@@ -37,12 +37,14 @@ let
       "${config.home.homeDirectory}/.hermes/kanban.db"
     else
       "${config.home.homeDirectory}/.hermes/kanban/boards/${cfg.board}/kanban.db";
-  watchCommand = pkgs.writeShellScript "hermes-supervisor-watch" ''
-    exec ${pkgs.util-linux}/bin/flock \
-      --nonblock \
-      --conflict-exit-code 0 \
-      "${runtimeRoot}/watch.lock" \
-      ${supervisorCli}/bin/hermes-supervisor watch \
+  watchCycleCommand = pkgs.writeShellScript "hermes-supervisor-watch-cycle" ''
+    set -euo pipefail
+    ${supervisorCli}/bin/hermes-supervisor replies \
+      --state-db ${config.home.homeDirectory}/.hermes/state.db \
+      --state-root ${stateRoot} \
+      --board ${lib.escapeShellArg cfg.board} \
+      --hermes ${hermesPkg}/bin/hermes
+    exec ${supervisorCli}/bin/hermes-supervisor watch \
       --policy ${config.xdg.configHome}/hermes-supervisor/policy.json \
       --state ${stateRoot}/state.json \
       --audit ${stateRoot}/run-audit.jsonl \
@@ -51,6 +53,13 @@ let
       --board ${lib.escapeShellArg cfg.board} \
       --hermes ${hermesPkg}/bin/hermes \
       --profile default
+  '';
+  watchCommand = pkgs.writeShellScript "hermes-supervisor-watch" ''
+    exec ${pkgs.util-linux}/bin/flock \
+      --nonblock \
+      --conflict-exit-code 0 \
+      "${runtimeRoot}/watch.lock" \
+      ${watchCycleCommand}
   '';
   gcCommand = pkgs.writeShellScript "hermes-supervisor-gc" ''
     ${pkgs.coreutils}/bin/install -d -m 0700 \
