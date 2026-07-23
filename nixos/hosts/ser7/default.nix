@@ -29,7 +29,6 @@
     ../../modules/system/grimmory.nix
     ../../modules/system/iris-news.nix
     ../../modules/system/karakeep.nix
-    ../../modules/system/materialious.nix
     ../../modules/system/miniflux.nix
     ../../modules/system/szurubooru.nix
     ../../modules/system/n8n.nix

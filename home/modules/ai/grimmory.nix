@@ -9,7 +9,7 @@ let
   booksDir = "/mnt/ugreen/data/books";
 in
 {
-  # User-scoped rootless Podman pod, like Szurubooru/Materialious. Listens only
+  # User-scoped rootless Podman pod, like Szurubooru. Listens only
   # on loopback; the paired system unit exposes it through Tailscale Serve.
   systemd.user.services.grimmory = {
     Unit = {

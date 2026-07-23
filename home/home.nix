@@ -30,7 +30,6 @@
     ./modules/ai/hermes.nix
     ./modules/ai/grimmory.nix
     ./modules/ai/karakeep.nix
-    ./modules/ai/materialious.nix
     ./modules/ai/miniflux.nix
     ./modules/ai/szurubooru.nix
     ./modules/ai/hunk.nix
