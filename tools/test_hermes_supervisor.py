@@ -3318,7 +3318,7 @@ class Stage0GateTests(unittest.TestCase):
             calls.append((argv, kwargs))
             return subprocess.CompletedProcess(
                 argv, 0,
-                stdout='{"id":"t_deadbeef","status":"triage"}',
+                stdout='{"task":{"id":"t_deadbeef","status":"triage"}}',
                 stderr="",
             )
 
@@ -3338,8 +3338,9 @@ class Stage0GateTests(unittest.TestCase):
         )
         self.assertNotIn("HERMES_KANBAN_BOARD", calls[0][1]["env"])
         for payload in (
-            '{"id":"t_cafebabe","status":"triage"}',
-            '{"id":"t_deadbeef","status":"done"}',
+            '{"task":{"id":"t_cafebabe","status":"triage"}}',
+            '{"task":{"id":"t_deadbeef","status":"done"}}',
+            '{"id":"t_deadbeef","status":"triage"}',
             "not-json",
         ):
             with self.subTest(payload=payload):

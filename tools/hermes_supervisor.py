@@ -1968,15 +1968,16 @@ class HermesKanbanClient:
             error_type=CaptureError,
             message="invalid primary goal read-back JSON",
         )
+        task = value.get("task") if type(value) is dict else None
         if (
-            type(value) is not dict
-            or value.get("id") != goal_id
-            or type(value.get("status")) is not str
-            or not value["status"]
-            or value["status"] in ("done", "archived")
+            type(task) is not dict
+            or task.get("id") != goal_id
+            or type(task.get("status")) is not str
+            or not task["status"]
+            or task["status"] in ("done", "archived")
         ):
             raise CaptureError("primary goal read-back mismatch")
-        return value
+        return task
 
     def create(self, projection: CaptureProjection) -> CreatedCardRef:
         if type(projection) is not CaptureProjection:
