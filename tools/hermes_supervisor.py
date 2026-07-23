@@ -1083,6 +1083,28 @@ class StateStore:
         except (OSError, TypeError, ValueError) as error:
             raise StateError(f"state initialization failed: {error}") from error
 
+    def initialize_at(self, *, last_message_id: int, last_event_id: int) -> SupervisorState:
+        """Initialize once at observed high-water marks without importing history."""
+        message_id = _state_int(last_message_id, "last_message_id")
+        event_id = _state_int(last_event_id, "last_event_id")
+        try:
+            with StateLock(self.lock_path):
+                if self.path.exists():
+                    raise StateError("state is already initialized")
+                state = replace(
+                    initial_supervisor_state(),
+                    last_message_id=message_id,
+                    last_event_id=event_id,
+                    last_supervisor_message_id=message_id,
+                    last_supervisor_event_id=event_id,
+                )
+                self._write_unlocked(state)
+                return state
+        except StateError:
+            raise
+        except (OSError, TypeError, ValueError) as error:
+            raise StateError(f"state initialization failed: {error}") from error
+
     def _initialize(self) -> SupervisorState:
         with StateLock(self.lock_path):
             if self.path.exists():
@@ -6425,6 +6447,7 @@ _RUN_AUDIT_MAX_FILE_BYTES = 256 * 1024 * 1024
 _RUN_AUDIT_MAX_RECORD_BYTES = 64 * 1024
 _RUN_AUDIT_MAX_ITEMS = 256
 _AUDIT_CODE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+_AUDIT_ID_MAX_LENGTH = 128
 _AUDIT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
@@ -6740,6 +6763,33 @@ class RunAuditLog:
     def append(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._exclusive_lock():
             return self._append_unlocked(record)
+
+    def append_distinct(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Atomically reserve a unique batch id and append the pending record."""
+        validated = validate_run_audit_record(record)
+        if validated["status"] != "pending":
+            raise AuditError("distinct audit reservation requires pending status")
+        base_id = validated["batch_id"]
+        with self._exclusive_lock():
+            try:
+                directory_fd = _open_control_private_directory(self.path.parent, create=True)
+            except (OSError, StateError) as error:
+                raise AuditError("run audit directory is invalid") from error
+            try:
+                records = self._decode(self._read_payload(directory_fd, missing_ok=True))
+            finally:
+                os.close(directory_fd)
+            existing_ids = {item["batch_id"] for item in records}
+            candidate = base_id
+            sequence = 0
+            while candidate in existing_ids:
+                sequence += 1
+                suffix = f"-r{sequence}"
+                candidate = f"{base_id[:_AUDIT_ID_MAX_LENGTH - len(suffix)]}{suffix}"
+                _audit_id(candidate, "batch id")
+                if sequence > _RUN_AUDIT_MAX_RECORDS + 1:
+                    raise AuditError("run audit id space exhausted")
+            return self._append_unlocked(dict(validated, batch_id=candidate))
 
     def annotate(
         self,
@@ -7805,15 +7855,24 @@ def run_watch_cycle(
     if audit is not None and type(audit) is not RunAuditLog:
         raise AuditError("watch audit: invalid")
     _validate_watch_client(client)
-    invocation_epoch = float(SupervisorBatchService._epoch(now))
-    scheduled_epoch = float(int(invocation_epoch) // 600 * 600)
+    invocation_epoch = SupervisorBatchService._epoch(now)
+    invocation_tick = invocation_epoch * 1_000_000 + now.microsecond
+    scheduled_epoch = float(invocation_epoch // 600 * 600)
     pending: dict[str, Any] | None = None
     if audit is not None:
         pre_state, pre_operation = _watch_pre_operation(store)
         pending = _pending_watch_audit_record(
-            f"watch-poll-{int(scheduled_epoch)}", scheduled_epoch, pre_operation, pre_state
+            (
+                f"watch-poll-{int(scheduled_epoch)}"
+                f"-i{invocation_tick}"
+                f"-m{pre_state.last_supervisor_message_id}"
+                f"-e{pre_state.last_supervisor_event_id}"
+            ),
+            scheduled_epoch,
+            pre_operation,
+            pre_state,
         )
-        pending = audit.append(pending)
+        pending = audit.append_distinct(pending)
         if pending["status"] != "pending":
             raise AuditError("watch poll is already finalized")
 
@@ -7962,8 +8021,8 @@ def main() -> int:
     watch.add_argument("--policy", type=Path, required=True)
     watch.add_argument("--state-db", type=Path, required=True)
     watch.add_argument("--kanban-db", type=Path, required=True)
-    watch.add_argument("--last-message-id", type=int, default=0)
-    watch.add_argument("--last-event-id", type=int, default=0)
+    watch.add_argument("--last-message-id", type=int)
+    watch.add_argument("--last-event-id", type=int)
     watch.add_argument("--profile", default="default")
     watch.add_argument("--state", type=Path)
     watch.add_argument("--board", default="supervisor")
@@ -8005,6 +8064,8 @@ def main() -> int:
     state_commands = state_parser.add_subparsers(dest="state_command", required=True)
     state_init = state_commands.add_parser("init")
     state_init.add_argument("--state", type=Path, required=True)
+    state_init.add_argument("--last-message-id", type=int)
+    state_init.add_argument("--last-event-id", type=int)
     state_show = state_commands.add_parser("show")
     state_show.add_argument("--state", type=Path, required=True)
     state_control = state_commands.add_parser("control")
@@ -8029,6 +8090,13 @@ def main() -> int:
 
     if args.command == "watch" and not args.dry_run and args.state is None:
         print("watch: --state is required for actual runs", file=sys.stderr)
+        return 2
+    if (
+        args.command == "watch"
+        and args.state is not None
+        and (args.last_message_id is not None or args.last_event_id is not None)
+    ):
+        print("watch: explicit cursors conflict with --state", file=sys.stderr)
         return 2
 
     if args.command == "audit-annotate":
@@ -8209,7 +8277,17 @@ def main() -> int:
         try:
             store = StateStore(args.state)
             if args.state_command == "init":
-                supervisor_state = store.initialize()
+                if args.last_message_id is None and args.last_event_id is None:
+                    supervisor_state = store.initialize()
+                else:
+                    supervisor_state = store.initialize_at(
+                        last_message_id=(
+                            0 if args.last_message_id is None else args.last_message_id
+                        ),
+                        last_event_id=(
+                            0 if args.last_event_id is None else args.last_event_id
+                        ),
+                    )
                 report = _safe_state_summary(supervisor_state)
             elif args.state_command == "show":
                 supervisor_state = store.read()
@@ -8266,14 +8344,21 @@ def main() -> int:
             ))
         return 0
     try:
+        if args.state is None:
+            last_message_id = 0 if args.last_message_id is None else args.last_message_id
+            last_event_id = 0 if args.last_event_id is None else args.last_event_id
+        else:
+            dry_state = StateStore(args.state).read()
+            last_message_id = dry_state.last_message_id
+            last_event_id = dry_state.last_event_id
         changes = detect_changes(
             args.state_db,
             args.kanban_db,
             profile=args.profile,
-            last_message_id=args.last_message_id,
-            last_event_id=args.last_event_id,
+            last_message_id=last_message_id,
+            last_event_id=last_event_id,
         )
-    except DetectionError as error:
+    except (DetectionError, StateError) as error:
         print(f"watch: {error}", file=sys.stderr)
         return 2
     if changes.messages or changes.events:

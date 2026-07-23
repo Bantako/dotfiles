@@ -10,7 +10,7 @@ let
   cfg = config.services.hermes-supervisor;
   hermesPkg = import ./hermes-package.nix { inherit pkgs inputs; };
   supervisorCli = pkgs.writeShellApplication {
-    name = "hermes-supervisor";
+    name = "hermes-supervisor-runtime";
     runtimeInputs = [
       hermesPkg
       pkgs.python3
@@ -39,12 +39,12 @@ let
       "${config.home.homeDirectory}/.hermes/kanban/boards/${cfg.board}/kanban.db";
   watchCycleCommand = pkgs.writeShellScript "hermes-supervisor-watch-cycle" ''
     set -euo pipefail
-    ${supervisorCli}/bin/hermes-supervisor replies \
+    ${supervisorCli}/bin/hermes-supervisor-runtime replies \
       --state-db ${config.home.homeDirectory}/.hermes/state.db \
       --state-root ${stateRoot} \
       --board ${lib.escapeShellArg cfg.board} \
       --hermes ${hermesPkg}/bin/hermes
-    exec ${supervisorCli}/bin/hermes-supervisor watch \
+    exec ${supervisorCli}/bin/hermes-supervisor-runtime watch \
       --policy ${config.xdg.configHome}/hermes-supervisor/policy.json \
       --state ${stateRoot}/state.json \
       --audit ${stateRoot}/run-audit.jsonl \
@@ -71,7 +71,7 @@ let
       --nonblock \
       --conflict-exit-code 0 \
       "${runtimeRoot}/watch.lock" \
-      ${supervisorCli}/bin/hermes-supervisor gc \
+      ${supervisorCli}/bin/hermes-supervisor-runtime gc \
       --older-than 30d \
       --state-root ${stateRoot} \
       --kanban-db ${kanbanDb} \
@@ -86,7 +86,7 @@ let
   ecoReportCommand = pkgs.writeShellApplication {
     name = "hermes-supervisor-eco-report";
     text = ''
-      exec ${supervisorCli}/bin/hermes-supervisor eco-report \
+      exec ${supervisorCli}/bin/hermes-supervisor-runtime eco-report \
         --audit ${stateRoot}/run-audit.jsonl
     '';
   };
@@ -124,14 +124,14 @@ let
           exec ${pkgs.util-linux}/bin/flock \
             --nonblock --conflict-exit-code 75 \
             "${runtimeRoot}/watch.lock" \
-            ${supervisorCli}/bin/hermes-supervisor state control \
+            ${supervisorCli}/bin/hermes-supervisor-runtime state control \
             "''${common_args[@]}" "$action"
           ;;
         emergency-stop)
           exec ${pkgs.util-linux}/bin/flock \
             --nonblock --conflict-exit-code 75 \
             "${runtimeRoot}/watch.lock" \
-            ${supervisorCli}/bin/hermes-supervisor state control \
+            ${supervisorCli}/bin/hermes-supervisor-runtime state control \
             "''${common_args[@]}" \
             --ntfy-url ${lib.escapeShellArg cfg.control.ntfyUrl} \
             --curl ${pkgs.curl}/bin/curl \
@@ -151,7 +151,6 @@ let
     StateDirectoryMode = "0700";
     RuntimeDirectory = "hermes-supervisor";
     RuntimeDirectoryMode = "0700";
-    RuntimeMaxSec = "9m";
     TimeoutStartSec = "9m";
     KillMode = "control-group";
     PrivateTmp = true;

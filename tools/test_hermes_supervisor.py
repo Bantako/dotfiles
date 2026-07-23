@@ -964,6 +964,56 @@ class SupervisorStateTests(unittest.TestCase):
             with self.assertRaises(FrozenInstanceError):
                 state.daily_budget.dispatches = 1  # type: ignore[misc]
 
+    def test_initialize_at_high_water_sets_both_cursors_once_and_refuses_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "state.json"
+            store = hermes_supervisor.StateStore(path)
+            state = store.initialize_at(last_message_id=45123, last_event_id=7)
+            self.assertEqual(
+                (
+                    state.mode,
+                    state.control_state,
+                    state.last_message_id,
+                    state.last_event_id,
+                    state.last_supervisor_message_id,
+                    state.last_supervisor_event_id,
+                ),
+                ("shadow", "running", 45123, 7, 45123, 7),
+            )
+            before = path.read_bytes()
+            with self.assertRaisesRegex(hermes_supervisor.StateError, "already initialized"):
+                store.initialize_at(last_message_id=99999, last_event_id=99)
+            self.assertEqual(path.read_bytes(), before)
+            for index, (message_id, event_id) in enumerate(
+                ((True, 0), (0, True), (-1, 0), (0, -1))
+            ):
+                with self.subTest(message_id=message_id, event_id=event_id):
+                    other = hermes_supervisor.StateStore(Path(directory) / f"bad-{index}")
+                    with self.assertRaises(hermes_supervisor.StateError):
+                        other.initialize_at(
+                            last_message_id=message_id, last_event_id=event_id
+                        )
+
+    def test_state_init_cli_accepts_explicit_high_water_marks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "state.json"
+            argv = [
+                "hermes-supervisor-runtime", "state", "init", "--state", str(path),
+                "--last-message-id", "45123", "--last-event-id", "7",
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch("builtins.print"):
+                self.assertEqual(hermes_supervisor.main(), 0)
+            state = hermes_supervisor.StateStore(path).read()
+            self.assertEqual(
+                (
+                    state.last_message_id,
+                    state.last_event_id,
+                    state.last_supervisor_message_id,
+                    state.last_supervisor_event_id,
+                ),
+                (45123, 7, 45123, 7),
+            )
+
     def test_read_round_trips_and_rejects_strict_schema_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -1768,10 +1818,23 @@ class WatchCliTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
-    def test_dry_run_ignores_state_mode_and_hermes_without_writing(self) -> None:
+    def test_dry_run_uses_existing_state_cursor_without_writing_or_hermes_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
-            state = Path(directory) / "missing" / "state.json"
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                    ("s1", "cli", "capture", 0, None),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (1, "s1", "user", "private", 1, 1, 0),
+                )
+            state = Path(directory) / "private" / "state.json"
+            hermes_supervisor.StateStore(state).initialize_at(
+                last_message_id=1, last_event_id=0
+            )
+            before = state.read_bytes()
             marker = Path(directory) / "hermes-called"
             fake = Path(directory) / "hermes"
             fake.write_text(f"#!/bin/sh\ntouch {marker}\nexit 99\n", encoding="utf-8")
@@ -1780,12 +1843,34 @@ class WatchCliTests(unittest.TestCase):
                 state_db, kanban_db, "--state", str(state), "--mode", "limited",
                 "--hermes", str(fake), "--board", "supervisor",
             )
+            after = state.read_bytes()
+            marker_exists = marker.exists()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertFalse(state.exists())
-        self.assertFalse(state.with_name("state.json.lock").exists())
-        self.assertFalse(marker.exists())
+        self.assertEqual(after, before)
+        self.assertFalse(marker_exists)
+
+    def test_dry_run_rejects_missing_state_and_ambiguous_explicit_cursors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
+            missing = Path(directory) / "missing" / "state.json"
+            absent = self.run_watch(state_db, kanban_db, "--state", str(missing))
+            self.assertEqual(absent.returncode, 2)
+            self.assertEqual(absent.stdout, "")
+            self.assertIn("watch:", absent.stderr)
+            self.assertFalse(missing.exists())
+
+            state = Path(directory) / "state.json"
+            hermes_supervisor.StateStore(state).initialize()
+            conflict = self.run_watch(
+                state_db, kanban_db, "--state", str(state), "--last-message-id", "0"
+            )
+            self.assertEqual(conflict.returncode, 2)
+            self.assertEqual(conflict.stdout, "")
+            self.assertEqual(
+                conflict.stderr, "watch: explicit cursors conflict with --state\n"
+            )
 
     def test_actual_watch_requires_state_before_policy_or_hermes_access(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -6913,6 +6998,14 @@ class Task9ConsoleReplyTests(unittest.TestCase):
             self.assertEqual(payload, {"closed": 0, "ignored": 1, "processed": 1})
             self.assertNotIn("PRIVATE", json.dumps(payload))
 
+    def test_nix_runtime_cli_does_not_collide_with_supervisor_profile_alias(self) -> None:
+        module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text()
+        self.assertIn('name = "hermes-supervisor-runtime";', module)
+        self.assertIn("${supervisorCli}/bin/hermes-supervisor-runtime", module)
+        self.assertNotIn("${supervisorCli}/bin/hermes-supervisor ", module)
+        self.assertNotIn('RuntimeMaxSec = "9m";', module)
+        self.assertIn('TimeoutStartSec = "9m";', module)
+
     def test_nix_wires_replies_before_watch_inside_one_flock_and_stays_opt_in(self) -> None:
         module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text()
         cycle = module[module.index("watchCycleCommand ="):module.index("watchCommand =")]
@@ -7557,6 +7650,70 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
         self.assertEqual(record["input_event_ids"], [])
         self.assertNotIn("reasoning", json.dumps(record))
 
+    def test_watch_audit_ids_distinguish_new_input_inside_same_ten_minute_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+            hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY),
+                WatchCycleTests.Client(), now, audit=audit,
+            )
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (2, "session-secret", "user", "SECOND PRIVATE INTENT", 2, 1, 0),
+                )
+            hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY),
+                WatchCycleTests.Client(), now + timedelta(minutes=1), audit=audit,
+            )
+            records = audit.read_records()
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len({record["batch_id"] for record in records}), 2)
+        self.assertEqual([record["input_message_ids"] for record in records], [[1], [2]])
+
+    def test_watch_audit_ids_distinguish_idle_polls_inside_same_ten_minute_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+            for _ in range(2):
+                result = hermes_supervisor.run_watch_cycle(
+                    store, state_db, kanban_db, load_policy(POLICY),
+                    WatchCycleTests.Client(), now, audit=audit,
+                )
+                self.assertEqual(result.batch.action, "no_change")
+            records = audit.read_records()
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len({record["batch_id"] for record in records}), 2)
+        self.assertEqual([record["source_change_count"] for record in records], [0, 0])
+
+    def test_watch_audit_id_allows_retry_after_failure_inside_same_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            client = WatchCycleTests.Client(fail_batch=True)
+            now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+            with self.assertRaises(hermes_supervisor.BatchError):
+                hermes_supervisor.run_watch_cycle(
+                    store, state_db, kanban_db, load_policy(POLICY), client,
+                    now, audit=audit,
+                )
+            client.fail_batch = False
+            result = hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY), client,
+                now, audit=audit,
+            )
+            records = audit.read_records()
+        self.assertEqual(result.batch.action, "enqueued")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len({record["batch_id"] for record in records}), 2)
+        self.assertEqual([record["status"] for record in records], ["failed", "completed"])
+
     def test_watch_audits_capture_correction_relation_without_raw_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
@@ -7631,6 +7788,23 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                 audit.append(dict(record, confidence=0.5))
             self.assertEqual(audit.read_records(), (record,))
 
+    def test_distinct_audit_reservation_suffixes_max_length_ids_within_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            pending = self.audit_record(
+                batch_id="a" * 128,
+                status="pending", failure_code=None, finished_at=100.0,
+                capture_relations=[], primary_card_id=None, calls=[],
+                accepted_result_ids=[], human_corrections=0, procedure_conversions=0,
+            )
+            first = audit.append_distinct(pending)
+            second = audit.append_distinct(pending)
+            records = audit.read_records()
+        self.assertEqual(first["batch_id"], "a" * 128)
+        self.assertEqual(second["batch_id"], "a" * 125 + "-r1")
+        self.assertEqual(len({record["batch_id"] for record in records}), 2)
+        self.assertTrue(all(len(record["batch_id"]) <= 128 for record in records))
+
     def test_run_audit_lifecycle_replaces_pending_and_rejects_conflicting_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
@@ -7649,7 +7823,7 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
             with self.assertRaises(hermes_supervisor.AuditError):
                 audit.append(dict(terminal, status="failed", failure_code="watch_failed"))
 
-    def test_watch_pending_survives_base_exception_and_retry_finalizes_same_bucket(self) -> None:
+    def test_watch_pending_survives_base_exception_and_retry_is_separate_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
             root = Path(directory)
@@ -7674,11 +7848,11 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                 hermes_supervisor.StateStore(root / "state.json"), state_db, kanban_db,
                 load_policy(POLICY), WatchCycleTests.Client(), now, audit=audit,
             )
-            finalized = audit.read_records()
-            self.assertEqual(len(finalized), 1)
-            self.assertEqual(finalized[0]["batch_id"], pending[0]["batch_id"])
-            self.assertEqual(finalized[0]["pre_operation"], pending[0]["pre_operation"])
-            self.assertEqual(finalized[0]["status"], "completed")
+            records = audit.read_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual([record["status"] for record in records], ["pending", "completed"])
+            self.assertNotEqual(records[0]["batch_id"], records[1]["batch_id"])
+            self.assertEqual(records[0], pending[0])
 
     def test_watch_caught_failure_finalizes_safe_code_and_ten_minute_buckets_are_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -7705,18 +7879,29 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                 store.path.read_bytes() if store.path.exists() else None
             )
             retry_client = WatchCycleTests.Client()
-            with self.assertRaises(hermes_supervisor.AuditError):
-                hermes_supervisor.run_watch_cycle(
-                    store, state_db, kanban_db, load_policy(POLICY), retry_client,
-                    datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc), audit=audit,
-                )
+            retry = hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY), retry_client,
+                datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc), audit=audit,
+            )
+            self.assertEqual(retry.batch.action, "no_change")
             self.assertEqual(retry_client.capture_calls, [])
             self.assertEqual(retry_client.batch_calls, [])
+            self.assertIsNone(before_retry)
+            retry_state = store.read()
+            self.assertEqual(retry_state.mode, "shadow")
+            self.assertEqual(retry_state.control_state, "running")
             self.assertEqual(
-                store.path.read_bytes() if store.path.exists() else None,
-                before_retry,
+                (retry_state.last_message_id, retry_state.last_event_id), (0, 0)
             )
-            self.assertEqual(audit.read_records()[0], failed)
+            retry_records = audit.read_records()
+            self.assertEqual(len(retry_records), 2)
+            self.assertEqual(retry_records[0], failed)
+            self.assertEqual(
+                [record["status"] for record in retry_records], ["failed", "completed"]
+            )
+            self.assertNotEqual(
+                retry_records[0]["batch_id"], retry_records[1]["batch_id"]
+            )
 
             second_audit = hermes_supervisor.RunAuditLog(root / "second-audit.jsonl")
             for minute in (0, 10):
