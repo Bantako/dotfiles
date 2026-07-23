@@ -1927,6 +1927,57 @@ class HermesKanbanClient:
         except UnicodeError as error:
             raise CaptureError("invalid Hermes create output") from error
 
+    def verify_primary_goal(self, goal_id: str) -> dict[str, Any]:
+        """Read back one board-qualified active task and require exact identity."""
+        if type(goal_id) is not str or _PRIMARY_GOAL_ID.fullmatch(goal_id) is None:
+            raise CaptureError("invalid primary goal task id")
+        argv = [
+            self.executable, "kanban", "--board", self.board,
+            "show", goal_id, "--json",
+        ]
+        environment = dict(self.base_env)
+        environment.pop("HERMES_KANBAN_BOARD", None)
+        try:
+            if self.runner is None:
+                completed = self._production_run(argv, environment)
+            else:
+                completed = self.runner(
+                    argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=self.timeout, check=False,
+                    shell=False, env=environment,
+                )
+        except CaptureError:
+            raise
+        except Exception as error:
+            raise CaptureError(
+                f"Hermes primary goal read-back failed ({type(error).__name__})"
+            ) from error
+        if type(getattr(completed, "returncode", None)) is not int:
+            raise CaptureError("Hermes primary goal read-back returned invalid result")
+        stdout = getattr(completed, "stdout", None)
+        stderr = getattr(completed, "stderr", None)
+        if type(stdout) is not str or type(stderr) is not str:
+            raise CaptureError("Hermes primary goal read-back returned invalid output")
+        if completed.returncode != 0:
+            raise CaptureError(
+                f"Hermes primary goal read-back exited with status {completed.returncode}"
+            )
+        value = _strict_json_loads(
+            stdout,
+            max_bytes=self.output_limit,
+            error_type=CaptureError,
+            message="invalid primary goal read-back JSON",
+        )
+        if (
+            type(value) is not dict
+            or value.get("id") != goal_id
+            or type(value.get("status")) is not str
+            or not value["status"]
+            or value["status"] in ("done", "archived")
+        ):
+            raise CaptureError("primary goal read-back mismatch")
+        return value
+
     def create(self, projection: CaptureProjection) -> CreatedCardRef:
         if type(projection) is not CaptureProjection:
             raise CaptureError("invalid capture projection")
@@ -2049,6 +2100,7 @@ _CONTROL_OWNERS = frozenset({
     "supervisor-control",
 })
 _CONTROL_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_PRIMARY_GOAL_ID = re.compile(r"t_[A-Za-z0-9][A-Za-z0-9._-]{0,125}")
 
 
 def _control_json_text(value: Any, maximum: int, *, nullable: bool = False) -> None:
@@ -4719,6 +4771,55 @@ def decide_gate(
             state.last_accepted_primary_goal_id,
         )
     raise GateError("request.kind: unreachable")
+
+
+def select_primary_goal(
+    store: StateStore,
+    audit: ControlAuditLog,
+    policy: Policy,
+    goal_id: str,
+    *,
+    now: datetime,
+) -> SupervisorState:
+    """Select the fixed Stage 0 primary goal through the gate and audit it."""
+    if type(store) is not StateStore or type(audit) is not ControlAuditLog:
+        raise StateError("invalid primary goal repository")
+    if (
+        type(goal_id) is not str
+        or _PRIMARY_GOAL_ID.fullmatch(goal_id) is None
+    ):
+        raise StateError("primary goal id must be a Kanban task id")
+    try:
+        timestamp = _state_int(int(now.timestamp()), "primary goal timestamp")
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError) as error:
+        raise StateError("primary goal timestamp: invalid") from error
+    try:
+        with StateLock(store.lock_path):
+            state = _control_load_unlocked(store)
+            decision = decide_gate(
+                policy,
+                state,
+                GateRequest("activate_primary_goal", goal_id=goal_id),
+                now,
+            )
+            if decision.action != "allow" or decision.next_primary_goal_id != goal_id:
+                raise StateError(f"primary goal selection blocked: {decision.reason_code}")
+            changed = replace(state, last_accepted_primary_goal_id=goal_id)
+            audit.append({
+                "schema_version": 1,
+                "kind": "primary_goal_selection",
+                "timestamp": timestamp,
+                "goal_id": goal_id,
+                "reason_code": decision.reason_code,
+                "changed": changed != state,
+            })
+            if changed != state:
+                store._write_unlocked(changed)
+            return changed
+    except (GateError, StateError):
+        raise
+    except (OSError, TypeError, ValueError, RecursionError) as error:
+        raise StateError(f"primary goal selection failed: {type(error).__name__}") from error
 
 
 def _batch_int(value: Any, label: str) -> int:
@@ -8068,6 +8169,13 @@ def main() -> int:
     state_init.add_argument("--last-event-id", type=int)
     state_show = state_commands.add_parser("show")
     state_show.add_argument("--state", type=Path, required=True)
+    state_primary = state_commands.add_parser("primary-goal")
+    state_primary.add_argument("--state", type=Path, required=True)
+    state_primary.add_argument("--audit", type=Path, required=True)
+    state_primary.add_argument("--policy", type=Path, required=True)
+    state_primary.add_argument("--goal-id", required=True)
+    state_primary.add_argument("--board", required=True)
+    state_primary.add_argument("--hermes", required=True)
     state_control = state_commands.add_parser("control")
     state_control.add_argument("--state", type=Path, required=True)
     state_control.add_argument("--audit", type=Path, required=True)
@@ -8292,6 +8400,16 @@ def main() -> int:
             elif args.state_command == "show":
                 supervisor_state = store.read()
                 report = _safe_state_summary(supervisor_state)
+            elif args.state_command == "primary-goal":
+                HermesKanbanClient(args.hermes, args.board).verify_primary_goal(args.goal_id)
+                supervisor_state = select_primary_goal(
+                    store,
+                    ControlAuditLog(args.audit),
+                    load_policy(args.policy),
+                    args.goal_id,
+                    now=datetime.now(timezone.utc),
+                )
+                report = _safe_state_summary(supervisor_state)
             else:
                 notifier = None
                 if args.action == "emergency-stop":
@@ -8309,7 +8427,10 @@ def main() -> int:
                     now=int(time.time()),
                 )
                 report = _safe_control_summary(result)
-        except (ControlError, StateError) as error:
+        except (
+            CaptureError, ControlError, GateError, PolicyError, StateError,
+            json.JSONDecodeError, UnicodeDecodeError, OSError,
+        ) as error:
             print(f"state: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, ensure_ascii=True,

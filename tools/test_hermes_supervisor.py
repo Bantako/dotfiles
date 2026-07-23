@@ -3278,6 +3278,114 @@ class Stage0GateTests(unittest.TestCase):
             hermes_supervisor.DailyBudget("2026-07-22", 0, 0, 0),
         )
 
+    def test_primary_goal_selection_is_audited_idempotent_and_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.initialize()
+            audit = hermes_supervisor.ControlAuditLog(root / "control-audit.jsonl")
+
+            first = hermes_supervisor.select_primary_goal(
+                store, audit, self.policy, "t_deadbeef", now=self.now,
+            )
+            same = hermes_supervisor.select_primary_goal(
+                store, audit, self.policy, "t_deadbeef", now=self.now,
+            )
+            with self.assertRaises(hermes_supervisor.StateError):
+                hermes_supervisor.select_primary_goal(
+                    store, audit, self.policy, "t_cafebabe", now=self.now,
+                )
+
+            records = audit.read_records()
+            persisted = store.read()
+
+        self.assertEqual(first.last_accepted_primary_goal_id, "t_deadbeef")
+        self.assertEqual(same, first)
+        self.assertEqual(persisted.last_accepted_primary_goal_id, "t_deadbeef")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            [(record["kind"], record["goal_id"], record["changed"]) for record in records],
+            [
+                ("primary_goal_selection", "t_deadbeef", True),
+                ("primary_goal_selection", "t_deadbeef", False),
+            ],
+        )
+
+    def test_primary_goal_readback_requires_exact_active_card_and_explicit_board(self) -> None:
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(
+                argv, 0,
+                stdout='{"id":"t_deadbeef","status":"triage"}',
+                stderr="",
+            )
+
+        client = hermes_supervisor.HermesKanbanClient(
+            "/fake/hermes", "supervisor", runner=runner,
+            base_env={"HERMES_KANBAN_BOARD": "wrong"},
+        )
+        card = client.verify_primary_goal("t_deadbeef")
+
+        self.assertEqual(card["id"], "t_deadbeef")
+        self.assertEqual(
+            calls[0][0],
+            [
+                "/fake/hermes", "kanban", "--board", "supervisor",
+                "show", "t_deadbeef", "--json",
+            ],
+        )
+        self.assertNotIn("HERMES_KANBAN_BOARD", calls[0][1]["env"])
+        for payload in (
+            '{"id":"t_cafebabe","status":"triage"}',
+            '{"id":"t_deadbeef","status":"done"}',
+            "not-json",
+        ):
+            with self.subTest(payload=payload):
+                bad = hermes_supervisor.HermesKanbanClient(
+                    "/fake/hermes", "supervisor",
+                    runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+                        argv, 0, stdout=payload, stderr="",
+                    ),
+                    base_env={},
+                )
+                with self.assertRaises(hermes_supervisor.CaptureError):
+                    bad.verify_primary_goal("t_deadbeef")
+
+    def test_primary_goal_selection_failure_paths_preserve_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            initial = store.initialize()
+            audit = hermes_supervisor.ControlAuditLog(root / "control-audit.jsonl")
+
+            with self.assertRaises(hermes_supervisor.StateError):
+                hermes_supervisor.select_primary_goal(
+                    store, audit, self.policy, "t_.bad", now=self.now,
+                )
+            with mock.patch.object(
+                audit, "append", side_effect=hermes_supervisor.StateError("audit failed"),
+            ):
+                with self.assertRaises(hermes_supervisor.StateError):
+                    hermes_supervisor.select_primary_goal(
+                        store, audit, self.policy, "t_deadbeef", now=self.now,
+                    )
+            self.assertEqual(store.read(), initial)
+            self.assertFalse(audit.path.exists())
+
+            with mock.patch.object(store, "_write_unlocked", side_effect=OSError("write failed")):
+                with self.assertRaises(hermes_supervisor.StateError):
+                    hermes_supervisor.select_primary_goal(
+                        store, audit, self.policy, "t_deadbeef", now=self.now,
+                    )
+            self.assertEqual(store.read(), initial)
+            records = audit.read_records()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["kind"], "primary_goal_selection")
+        self.assertTrue(records[0]["changed"])
+
     def test_safety_and_data_loss_goals_preempt_with_data_loss_precedence(self) -> None:
         state = replace(
             hermes_supervisor.initial_supervisor_state(),
@@ -7514,6 +7622,8 @@ class Task10SupervisorControlTests(unittest.TestCase):
         for fragment in (
             "control.enable", "default = false", "controlCommand", "watch.lock",
             "--audit", "--board", "--hermes", "--ntfy-url", "--curl",
+            "primaryGoalCommand", "hermes-supervisor-primary-goal",
+            "state primary-goal", "--goal-id",
             "http://192.168.11.9:8080/nas-alerts",
         ):
             self.assertIn(fragment, module)

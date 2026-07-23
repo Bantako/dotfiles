@@ -144,6 +144,27 @@ let
       esac
     '';
   };
+  primaryGoalCommand = pkgs.writeShellApplication {
+    name = "hermes-supervisor-primary-goal";
+    runtimeInputs = [ pkgs.util-linux ];
+    text = ''
+      if [ "$#" -ne 1 ]; then
+        echo "usage: hermes-supervisor-primary-goal <kanban-task-id>" >&2
+        exit 2
+      fi
+      goal_id="$1"
+      exec ${pkgs.util-linux}/bin/flock \
+        --nonblock --conflict-exit-code 75 \
+        "${runtimeRoot}/watch.lock" \
+        ${supervisorCli}/bin/hermes-supervisor-runtime state primary-goal \
+        --state '${stateRoot}/state.json' \
+        --audit '${stateRoot}/control-audit.jsonl' \
+        --policy ${lib.escapeShellArg "${config.xdg.configHome}/hermes-supervisor/policy.json"} \
+        --board ${lib.escapeShellArg cfg.board} \
+        --hermes ${hermesPkg}/bin/hermes \
+        --goal-id "$goal_id"
+    '';
+  };
   commonService = {
     Type = "oneshot";
     UMask = "0077";
@@ -228,7 +249,10 @@ in
       supervisorCli
       ecoReportCommand
     ]
-    ++ lib.optional cfg.control.enable controlCommand;
+    ++ lib.optionals cfg.control.enable [
+      controlCommand
+      primaryGoalCommand
+    ];
 
     xdg.configFile."hermes-supervisor/policy.json".source = ./hermes-supervisor/policy.json;
     xdg.configFile."hermes-supervisor/prompts" = {
