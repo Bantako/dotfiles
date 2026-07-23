@@ -70,6 +70,11 @@
     ./modules/shell/zsh.nix
   ];
 
+  services.hermes-supervisor = {
+    enable = true;
+    control.enable = true;
+  };
+
   services.kdeconnect = {
     enable = true;
     package = pkgs.kdePackages.kdeconnect-kde;
