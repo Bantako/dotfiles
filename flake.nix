@@ -13,7 +13,9 @@
     herdr.url = "github:ogulcancelik/herdr";
     hunk = {
       url = "github:modem-dev/hunk";
-      inputs.nixpkgs.follows = "nixpkgs";
+      # Hunk's treefmt dependency still evaluates x86_64-darwin. Keep its
+      # nixpkgs on the last revision that supports it until Hunk fixes that.
+      inputs.nixpkgs.url = "github:NixOS/nixpkgs/68a8af93ff4297686cb68880845e61e5e2e41d92";
     };
     zen-browser.url = "github:youwen5/zen-browser-flake";
     zen-browser.inputs.nixpkgs.follows = "nixpkgs";
@@ -39,7 +41,8 @@
     };
   };
 
-  outputs = inputs:
+  outputs =
+    inputs:
     let
       # ghostty 1.3.1: setCursorLocation に 1x1px ではなくセル全体を渡すパッチ
       # imePoint() が返す y はセル下端なので top-left 基準に戻し、height も実セル高さにする。
