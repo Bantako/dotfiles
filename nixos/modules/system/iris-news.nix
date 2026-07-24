@@ -26,6 +26,10 @@
       # Hermes owns the OpenAI Codex OAuth credential.  The news service only
       # invokes its constrained CLI route and does not receive an API key.
       HOME = "/home/morikawa";
+      # The daily build may recreate its environment after a Python upgrade.
+      # Keep it separate from the long-running API process so that replacing
+      # build dependencies cannot delete modules still used by the API.
+      UV_PROJECT_ENVIRONMENT = "/srv/paper/venvs/build";
       IRIS_NEWS_LLM_PROVIDER = "hermes-cli";
       IRIS_NEWS_HERMES_COMMAND = "/home/morikawa/.nix-profile/bin/hermes";
       IRIS_NEWS_HERMES_PROVIDER = "openai-codex";
@@ -113,6 +117,9 @@
     environment = {
       LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.stdenv.cc.cc ];
       HOME = "/home/morikawa";
+      # Do not share this environment with the daily build: uv can replace an
+      # environment in place when the selected Python version changes.
+      UV_PROJECT_ENVIRONMENT = "/srv/paper/venvs/api";
       IRIS_NEWS_LLM_PROVIDER = "hermes-cli";
       IRIS_NEWS_HERMES_COMMAND = "/home/morikawa/.nix-profile/bin/hermes";
       IRIS_NEWS_HERMES_PROVIDER = "openai-codex";
