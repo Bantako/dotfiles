@@ -25,6 +25,7 @@
     ./modules/ai/codex.nix
     ./modules/ai/herdr.nix
     ./modules/ai/hermes-backup.nix
+    ./modules/ai/hermes-operations-dashboard.nix
     ./modules/ai/hermes-webui.nix
     ./modules/ai/hermes-supervisor.nix
     ./modules/ai/hermes.nix

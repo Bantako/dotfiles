@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://morikawa.local/schema/hermes-operations-audit.schema.json",
+  "title": "Hermes operations audit result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observed_at",
+    "overall_status",
+    "freshness",
+    "summary",
+    "surfaces",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "overall_status": {"enum": ["healthy", "drift", "unobserved", "stale"]},
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "age_seconds", "max_age_seconds"],
+      "properties": {
+        "status": {"enum": ["fresh", "stale"]},
+        "age_seconds": {"type": "integer", "minimum": 0},
+        "max_age_seconds": {"type": "integer", "minimum": 60}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "drift", "unobserved", "high", "medium"],
+      "properties": {
+        "healthy": {"type": "integer", "minimum": 0},
+        "drift": {"type": "integer", "minimum": 0},
+        "unobserved": {"type": "integer", "minimum": 0},
+        "high": {"type": "integer", "minimum": 0},
+        "medium": {"type": "integer", "minimum": 0}
+      }
+    },
+    "surfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/surfaceResult"}
+    },
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"}
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "severity", "surface_id", "message", "evidence"],
+      "properties": {
+        "rule_id": {"type": "string", "pattern": "^[A-Z]+-[A-Z]+-[0-9]{2}$"},
+        "severity": {"enum": ["high", "medium"]},
+        "surface_id": {"type": "string"},
+        "message": {"type": "string"},
+        "evidence": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "surfaceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "purpose", "status", "source_of_truth", "expected", "observed", "findings"],
+      "properties": {
+        "id": {"type": "string"},
+        "purpose": {"type": "string"},
+        "status": {"enum": ["healthy", "drift", "unobserved"]},
+        "source_of_truth": {"type": "array", "items": {"type": "string"}},
+        "expected": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile", "forbidden_toolsets"],
+          "properties": {
+            "profile": {"type": "string"},
+            "forbidden_toolsets": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "observed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unit_state", "profile", "enabled_toolsets"],
+          "properties": {
+            "unit_state": {"type": ["string", "null"]},
+            "profile": {"type": ["string", "null"]},
+            "enabled_toolsets": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+      }
+    }
+  }
+}

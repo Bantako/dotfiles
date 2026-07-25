@@ -64,6 +64,23 @@ in
           ExecStart = "${pkgs.tailscale}/bin/tailscale serve --bg --yes --https=443 http://127.0.0.1:8787";
         };
       };
+
+      # Keep the contract dashboard on a dedicated tailnet-only endpoint.
+      # The Glance backend itself remains loopback-only on port 8790.
+      hermes-operations-tailscale-serve = {
+        description = "Tailscale Serve for Hermes operations dashboard";
+        wants = [ "tailscaled.service" ];
+        after = [ "tailscaled.service" ];
+        wantedBy = [ "multi-user.target" ];
+
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStartPre = waitForTailscaled;
+          ExecStart = "${pkgs.tailscale}/bin/tailscale serve --bg --yes --https=8450 http://127.0.0.1:8790";
+          ExecStop = "-${pkgs.tailscale}/bin/tailscale serve --yes --https=8450 off";
+        };
+      };
     };
 
   services.resolved.enable = true;

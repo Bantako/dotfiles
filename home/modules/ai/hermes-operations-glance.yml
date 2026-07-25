@@ -1,0 +1,96 @@
+server:
+  host: 127.0.0.1
+  port: 8790
+  proxied: true
+
+branding:
+  app-name: Hermes Operations
+  app-icon-url: /assets/app-icon.png
+
+pages:
+  - name: Operations
+    slug: operations
+    width: wide
+    hide-desktop-navigation: true
+    columns:
+      - size: small
+        widgets:
+          - type: custom-api
+            title: Contract status
+            cache: 30s
+            url: http://127.0.0.1:8791/api/audit
+            template: |
+              {{ $status := .JSON.String "overall_status" }}
+              <div class="flex justify-between items-center">
+                <span class="size-h5">Overall</span>
+                <span class="size-h3 {{ if eq $status "healthy" }}color-positive{{ else }}color-negative{{ end }}">{{ $status }}</span>
+              </div>
+              <div class="margin-top-15">
+                <div class="flex justify-between"><span>High findings</span><span class="color-negative">{{ .JSON.Int "summary.high" }}</span></div>
+                <div class="flex justify-between"><span>Medium findings</span><span>{{ .JSON.Int "summary.medium" }}</span></div>
+                <div class="flex justify-between"><span>Healthy surfaces</span><span class="color-positive">{{ .JSON.Int "summary.healthy" }}</span></div>
+                <div class="flex justify-between"><span>Drift surfaces</span><span class="color-negative">{{ .JSON.Int "summary.drift" }}</span></div>
+                <div class="flex justify-between"><span>Unobserved</span><span>{{ .JSON.Int "summary.unobserved" }}</span></div>
+              </div>
+
+          - type: custom-api
+            title: Observation freshness
+            cache: 30s
+            url: http://127.0.0.1:8791/api/audit
+            template: |
+              {{ $freshness := .JSON.String "freshness.status" }}
+              <div class="flex justify-between items-center">
+                <span>Status</span>
+                <span class="{{ if eq $freshness "fresh" }}color-positive{{ else }}color-negative{{ end }}">{{ $freshness }}</span>
+              </div>
+              <div class="flex justify-between"><span>Age</span><span>{{ .JSON.Int "freshness.age_seconds" }}s</span></div>
+              <div class="flex justify-between"><span>Maximum</span><span>{{ .JSON.Int "freshness.max_age_seconds" }}s</span></div>
+              <div class="margin-top-10 color-paragraph">Observed at {{ .JSON.String "observed_at" }}</div>
+
+      - size: full
+        widgets:
+          - type: custom-api
+            title: Hermes surfaces
+            cache: 30s
+            url: http://127.0.0.1:8791/api/audit
+            template: |
+              <ul class="list list-gap-14">
+              {{ range .JSON.Array "surfaces" }}
+                {{ $status := .String "status" }}
+                <li>
+                  <div class="flex justify-between items-center">
+                    <span class="size-h4">{{ .String "id" }}</span>
+                    <span class="{{ if eq $status "healthy" }}color-positive{{ else }}color-negative{{ end }}">{{ $status }}</span>
+                  </div>
+                  <div class="color-paragraph margin-top-5">{{ .String "purpose" }}</div>
+                  <div class="margin-top-10">
+                    <div class="flex justify-between"><span>Expected profile</span><span>{{ .String "expected.profile" }}</span></div>
+                    <div class="flex justify-between"><span>Observed profile</span><span>{{ .String "observed.profile" }}</span></div>
+                    <div class="flex justify-between"><span>Unit</span><span>{{ .String "observed.unit_state" }}</span></div>
+                  </div>
+                </li>
+              {{ end }}
+              </ul>
+
+          - type: custom-api
+            title: Contract findings
+            cache: 30s
+            url: http://127.0.0.1:8791/api/audit
+            template: |
+              {{ if eq (.JSON.Int "summary.high") 0 }}
+                {{ if eq (.JSON.Int "summary.medium") 0 }}
+                  <div class="color-positive">No contract findings</div>
+                {{ end }}
+              {{ end }}
+              <ul class="list list-gap-10">
+              {{ range .JSON.Array "findings" }}
+                <li>
+                  <div class="flex justify-between">
+                    <span class="size-h5">{{ .String "rule_id" }}</span>
+                    <span class="color-negative">{{ .String "severity" }}</span>
+                  </div>
+                  <div>{{ .String "message" }}</div>
+                  <div class="color-paragraph">Surface: {{ .String "surface_id" }}</div>
+                </li>
+              {{ end }}
+              </ul>

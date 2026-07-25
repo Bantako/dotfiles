@@ -1,0 +1,32 @@
+{
+  "$schema": "./schema/hermes-operations-contract.schema.json",
+  "schema_version": 1,
+  "freshness": {
+    "max_age_seconds": 900
+  },
+  "surfaces": [
+    {
+      "id": "discord",
+      "purpose": "外出先からのPKM・Web調査・雑談に限定したHermes入口",
+      "source_of_truth": [
+        "home/modules/ai/hermes.nix",
+        "~/.hermes/profiles/discord-safe/config.yaml"
+      ],
+      "unit": {
+        "name": "hermes-discord.service",
+        "scope": "user"
+      },
+      "platform": "discord",
+      "expected_profile": "discord-safe",
+      "default_profile": "default",
+      "forbidden_toolsets": [
+        "terminal",
+        "file",
+        "code_execution",
+        "delegation",
+        "cronjob",
+        "computer_use"
+      ]
+    }
+  ]
+}
