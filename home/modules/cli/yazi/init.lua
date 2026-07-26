@@ -2,7 +2,7 @@ require("git"):setup()
 
 -- mime-ext: 不明な拡張子は yazi 標準の MIME 検出（file(1)）にフォールバック
 -- これがないと PDF 等が "application/octet-stream" に分類されてビューアーが開かない
-require("mime-ext"):setup {
+require("mime-ext.local"):setup {
   fallback_file1 = true,
 }
 

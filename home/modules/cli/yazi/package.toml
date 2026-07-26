@@ -25,8 +25,15 @@ hash = "9f82a544335a53d79e87ea315746caaa"
 
 [[plugin.deps]]
 use = "yazi-rs/plugins:git"
-rev = "2730199"
-hash = "e7e5b83d2b97a4fbd09e3e8b6e73add5"
+rev = "bbac5e7"
+hash = "88e56a64b7ce7c4314427452343fef17"
 
-[flavor]
-deps = []
+[[plugin.deps]]
+use = "yazi-rs/plugins:mime-ext"
+rev = "bbac5e7"
+hash = "b33b8b5e45cb10ffd31d3cccb93c6fd7"
+
+[[flavor.deps]]
+use = "yazi-rs/flavors:dracula"
+rev = "4770a34"
+hash = "20624fcdfcf7e4e912de05e348065e5e"

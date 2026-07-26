@@ -81,7 +81,7 @@ show_hidden = true
 show_symlink = true
 
 [[plugin.prepend_preloaders]]
-name = "/mnt/synology/**"
+url = "/mnt/synology/**"
 run = "noop"
 
 [[plugin.prepend_previewers]]
@@ -93,12 +93,23 @@ mime = "application/cbr"
 run  = "cbz"
 
 [[plugin.prepend_fetchers]]
-id   = "mime"
-name = "*"
-run  = "mime-ext"
-prio = "high"
+url   = "local://*"
+run   = "mime-ext.local"
+prio  = "high"
+group = "mime"
 
 [[plugin.prepend_fetchers]]
-id   = "git"
-name = "*"
-run  = "git"
+url   = "remote://*"
+run   = "mime-ext.remote"
+prio  = "high"
+group = "mime"
+
+[[plugin.prepend_fetchers]]
+url   = "*"
+run   = "git"
+group = "git"
+
+[[plugin.prepend_fetchers]]
+url   = "*/"
+run   = "git"
+group = "git"
