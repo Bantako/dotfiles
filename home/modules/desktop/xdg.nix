@@ -20,7 +20,7 @@ in
     name = "Game Library";
     genericName = "Windows Game Launcher";
     comment = "Search and launch locally managed Windows games";
-    exec = "${gameLibrary}/bin/game-library --manifest-dir /home/morikawa/workspace/windows-game-pilot --history /home/morikawa/.local/state/game-library/history.sqlite3 --umu-path /run/current-system/sw/bin/umu-run qml-gui";
+    exec = "${gameLibrary}/bin/game-library --manifest-dir /home/morikawa/workspace/windows-game-pilot --catalog-dir /mnt/ugreen/data/games/_PCGAME-FREE --history /home/morikawa/.local/state/game-library/history.sqlite3 --umu-path /run/current-system/sw/bin/umu-run qml-gui";
     icon = "applications-games";
     terminal = false;
     categories = [ "Game" ];
