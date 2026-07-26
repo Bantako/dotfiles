@@ -12,6 +12,7 @@ let
       # セッション承認・allowlist・yolo・smart approve のどれでも素通りさせない。
       # 経緯: wger インシデント (2026-07-08, docs/report-nas-pruning-2026-07-08.md)
       ../../../patches/hermes-critical-approval-gate.patch
+      ../../../patches/hermes-session-handoff.patch
     ];
   };
   # 使う機能だけに絞る (2026-07-07 P7)。復帰候補:
