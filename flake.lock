@@ -260,11 +260,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1785027576,
-        "narHash": "sha256-Oim9p6NnWpa2ZkvFHie03cUTYvRVxFTFU27XthfSQAg=",
+        "lastModified": 1785029061,
+        "narHash": "sha256-MHoniu0b3RqfDMxaVlpbmdbIN59N2PSMQYfatONfP2w=",
         "ref": "refs/heads/main",
-        "rev": "fb3b68df3fc71658fb8082898f9424a6af5b8327",
-        "revCount": 1,
+        "rev": "77cc15abb9a3caba2c373715baa1f70a0232d048",
+        "revCount": 2,
         "type": "git",
         "url": "file:///home/morikawa/Projects/game-library"
       },
