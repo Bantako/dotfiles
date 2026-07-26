@@ -1,4 +1,7 @@
-{ inputs, config, pkgs, ...}:
+{ inputs, config, pkgs, ... }:
+let
+  gameLibrary = inputs.game-library.packages.${pkgs.stdenv.hostPlatform.system}.default;
+in
 {
   # xdg-user-dirs-update がシステムロケール(ja_JP)を見てディレクトリ名を
   # 日本語に上書きするのを防ぐ。en_US で作成済みと宣言しておく。
@@ -9,6 +12,18 @@
     exec = "/home/morikawa/.local/share/voicevox/voicevox.sh";
     icon = "audio-x-generic";
     categories = [ "AudioVideo" "Audio" ];
+  };
+
+  home.packages = [ gameLibrary ];
+
+  xdg.desktopEntries.game-library = {
+    name = "Game Library";
+    genericName = "Windows Game Launcher";
+    comment = "Search and launch locally managed Windows games";
+    exec = "${gameLibrary}/bin/game-library --manifest-dir /home/morikawa/workspace/windows-game-pilot --history /home/morikawa/.local/state/game-library/history.sqlite3 --umu-path /run/current-system/sw/bin/umu-run qml-gui";
+    icon = "applications-games";
+    terminal = false;
+    categories = [ "Game" ];
   };
 
   xdg = {
