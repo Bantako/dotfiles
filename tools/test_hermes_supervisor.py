@@ -10748,7 +10748,7 @@ print(json.dumps(task, separators=(',', ':')))
             with self.assertRaises(hermes_supervisor.AuditError):
                 audit.append(dict(terminal, status="failed", failure_code="watch_failed"))
 
-    def test_watch_pending_survives_base_exception_and_retry_is_separate_invocation(self) -> None:
+    def test_watch_pending_from_base_exception_is_terminalized_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
             root = Path(directory)
@@ -10775,9 +10775,40 @@ print(json.dumps(task, separators=(',', ':')))
             )
             records = audit.read_records()
             self.assertEqual(len(records), 2)
-            self.assertEqual([record["status"] for record in records], ["pending", "completed"])
+            self.assertEqual([record["status"] for record in records], ["failed", "completed"])
+            self.assertEqual(records[0]["failure_code"], "watch_interrupted")
             self.assertNotEqual(records[0]["batch_id"], records[1]["batch_id"])
-            self.assertEqual(records[0], pending[0])
+            self.assertEqual(records[0]["batch_id"], pending[0]["batch_id"])
+
+    def test_watch_pending_recovery_is_bounded_and_does_not_touch_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            for index in range(10):
+                audit.append(self.audit_record(
+                    batch_id=f"watch-poll-stale-{index}",
+                    status="pending",
+                    failure_code=None,
+                    finished_at=100.0,
+                ))
+            audit.append(self.audit_record(
+                batch_id="control-stale",
+                status="pending",
+                failure_code=None,
+                finished_at=100.0,
+            ))
+
+            self.assertEqual(hermes_supervisor._recover_interrupted_watch_audits(audit), 8)
+
+            records = audit.read_records()
+            self.assertEqual(
+                [record["status"] for record in records[:10]],
+                ["failed"] * 8 + ["pending"] * 2,
+            )
+            self.assertTrue(all(
+                record["failure_code"] == "watch_interrupted"
+                for record in records[:8]
+            ))
+            self.assertEqual(records[10]["status"], "pending")
 
     def test_watch_caught_failure_finalizes_safe_code_and_ten_minute_buckets_are_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

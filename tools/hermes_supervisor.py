@@ -9233,6 +9233,30 @@ def _reconcile_watch_audit(store: StateStore, audit: RunAuditLog) -> SupervisorS
         return _reconcile_watch_audit_unlocked(store, audit, state)
 
 
+_WATCH_AUDIT_RECOVERY_MAX = 8
+
+
+def _recover_interrupted_watch_audits(audit: RunAuditLog) -> int:
+    if not audit.path.exists():
+        return 0
+    recovered = 0
+    for record in audit.read_records():
+        if recovered >= _WATCH_AUDIT_RECOVERY_MAX:
+            break
+        if (
+            record["status"] == "pending"
+            and record["batch_id"].startswith("watch-poll-")
+        ):
+            audit.append(_watch_audit_record(
+                None,
+                record,
+                status="failed",
+                failure_code="watch_interrupted",
+            ))
+            recovered += 1
+    return recovered
+
+
 def run_watch_cycle(
     store: StateStore,
     state_db: Path,
@@ -9266,6 +9290,8 @@ def run_watch_cycle(
             if audit is None:
                 raise AuditError("pending audit requires configured watch audit")
             _reconcile_watch_audit(store, audit)
+    if audit is not None:
+        _recover_interrupted_watch_audits(audit)
     invocation_epoch = SupervisorBatchService._epoch(now)
     invocation_tick = invocation_epoch * 1_000_000 + now.microsecond
     scheduled_epoch = float(invocation_epoch // 600 * 600)
