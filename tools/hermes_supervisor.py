@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, replace
@@ -7115,7 +7116,7 @@ def _audit_id(value: Any, label: str, *, nullable: bool = False) -> str | None:
 
 
 def _audit_count(value: Any, label: str) -> int:
-    if type(value) is not int or not 0 <= value <= 1_000_000_000:
+    if type(value) is not int or value < 0:
         raise AuditError(f"invalid {label}")
     return value
 
@@ -7831,45 +7832,93 @@ def _acceptance_json(path: Path, label: str, maximum: int) -> tuple[Any, bytes]:
     ), payload
 
 
+_ACCEPTANCE_KANBAN_MAX_BYTES = 64 * 1024 * 1024
+_ACCEPTANCE_KANBAN_SOURCE_FILES = (
+    ("", "acceptance Kanban database"),
+    ("-wal", "acceptance Kanban WAL"),
+    ("-shm", "acceptance Kanban SHM"),
+    ("-journal", "acceptance Kanban rollback journal"),
+)
+
+
+def _acceptance_kanban_source_snapshot(path: Path) -> dict[str, bytes]:
+    def capture() -> dict[str, bytes]:
+        remaining = _ACCEPTANCE_KANBAN_MAX_BYTES
+        captured: dict[str, bytes] = {}
+        for suffix, label in _ACCEPTANCE_KANBAN_SOURCE_FILES:
+            candidate = path.with_name(path.name + suffix)
+            if suffix:
+                try:
+                    os.stat(candidate, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise AcceptanceError(f"cannot read {label}") from error
+            payload = _acceptance_file(candidate, label, remaining)
+            captured[suffix] = payload
+            remaining -= len(payload)
+        return captured
+
+    first = capture()
+    second = capture()
+    if first.keys() != second.keys() or any(
+        first[suffix] != second[suffix] for suffix in first
+    ):
+        raise AcceptanceError("acceptance Kanban source changed during snapshot")
+    return first
+
+
 def _acceptance_kanban_counts(path: Path) -> tuple[dict[str, int], bytes]:
     if type(path) is not type(Path()) or not path.is_absolute():
         raise AcceptanceError("invalid kanban database path")
-    file_fd = -1
-    connection: sqlite3.Connection | None = None
-    transaction_started = False
+    source: sqlite3.Connection | None = None
+    destination: sqlite3.Connection | None = None
+    snapshot: sqlite3.Connection | None = None
+    snapshot_transaction_started = False
+    snapshot_directory: tempfile.TemporaryDirectory[str] | None = None
     primary: AcceptanceError | None = None
     result_value: tuple[dict[str, int], bytes] | None = None
     try:
-        file_fd = os.open(
-            path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        source_files = _acceptance_kanban_source_snapshot(path)
+        temporary = tempfile.TemporaryDirectory(
+            prefix="hermes-supervisor-acceptance-"
         )
-        metadata = os.fstat(file_fd)
-        if (
-            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-            or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_size > 64 * 1024 * 1024
-        ):
-            raise AcceptanceError("invalid kanban database file")
-        chunks = []
-        remaining = metadata.st_size
-        while remaining:
-            chunk = os.read(file_fd, min(remaining, 64 * 1024))
-            if not chunk:
-                raise AcceptanceError("kanban database changed during read")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(file_fd, 1):
-            raise AcceptanceError("kanban database changed during read")
-        payload = b"".join(chunks)
-        connection = sqlite3.connect(
-            f"file:/proc/self/fd/{file_fd}?mode=ro", uri=True, isolation_level=None
+        snapshot_directory = temporary
+        directory_path = Path(temporary.name)
+        os.chmod(directory_path, 0o700)
+        private_source_path = directory_path / "source.db"
+        for suffix, source_payload in source_files.items():
+            if suffix == "-shm":
+                continue
+            private_path = private_source_path.with_name(private_source_path.name + suffix)
+            private_path.write_bytes(source_payload)
+            private_path.chmod(0o600)
+            _acceptance_file(
+                private_path,
+                "private acceptance Kanban source",
+                _ACCEPTANCE_KANBAN_MAX_BYTES,
+            )
+        source = sqlite3.connect(
+            f"file:{private_source_path}?mode=ro", uri=True, isolation_level=None
         )
-        connection.execute("PRAGMA query_only=ON")
-        connection.execute("BEGIN")
-        transaction_started = True
+        source.execute("PRAGMA query_only=ON")
+        snapshot_path = directory_path / "snapshot.db"
+        destination = sqlite3.connect(snapshot_path, isolation_level=None)
+        source.backup(destination)
+        destination.close()
+        destination = None
+        os.chmod(snapshot_path, 0o600, follow_symlinks=False)
+        payload = _acceptance_file(
+            snapshot_path, "acceptance Kanban snapshot", _ACCEPTANCE_KANBAN_MAX_BYTES
+        )
+        snapshot = sqlite3.connect(
+            f"file:{snapshot_path}?mode=ro", uri=True, isolation_level=None
+        )
+        snapshot.execute("PRAGMA query_only=ON")
+        snapshot.execute("BEGIN")
+        snapshot_transaction_started = True
         for table, expected in _ACCEPTANCE_DB_SCHEMAS.items():
-            rows = connection.execute(
+            rows = snapshot.execute(
                 f"PRAGMA table_info({table})"
             ).fetchall()
             columns = tuple(row[1] for row in rows)
@@ -7884,7 +7933,7 @@ def _acceptance_kanban_counts(path: Path) -> tuple[dict[str, int], bytes]:
                     raise AcceptanceError("unsupported acceptance Kanban schema")
         result = {}
         for table in sorted(_ACCEPTANCE_DB_SCHEMAS):
-            count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            count = snapshot.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             result[table] = _acceptance_count(count, f"{table} rows")
         result_value = result, payload
     except AcceptanceError as error:
@@ -7892,23 +7941,25 @@ def _acceptance_kanban_counts(path: Path) -> tuple[dict[str, int], bytes]:
     except (OSError, sqlite3.Error, ValueError) as error:
         primary = AcceptanceError("acceptance Kanban read failed")
         primary.__cause__ = error
-    if connection is not None:
-        if transaction_started:
-            try:
-                connection.rollback()
-            except sqlite3.Error as error:
-                if primary is None:
-                    primary = AcceptanceError("acceptance Kanban read failed")
-                    primary.__cause__ = error
+    if snapshot is not None and snapshot_transaction_started:
+        try:
+            snapshot.rollback()
+        except sqlite3.Error as error:
+            if primary is None:
+                primary = AcceptanceError("acceptance Kanban read failed")
+                primary.__cause__ = error
+    for connection in (snapshot, destination, source):
+        if connection is None:
+            continue
         try:
             connection.close()
         except sqlite3.Error as error:
             if primary is None:
                 primary = AcceptanceError("acceptance Kanban read failed")
                 primary.__cause__ = error
-    if file_fd >= 0:
+    if snapshot_directory is not None:
         try:
-            os.close(file_fd)
+            snapshot_directory.cleanup()
         except OSError as error:
             if primary is None:
                 primary = AcceptanceError("acceptance Kanban read failed")

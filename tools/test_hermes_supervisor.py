@@ -10055,6 +10055,35 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
         self.assertIsInstance(caught.exception.__cause__, hermes_supervisor.AuditError)
         self.assertEqual(str(caught.exception.__cause__), "invalid message ids")
 
+    def test_watch_audit_accepts_sqlite_ids_above_one_billion(self) -> None:
+        message_ids = [1_000_000_001, 1_000_000_002]
+        event_ids = [1_000_000_003]
+        record = self.audit_record(
+            pre_operation={
+                "state_present": True,
+                "mode": "shadow",
+                "control_state": "running",
+                "last_message_id": message_ids[-1],
+                "last_event_id": event_ids[-1],
+                "last_supervisor_message_id": message_ids[-1],
+                "last_supervisor_event_id": event_ids[-1],
+            },
+            input_message_ids=message_ids,
+            input_event_ids=event_ids,
+            source_ids=[
+                "event:1000000003",
+                "message:1000000001",
+                "message:1000000002",
+            ],
+            capture_relations=[{
+                "source_message_id": message_ids[0],
+                "card_id": "capture-large-id",
+                "relation_kind": "capture",
+            }],
+        )
+
+        self.assertIs(hermes_supervisor.validate_run_audit_record(record), record)
+
     def test_pending_audit_state_schema_is_closed_bounded_and_v3_round_trips_exactly(self) -> None:
         terminal = self.audit_record()
         pending = {
@@ -11368,10 +11397,14 @@ class Task12AcceptanceReportTests(unittest.TestCase):
                 CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT);
                 CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, run_id INTEGER, kind TEXT, created_at INTEGER);
             """)
+        paths["kanban.db"].chmod(0o600)
+        _, kanban_snapshot = hermes_supervisor._acceptance_kanban_counts(
+            paths["kanban.db"]
+        )
         digests = {
-            name: hashlib.sha256(paths[filename].read_bytes()).hexdigest()
-            for name, filename in (("state", "state.json"), ("audit", "audit.jsonl"),
-                                   ("kanban_db", "kanban.db"))
+            "state": hashlib.sha256(paths["state.json"].read_bytes()).hexdigest(),
+            "audit": hashlib.sha256(paths["audit.jsonl"].read_bytes()).hexdigest(),
+            "kanban_db": hashlib.sha256(kanban_snapshot).hexdigest(),
         }
         evidence["source_digests"] = digests
         paths["evidence.json"].write_text(json.dumps(evidence, sort_keys=True), encoding="ascii")
@@ -11425,6 +11458,75 @@ class Task12AcceptanceReportTests(unittest.TestCase):
                         hermes_supervisor.AcceptanceError, "unsupported acceptance Kanban schema"
                     ):
                         self.build(mutant_paths)
+
+    def test_acceptance_kanban_digest_is_the_exact_queried_wal_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            source_database = paths["kanban.db"]
+            with closing(sqlite3.connect(source_database)) as writer:
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+                writer.execute("PRAGMA wal_autocheckpoint=0")
+                writer.execute(
+                    """INSERT INTO tasks (
+                           id, title, status, created_at, workspace_kind,
+                           consecutive_failures, goal_mode, block_recurrences
+                       ) VALUES ('wal-only', 'WAL only', 'pending', 1, 'scratch', 0, 0, 0)"""
+                )
+                writer.commit()
+                source_wal = source_database.with_name(source_database.name + "-wal")
+                sealed_root = Path(directory) / "sealed"
+                sealed_root.mkdir(mode=0o700)
+                database = sealed_root / "kanban.db"
+                wal_path = sealed_root / "kanban.db-wal"
+                database.write_bytes(source_database.read_bytes())
+                wal_path.write_bytes(source_wal.read_bytes())
+                database.chmod(0o600)
+                wal_path.chmod(0o600)
+                shm_path = database.with_name(database.name + "-shm")
+                self.assertTrue(wal_path.exists())
+                self.assertFalse(shm_path.exists())
+                source_before = database.read_bytes()
+                wal_before = wal_path.read_bytes()
+
+                counts, snapshot = hermes_supervisor._acceptance_kanban_counts(database)
+
+                self.assertEqual(database.read_bytes(), source_before)
+                self.assertEqual(wal_path.read_bytes(), wal_before)
+                self.assertFalse(shm_path.exists())
+                snapshot_path = Path(directory) / "queried-snapshot.db"
+                snapshot_path.write_bytes(snapshot)
+                snapshot_path.chmod(0o600)
+                with closing(sqlite3.connect(
+                    f"file:{snapshot_path}?mode=ro", uri=True
+                )) as connection:
+                    snapshot_count = connection.execute(
+                        "SELECT count(*) FROM tasks"
+                    ).fetchone()[0]
+                self.assertEqual(counts["tasks"], 1)
+                self.assertEqual(snapshot_count, counts["tasks"])
+
+    def test_acceptance_rejects_unsafe_wal_sidecar_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            database = paths["kanban.db"]
+            with closing(sqlite3.connect(database)) as writer:
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+                writer.execute("PRAGMA wal_autocheckpoint=0")
+                writer.execute(
+                    """INSERT INTO tasks (
+                           id, title, status, created_at, workspace_kind,
+                           consecutive_failures, goal_mode, block_recurrences
+                       ) VALUES ('unsafe-wal', 'unsafe WAL', 'pending', 1, 'scratch', 0, 0, 0)"""
+                )
+                writer.commit()
+                wal_path = database.with_name(database.name + "-wal")
+                wal_path.chmod(0o666)
+
+                with self.assertRaisesRegex(
+                    hermes_supervisor.AcceptanceError,
+                    "invalid acceptance Kanban WAL file",
+                ):
+                    hermes_supervisor._acceptance_kanban_counts(database)
 
     def test_human_assessment_is_explicitly_attested_and_evidence_bound_not_falsely_signed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -11914,19 +12016,32 @@ class Task12AcceptanceReportTests(unittest.TestCase):
 
             connect_error = sqlite3.OperationalError("SECRET_CONNECT")
             with mock.patch.object(hermes_supervisor.sqlite3, "connect", side_effect=connect_error), mock.patch.object(
+                hermes_supervisor.os, "open", wraps=os.open,
+            ) as open_mock, mock.patch.object(
                 hermes_supervisor.os, "close", wraps=os.close,
             ) as close_mock:
                 with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
                     hermes_supervisor._acceptance_kanban_counts(paths["kanban.db"])
             self.assertIs(caught.exception.__cause__, connect_error)
-            self.assertEqual(close_mock.call_count, 1)
+            self.assertGreater(open_mock.call_count, 0)
+            self.assertEqual(close_mock.call_count, open_mock.call_count)
 
             for fail_query, fail_rollback, fail_close in (
                 (True, True, True), (False, True, True), (False, False, True),
             ):
                 fake = FaultConnection(fail_query, fail_rollback, fail_close)
+                real_connect = sqlite3.connect
+                connect_count = 0
+
+                def connect(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal connect_count
+                    connect_count += 1
+                    if connect_count <= 2:
+                        return real_connect(*args, **kwargs)
+                    return fake
+
                 with self.subTest(sqlite=(fail_query, fail_rollback, fail_close)), mock.patch.object(
-                    hermes_supervisor.sqlite3, "connect", return_value=fake,
+                    hermes_supervisor.sqlite3, "connect", side_effect=connect,
                 ):
                     with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
                         hermes_supervisor._acceptance_kanban_counts(paths["kanban.db"])
