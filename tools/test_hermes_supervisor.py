@@ -6,13 +6,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+import stat
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import unittest
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -54,7 +58,8 @@ class ChangeDetectionTests(unittest.TestCase):
                 """
                 CREATE TABLE tasks (
                     id TEXT PRIMARY KEY, status TEXT, assignee TEXT,
-                    result TEXT, block_kind TEXT, current_run_id INTEGER
+                    result TEXT, block_kind TEXT, current_run_id INTEGER,
+                    created_by TEXT, idempotency_key TEXT
                 );
                 CREATE TABLE task_events (
                     id INTEGER PRIMARY KEY, task_id, run_id INTEGER,
@@ -149,6 +154,91 @@ class ChangeDetectionTests(unittest.TestCase):
         self.assertEqual(third, ())
         self.assertEqual(third_mark, 2)
 
+    def test_legacy_message_reader_consumes_bounded_raw_prefix_before_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, _ = self.make_databases(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 's1', 'assistant', ?, ?, 1, 0)",
+                    ((index, f"UNREAD-{index}", index) for index in range(1, 257)),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (257, 's1', 'user', 'late', 257, 1, 0)"
+                )
+            original_open = hermes_supervisor._open_readonly
+            content_queries: list[str] = []
+
+            class ContentSpy:
+                def __init__(self, connection: sqlite3.Connection):
+                    self.connection = connection
+
+                def execute(self, sql: str, parameters: object = ()):
+                    if "content" in sql.lower() and "pragma" not in sql.lower():
+                        content_queries.append(sql)
+                    return self.connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+                def __getattr__(self, name: str):
+                    return getattr(self.connection, name)
+
+            with mock.patch.object(
+                hermes_supervisor, "_open_readonly",
+                side_effect=lambda path: ContentSpy(original_open(path)),
+            ):
+                first, first_mark = hermes_supervisor._read_messages(state_db, 0)
+                first_content_queries = list(content_queries)
+                second, second_mark = hermes_supervisor._read_messages(
+                    state_db, first_mark
+                )
+
+            self.assertEqual((first, first_mark), ((), 256))
+            self.assertEqual(first_content_queries, [])
+            self.assertEqual(([item.id for item in second], second_mark), ([257], 257))
+            self.assertEqual(second[0].content, "late")
+
+    def test_legacy_readers_reject_cursor_ahead_of_whole_database_high_water(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.make_databases(directory)
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "state.db: message cursor exceeds high-water id",
+            ):
+                hermes_supervisor._read_messages(state_db, 1)
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "kanban.db: event cursor exceeds high-water id",
+            ):
+                hermes_supervisor._read_events(kanban_db, 1)
+
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 's1', ?, '', ?, 1, 0)",
+                    ((1, "user", 1), (5, "assistant", 5)),
+                )
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'task', NULL, ?, '{}', ?)",
+                    ((1, "blocked", 1), (5, "assigned", 5)),
+                )
+
+            gap_messages, message_gap_mark = hermes_supervisor._read_messages(state_db, 3)
+            exact_messages, message_exact_mark = hermes_supervisor._read_messages(state_db, 5)
+            gap_events, event_gap_mark = hermes_supervisor._read_events(kanban_db, 3)
+            exact_events, event_exact_mark = hermes_supervisor._read_events(kanban_db, 5)
+            self.assertEqual((gap_messages, message_gap_mark), ((), 5))
+            self.assertEqual((exact_messages, message_exact_mark), ((), 5))
+            self.assertEqual((gap_events, event_gap_mark), ((), 5))
+            self.assertEqual((exact_events, event_exact_mark), ((), 5))
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_messages(state_db, 6)
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_events(kanban_db, 6)
+
     def test_event_poll_uses_one_snapshot_for_high_water_rows_and_actor_queries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, kanban_db = self.make_databases(directory)
@@ -202,12 +292,150 @@ class ChangeDetectionTests(unittest.TestCase):
         self.assertEqual(third, ())
         self.assertEqual(third_mark, 3)
 
+    def test_legacy_event_reader_consumes_bounded_raw_prefix_before_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, kanban_db = self.make_databases(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'task', NULL, 'assigned', ?, ?)",
+                    ((index, f'{{"secret":"UNREAD-{index}"}}', index)
+                     for index in range(1, 257)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (257, 'task', NULL, 'blocked', '{}', 257)"
+                )
+            original_open = hermes_supervisor._open_readonly
+            payload_queries: list[str] = []
+
+            class PayloadSpy:
+                def __init__(self, connection: sqlite3.Connection):
+                    self.connection = connection
+
+                def execute(self, sql: str, parameters: object = ()):
+                    if "payload" in sql.lower() and "pragma" not in sql.lower():
+                        payload_queries.append(sql)
+                    return self.connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+                def __getattr__(self, name: str):
+                    return getattr(self.connection, name)
+
+            with mock.patch.object(
+                hermes_supervisor, "_open_readonly",
+                side_effect=lambda path: PayloadSpy(original_open(path)),
+            ):
+                first, first_mark = hermes_supervisor._read_events(kanban_db, 0)
+                first_payload_queries = list(payload_queries)
+                second, second_mark = hermes_supervisor._read_events(
+                    kanban_db, first_mark
+                )
+
+            self.assertEqual((first, first_mark), ((), 256))
+            self.assertEqual(first_payload_queries, [])
+            self.assertEqual(([item.id for item in second], second_mark), ([257], 257))
+            self.assertEqual(second[0].payload, {})
+
+    def test_legacy_reader_cap_boundaries_gaps_and_late_invalid_rows(self) -> None:
+        for count in (255, 256, 257):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                state_db, kanban_db = self.make_databases(directory)
+                with closing(sqlite3.connect(state_db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                    )
+                    connection.executemany(
+                        "INSERT INTO messages VALUES (?, 's1', 'assistant', '', ?, 1, 0)",
+                        ((index * 2, index) for index in range(1, count + 1)),
+                    )
+                with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                    connection.executemany(
+                        "INSERT INTO task_events VALUES (?, 'task', NULL, 'assigned', '{}', ?)",
+                        ((index * 2, index) for index in range(1, count + 1)),
+                    )
+                messages, message_mark = hermes_supervisor._read_messages(state_db, 0)
+                events, event_mark = hermes_supervisor._read_events(kanban_db, 0)
+                expected = min(count, 256) * 2
+                self.assertEqual((messages, message_mark), ((), expected))
+                self.assertEqual((events, event_mark), ((), expected))
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.make_databases(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 's1', 'assistant', '', ?, 1, 0)",
+                    ((index, index) for index in range(1, 257)),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (257, 's1', 'user', ?, 257, 1, 0)",
+                    ("x" * (hermes_supervisor._CAPTURE_CONTENT_MAX_BYTES + 1),),
+                )
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'task', NULL, 'assigned', '{}', ?)",
+                    ((index, index) for index in range(1, 257)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (257, 'task', NULL, 'blocked', '{', 257)"
+                )
+            self.assertEqual(hermes_supervisor._read_messages(state_db, 0), ((), 256))
+            self.assertEqual(hermes_supervisor._read_events(kanban_db, 0), ((), 256))
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_messages(state_db, 256)
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_events(kanban_db, 256)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute("UPDATE messages SET content='late' WHERE id=257")
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.execute("UPDATE task_events SET payload='{}' WHERE id=257")
+            self.assertEqual(
+                [item.id for item in hermes_supervisor._read_messages(state_db, 256)[0]],
+                [257],
+            )
+            self.assertEqual(
+                [item.id for item in hermes_supervisor._read_events(kanban_db, 256)[0]],
+                [257],
+            )
+
+    def test_legacy_reader_peak_memory_is_backlog_independent(self) -> None:
+        def probe(count: int) -> tuple[int, tuple[int, int, int, int]]:
+            with tempfile.TemporaryDirectory() as directory:
+                state_db, kanban_db = self.make_databases(directory)
+                with closing(sqlite3.connect(state_db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                    )
+                    connection.executemany(
+                        "INSERT INTO messages VALUES (?, 's1', 'assistant', ?, ?, 1, 0)",
+                        ((index, "x" * 1024, index) for index in range(1, count + 1)),
+                    )
+                with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                    connection.executemany(
+                        "INSERT INTO task_events VALUES (?, 'task', NULL, 'assigned', ?, ?)",
+                        ((index, '{"padding":"' + "x" * 1000 + '"}', index)
+                         for index in range(1, count + 1)),
+                    )
+                tracemalloc.start()
+                messages, message_mark = hermes_supervisor._read_messages(state_db, 0)
+                events, event_mark = hermes_supervisor._read_events(kanban_db, 0)
+                _, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+                return peak, (len(messages), message_mark, len(events), event_mark)
+
+        small_peak, small_result = probe(1_000)
+        large_peak, large_result = probe(10_000)
+        self.assertEqual(small_result, (0, 256, 0, 256))
+        self.assertEqual(large_result, small_result)
+        self.assertLess(large_peak, small_peak * 3)
+
     def test_detects_actual_terminal_and_rejection_event_representations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.make_databases(directory)
             with closing(sqlite3.connect(kanban_db)) as connection, connection:
                 connection.executemany(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tasks (id,status,assignee,result,block_kind,current_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [
                         ("done", "done", "builder", "ok", None, None),
                         ("human", "blocked", "builder", None, "needs_input", None),
@@ -247,7 +475,8 @@ class ChangeDetectionTests(unittest.TestCase):
             state_db, kanban_db = self.make_databases(directory)
             with closing(sqlite3.connect(kanban_db)) as connection, connection:
                 connection.execute(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tasks (id,status,assignee,result,block_kind,current_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     ("review", "done", "builder", "later", None, None),
                 )
                 connection.execute(
@@ -315,7 +544,8 @@ class ChangeDetectionTests(unittest.TestCase):
                 )
             with closing(sqlite3.connect(kanban_db)) as connection, connection:
                 connection.execute(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tasks (id,status,assignee,result,block_kind,current_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     ("task", "blocked", "worker", None, None, None),
                 )
                 connection.executemany(
@@ -941,7 +1171,7 @@ class SupervisorStateTests(unittest.TestCase):
             self.assertEqual(
                 state,
                 hermes_supervisor.SupervisorState(
-                    schema_version=2,
+                    schema_version=3,
                     mode="shadow",
                     control_state="running",
                     last_message_id=0,
@@ -1060,25 +1290,118 @@ class SupervisorStateTests(unittest.TestCase):
                     with self.assertRaises(hermes_supervisor.StateError):
                         store.read()
 
-    def test_raw_v1_migrates_in_memory_and_next_write_is_canonical_v2(self) -> None:
+    def test_pending_source_id_state_is_positive_unique_bounded_and_order_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             store = hermes_supervisor.StateStore(path)
-            current = store.initialize()
-            legacy = json.loads(path.read_text(encoding="utf-8"))
-            legacy["schema_version"] = 1
-            del legacy["last_supervisor_message_id"]
-            del legacy["last_supervisor_event_id"]
-            path.write_text(json.dumps(legacy), encoding="utf-8")
+            store.initialize()
+            valid = json.loads(path.read_text(encoding="utf-8"))
 
-            migrated = store.read()
-            self.assertEqual(migrated.schema_version, 2)
-            self.assertEqual(migrated.last_supervisor_message_id, 0)
-            self.assertEqual(migrated.last_supervisor_event_id, 0)
-            store.write(migrated)
-            rewritten = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(rewritten["schema_version"], 2)
-            self.assertEqual(set(rewritten), set(asdict(current)))
+            compatible = dict(valid)
+            compatible["last_message_id"] = 2
+            compatible["last_event_id"] = 2
+            compatible["pending_message_ids"] = [2, 1]
+            compatible["pending_event_ids"] = [2, 1]
+            path.write_text(json.dumps(compatible), encoding="utf-8")
+            loaded = store.read()
+            self.assertEqual(loaded.pending_message_ids, (2, 1))
+            self.assertEqual(loaded.pending_event_ids, (2, 1))
+            store.write(loaded)
+            round_tripped = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(round_tripped["pending_message_ids"], [2, 1])
+            self.assertEqual(round_tripped["pending_event_ids"], [2, 1])
+
+            cases = {
+                "zero": [0],
+                "negative": [-1],
+                "bool": [True],
+                "duplicate": [1, 1],
+                "too-many": list(range(1, hermes_supervisor._STATE_MAX_PENDING_IDS + 2)),
+            }
+            for pending_key, cursor_key in (
+                ("pending_message_ids", "last_message_id"),
+                ("pending_event_ids", "last_event_id"),
+            ):
+                for name, ids in cases.items():
+                    with self.subTest(pending_key=pending_key, name=name):
+                        malformed = dict(valid)
+                        malformed[cursor_key] = max(
+                            (item for item in ids if type(item) is int and item > 0),
+                            default=1,
+                        )
+                        malformed[pending_key] = ids
+                        path.write_text(json.dumps(malformed), encoding="utf-8")
+                        with self.assertRaises(hermes_supervisor.StateError):
+                            store.read()
+
+    def test_raw_v1_and_v2_migrate_in_memory_and_next_write_is_canonical_v3(self) -> None:
+        for version in (1, 2):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                store = hermes_supervisor.StateStore(path)
+                current = store.initialize()
+                legacy = json.loads(path.read_text(encoding="utf-8"))
+                legacy["schema_version"] = version
+                del legacy["pending_audit_completion"]
+                if version == 1:
+                    del legacy["last_supervisor_message_id"]
+                    del legacy["last_supervisor_event_id"]
+                path.write_text(json.dumps(legacy), encoding="utf-8")
+
+                migrated = store.read()
+                self.assertEqual(migrated.schema_version, 3)
+                self.assertEqual(migrated.last_supervisor_message_id, 0)
+                self.assertEqual(migrated.last_supervisor_event_id, 0)
+                self.assertIsNone(migrated.pending_audit_completion)
+                store.write(migrated)
+                rewritten = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(rewritten["schema_version"], 3)
+                self.assertEqual(set(rewritten), set(asdict(current)))
+
+    def test_legacy_versions_cannot_carry_pending_audit_and_atomic_clear_fault_keeps_bytes(self) -> None:
+        completion_id = hermes_supervisor._resume_intent_key((7,), ())
+        terminal = {
+            "schema_version": 1, "kind": "resume_result", "timestamp": 1,
+            "action": "resume", "message_count": 1, "event_count": 0,
+            "outcome": "scheduled", "task_id": "resume-task",
+            "completion_id": completion_id,
+        }
+        completion = hermes_supervisor._state_pending_audit({
+            "channel": "control", "operation_id": completion_id,
+            "terminal_record": terminal,
+        })
+        assert completion is not None
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            store = hermes_supervisor.StateStore(path)
+            pending_state = replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=7, pending_message_ids=(7,),
+                pending_audit_completion=completion,
+            )
+            store.write(pending_state)
+            canonical = json.loads(path.read_text(encoding="utf-8"))
+            for version in (1, 2):
+                with self.subTest(version=version):
+                    mixed = dict(canonical, schema_version=version)
+                    if version == 1:
+                        mixed.pop("last_supervisor_message_id")
+                        mixed.pop("last_supervisor_event_id")
+                    path.write_text(json.dumps(mixed), encoding="utf-8")
+                    with self.assertRaises(hermes_supervisor.StateError):
+                        store.read()
+            store.write(pending_state)
+            old_bytes = path.read_bytes()
+            with mock.patch.object(
+                hermes_supervisor.os, "replace", side_effect=OSError("injected clear replace")
+            ):
+                with self.assertRaises(hermes_supervisor.StateError):
+                    store.write(replace(
+                        pending_state, pending_message_ids=(),
+                        pending_audit_completion=None,
+                    ))
+            self.assertEqual(path.read_bytes(), old_bytes)
+            self.assertEqual(store.read(), pending_state)
 
     def test_raw_v1_with_mixed_v2_keys_and_schema1_dataclass_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1753,6 +2076,7 @@ class SupervisorStateTests(unittest.TestCase):
                     "--audit", str(path.parent / "audit.jsonl"),
                     "--board", "fixture",
                     "--hermes", "/fake/hermes",
+                    "--kanban-home", str(Path(directory) / "hermes"),
                     "pause",
                 ],
                 capture_output=True, text=True, check=False,
@@ -1817,6 +2141,95 @@ class WatchCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+    def test_public_dry_run_converges_finite_prefixes_without_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('s1', 'cli', 'capture', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 's1', 'assistant', ?, ?, 1, 0)",
+                    ((index, f"UNREAD-{index}", index) for index in range(1, 4097)),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (4097, 's1', 'user', 'late', 4097, 1, 0)"
+                )
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'task', NULL, 'assigned', ?, ?)",
+                    ((index, f'{{"secret":"UNREAD-{index}"}}', index)
+                     for index in range(1, 1025)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (1025, 'task', NULL, 'blocked', '{}', 1025)"
+                )
+            state = Path(directory) / "state.json"
+            audit = Path(directory) / "audit.jsonl"
+            marker = Path(directory) / "hermes-called"
+            fake = Path(directory) / "hermes"
+            fake.write_text(f"#!/bin/sh\ntouch {marker}\nexit 99\n", encoding="utf-8")
+            fake.chmod(0o700)
+            before = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (state_db, kanban_db)
+            }
+            message_cursor = event_cursor = 0
+            reports: list[dict[str, object]] = []
+            for _ in range(18):
+                result = self.run_watch(
+                    state_db, kanban_db,
+                    "--last-message-id", str(message_cursor),
+                    "--last-event-id", str(event_cursor),
+                    "--audit", str(audit),
+                    "--hermes", str(fake),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(result.stdout, "")
+                report = json.loads(result.stdout)
+                reports.append(report)
+                next_message = report["proposed_message_id"]
+                next_event = report["proposed_event_id"]
+                self.assertIn(next_message - message_cursor, range(0, 257))
+                self.assertIn(next_event - event_cursor, range(0, 257))
+                self.assertGreater(
+                    (next_message - message_cursor) + (next_event - event_cursor), 0
+                )
+                message_cursor, event_cursor = next_message, next_event
+                if (message_cursor, event_cursor) == (4097, 1025):
+                    break
+            settled = self.run_watch(
+                state_db, kanban_db,
+                "--last-message-id", str(message_cursor),
+                "--last-event-id", str(event_cursor),
+            )
+            after = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (state_db, kanban_db)
+            }
+
+            self.assertEqual((message_cursor, event_cursor), (4097, 1025))
+            self.assertEqual(
+                [item["id"] for report in reports
+                 for item in cast(list[dict[str, object]], report["messages"])],
+                [4097],
+            )
+            self.assertEqual(
+                [item["id"] for report in reports
+                 for item in cast(list[dict[str, object]], report["events"])],
+                [1025],
+            )
+            self.assertEqual(settled.returncode, 0, settled.stderr)
+            self.assertEqual(settled.stdout, "")
+            self.assertEqual(after, before)
+            self.assertFalse(state.exists())
+            self.assertFalse(audit.exists())
+            self.assertFalse(marker.exists())
+            self.assertEqual(
+                sorted(path.name for path in Path(directory).iterdir()),
+                ["hermes", "kanban.db", "state.db"],
+            )
 
     def test_dry_run_uses_existing_state_cursor_without_writing_or_hermes_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1912,6 +2325,101 @@ class WatchCliTests(unittest.TestCase):
         self.assertEqual(persisted["mode"], "shadow")
         self.assertFalse(marker.exists())
 
+    def test_public_watch_converges_4097_raw_rows_and_keeps_self_safety_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('machine', 'cron', 'machine', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 'machine', 'user', '', ?, 1, 0)",
+                    ((identifier, identifier) for identifier in range(1, 4098)),
+                )
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES "
+                    "('own', 'done', 'supervisor', NULL, NULL, NULL, "
+                    "'supervisor-watcher', 'supervisor-batch:v2:public-smoke')"
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'own', NULL, ?, ?, ?)",
+                    (
+                        (1, "blocked", '{\"safety_critical\":true}', 1),
+                        (2, "completed", "{}", 2),
+                    ),
+                )
+            fake = Path(directory) / "hermes"
+            fake.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+log = os.environ['FAKE_LOG']
+args = sys.argv[1:]
+if args[:2] != ['kanban', 'create'] or '--json' not in args:
+    raise SystemExit(2)
+body = args[args.index('--body') + 1]
+key = args[args.index('--idempotency-key') + 1]
+with open(log, 'a', encoding='utf-8') as stream:
+    stream.write(json.dumps({'key': key, 'body': json.loads(body)}, sort_keys=True) + '\\n')
+print(json.dumps({
+    'id': 'batch-public-smoke', 'title': args[2], 'status': 'triage',
+    'body': body, 'assignee': 'supervisor', 'existing': False,
+}, sort_keys=True))
+""", encoding="utf-8")
+            fake.chmod(0o700)
+            log = Path(directory) / "calls.jsonl"
+            state = Path(directory) / "state" / "state.json"
+            environment = dict(os.environ)
+            environment["FAKE_LOG"] = str(log)
+            cursors = []
+
+            for _ in range(20):
+                result = subprocess.run(
+                    [
+                        sys.executable, str(CLI), "watch", "--policy", str(POLICY),
+                        "--state-db", str(state_db), "--kanban-db", str(kanban_db),
+                        "--state", str(state), "--hermes", str(fake),
+                        "--board", "supervisor-smoke",
+                    ],
+                    capture_output=True, text=True, check=False, env=environment,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                persisted = json.loads(state.read_text(encoding="utf-8"))
+                cursors.append(persisted["last_supervisor_message_id"])
+                if (
+                    persisted["last_supervisor_message_id"] == 4097
+                    and persisted["last_supervisor_event_id"] == 2
+                ):
+                    settled = subprocess.run(
+                        [
+                            sys.executable, str(CLI), "watch", "--policy", str(POLICY),
+                            "--state-db", str(state_db), "--kanban-db", str(kanban_db),
+                            "--state", str(state), "--hermes", str(fake),
+                            "--board", "supervisor-smoke",
+                        ],
+                        capture_output=True, text=True, check=False, env=environment,
+                    )
+                    self.assertEqual(settled.returncode, 0, settled.stderr)
+                    self.assertEqual(settled.stdout, "")
+                    break
+            else:
+                self.fail("public watch did not converge")
+
+            calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(cursors[-1], 4097)
+        self.assertTrue(all(
+            0 < current - previous <= hermes_supervisor._BATCH_PAGE_MAX_MESSAGES
+            for previous, current in zip((0, *cursors), cursors)
+        ))
+        self.assertEqual(len(calls), 1)
+        body = calls[0]["body"]
+        self.assertEqual(body["message_ids"], [])
+        self.assertEqual(body["event_ids"], [1])
+        self.assertEqual([event["kind"] for event in body["events"]], ["blocked"])
+        self.assertTrue(all(
+            type(identifier) is int and identifier > 0
+            for identifier in (*body["message_ids"], *body["event_ids"])
+        ))
+
     def test_changes_emit_one_safe_json_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
@@ -1926,7 +2434,8 @@ class WatchCliTests(unittest.TestCase):
                 )
             with closing(sqlite3.connect(kanban_db)) as connection, connection:
                 connection.execute(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tasks (id,status,assignee,result,block_kind,current_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     ("task", "done", "builder", "private result", None, None),
                 )
                 connection.execute(
@@ -1989,7 +2498,8 @@ class WatchCliTests(unittest.TestCase):
             state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
             with closing(sqlite3.connect(kanban_db)) as connection, connection:
                 connection.executemany(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tasks (id,status,assignee,result,block_kind,current_run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [
                         ("build", "done", "other", "later", None, None),
                         ("review", "done", "builder", "later", None, None),
@@ -2759,7 +3269,7 @@ class CaptureServiceTests(unittest.TestCase):
             ])
         return state_db, kanban_db
 
-    def test_running_and_paused_capture_then_second_run_is_noop(self) -> None:
+    def test_running_and_paused_observe_then_second_run_is_noop(self) -> None:
         for control in ("running", "paused"):
             with self.subTest(control=control), tempfile.TemporaryDirectory() as directory:
                 state_db, kanban_db = self.fixture(directory, [(1, "user", "intent"), (2, "assistant", "tail")])
@@ -2771,12 +3281,145 @@ class CaptureServiceTests(unittest.TestCase):
                 service = hermes_supervisor.CaptureService(client)
                 first = service.run_once(store, state_db, kanban_db)
                 second = service.run_once(store, state_db, kanban_db)
-                self.assertEqual(len(client.calls), 1)
-                self.assertEqual([card.id for card in first.cards], ["task-1"])
+                self.assertEqual(client.calls, [])
+                self.assertEqual(first.cards, ())
                 self.assertEqual(second.cards, ())
                 self.assertEqual(second.state.last_message_id, 2)
 
-    def test_frozen_observes_backlog_then_resume_projects_it_and_emergency_does_nothing(self) -> None:
+    def test_capture_readers_reject_inverted_cursor_before_pending_or_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as empty_directory:
+            empty_state, empty_kanban = ChangeDetectionTests.make_databases(empty_directory)
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_capture_messages(
+                    empty_state, 1, (), limit=64, frozen=False
+                )
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor._read_capture_events(empty_kanban, 1, limit=256)
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.fixture(
+                directory,
+                [(1, "user", "source"), (5, "assistant", "irrelevant")],
+                [(1, "blocked"), (5, "assigned")],
+            )
+            gap_messages, message_gap_mark = hermes_supervisor._read_capture_messages(
+                state_db, 3, (), limit=64, frozen=False
+            )
+            exact_messages, message_exact_mark = hermes_supervisor._read_capture_messages(
+                state_db, 5, (), limit=64, frozen=False
+            )
+            gap_events, event_gap_mark = hermes_supervisor._read_capture_events(
+                kanban_db, 3, limit=256
+            )
+            exact_events, event_exact_mark = hermes_supervisor._read_capture_events(
+                kanban_db, 5, limit=256
+            )
+            self.assertEqual((gap_messages, message_gap_mark), ((), 5))
+            self.assertEqual((exact_messages, message_exact_mark), ((), 5))
+            self.assertEqual((gap_events, event_gap_mark), ((), 5))
+            self.assertEqual((exact_events, event_exact_mark), ((), 5))
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "state.db: message cursor exceeds high-water id",
+            ):
+                hermes_supervisor._read_capture_messages(
+                    state_db, 6, (1,), limit=0, frozen=False
+                )
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "kanban.db: event cursor exceeds high-water id",
+            ):
+                hermes_supervisor._read_capture_events(kanban_db, 6, limit=0)
+
+    def test_capture_message_and_event_polls_share_snapshot_with_concurrent_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.fixture(
+                directory, [(1, "user", "first")], [(1, "blocked")]
+            )
+            for path in (state_db, kanban_db):
+                with closing(sqlite3.connect(path)) as writer, writer:
+                    writer.execute("PRAGMA journal_mode=WAL")
+            original_open = hermes_supervisor._open_readonly
+            inserted: set[Path] = set()
+
+            class InsertBeforeRows:
+                def __init__(self, path: Path, connection: sqlite3.Connection):
+                    self.path = path
+                    self.connection = connection
+
+                def execute(self, sql: str, parameters: object = ()):
+                    message_rows = "SELECT m.id,m.timestamp,m.compacted" in sql
+                    event_rows = "SELECT id,kind FROM task_events" in sql
+                    if self.path not in inserted and (message_rows or event_rows):
+                        with closing(sqlite3.connect(self.path)) as writer, writer:
+                            if self.path == state_db:
+                                writer.execute(
+                                    "INSERT INTO messages VALUES "
+                                    "(2, 's', 'user', 'late', 2, 1, 0)"
+                                )
+                            else:
+                                writer.execute(
+                                    "INSERT INTO task_events VALUES "
+                                    "(2, 'task', NULL, 'blocked', '{}', 2)"
+                                )
+                        inserted.add(self.path)
+                    return self.connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+                def __getattr__(self, name: str):
+                    return getattr(self.connection, name)
+
+            with mock.patch.object(
+                hermes_supervisor,
+                "_open_readonly",
+                side_effect=lambda path: InsertBeforeRows(path, original_open(path)),
+            ):
+                first = hermes_supervisor.detect_capture_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0, frozen=True,
+                )
+            second = hermes_supervisor.detect_capture_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=first.proposed_message_id,
+                last_event_id=first.proposed_event_id,
+                frozen=True,
+            )
+
+        self.assertEqual([message.id for message in first.messages], [1])
+        self.assertEqual([event.id for event in first.events], [1])
+        self.assertEqual((first.proposed_message_id, first.proposed_event_id), (1, 1))
+        self.assertEqual([message.id for message in second.messages], [2])
+        self.assertEqual([event.id for event in second.events], [2])
+        self.assertEqual((second.proposed_message_id, second.proposed_event_id), (2, 2))
+
+    def test_capture_cursor_inversion_preserves_state_client_audit_and_source_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.fixture(directory, [(1, "user", "source")])
+            store = hermes_supervisor.StateStore(Path(directory) / "supervisor.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=2,
+                pending_message_ids=(1,),
+            ))
+            before = store.path.read_bytes()
+            client = self.Client()
+            audit_path = Path(directory) / "capture-audit.jsonl"
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
+            self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(client.calls, [])
+            self.assertFalse(audit_path.exists())
+            with closing(sqlite3.connect(state_db)) as connection:
+                self.assertEqual(connection.execute("SELECT id FROM messages").fetchall(), [(1,)])
+
+            store.write(replace(
+                store.read(), last_message_id=0, pending_message_ids=()
+            ))
+            recovered = hermes_supervisor.CaptureService(client).run_once(
+                store, state_db, kanban_db
+            )
+            self.assertEqual(recovered.state.last_message_id, 1)
+            self.assertEqual(recovered.state.pending_message_ids, ())
+
+    def test_frozen_observes_backlog_then_resume_acknowledges_it_without_cards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.fixture(directory, [(1, "user", "frozen intent")])
             store = hermes_supervisor.StateStore(Path(directory) / "supervisor.json")
@@ -2789,27 +3432,27 @@ class CaptureServiceTests(unittest.TestCase):
             self.assertEqual(observed.state.pending_message_ids, (1,))
             store.control("resume")
             captured = service.run_once(store, state_db, kanban_db)
-            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(client.calls, [])
             self.assertEqual(captured.state.pending_message_ids, ())
             store.control("emergency-stop")
             before = store.read()
             stopped = service.run_once(store, state_db, kanban_db)
             self.assertEqual(stopped.state, before)
-            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(client.calls, [])
 
-    def test_create_failure_commits_earlier_only_and_preserves_events(self) -> None:
+    def test_observation_never_calls_failing_capture_client_and_advances_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.fixture(
                 directory, [(1, "user", "one"), (2, "user", "two")], [(1, "blocked")]
             )
             store = hermes_supervisor.StateStore(Path(directory) / "supervisor.json")
             store.initialize()
-            client = self.Client(fail_on=2)
-            with self.assertRaises(hermes_supervisor.CaptureError):
-                hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
+            client = self.Client(fail_on=1)
+            hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
             state = store.read()
-            self.assertEqual(state.last_message_id, 1)
-            self.assertEqual(state.last_event_id, 0)
+            self.assertEqual(client.calls, [])
+            self.assertEqual(state.last_message_id, 2)
+            self.assertEqual(state.last_event_id, 1)
             self.assertEqual(state.pending_event_ids, ())
 
     def test_events_advance_without_growing_legacy_pending_markers(self) -> None:
@@ -2833,12 +3476,12 @@ class CaptureServiceTests(unittest.TestCase):
             first = service.run_once(store, state_db, kanban_db)
             second = service.run_once(store, state_db, kanban_db)
             third = service.run_once(store, state_db, kanban_db)
-            self.assertEqual([len(first.cards), len(second.cards), len(third.cards)], [64, 64, 2])
+            self.assertEqual([len(first.cards), len(second.cards), len(third.cards)], [0, 0, 0])
             self.assertEqual([first.state.last_message_id, second.state.last_message_id,
                               third.state.last_message_id], [64, 128, 130])
             self.assertEqual([first.state.last_event_id, second.state.last_event_id,
                               third.state.last_event_id], [256, 512, 513])
-            self.assertEqual([call.source_message_id for call in client.calls], list(range(1, 131)))
+            self.assertEqual(client.calls, [])
             self.assertEqual(third.state.pending_event_ids, ())
 
     def test_capture_total_message_bytes_truncate_then_drain(self) -> None:
@@ -2851,8 +3494,8 @@ class CaptureServiceTests(unittest.TestCase):
             client = self.Client(); service = hermes_supervisor.CaptureService(client)
             first = service.run_once(store, state_db, kanban_db)
             second = service.run_once(store, state_db, kanban_db)
-            self.assertEqual((len(first.cards), first.state.last_message_id), (8, 8))
-            self.assertEqual((len(second.cards), second.state.last_message_id), (2, 10))
+            self.assertEqual((len(first.cards), first.state.last_message_id), (0, 10))
+            self.assertEqual((len(second.cards), second.state.last_message_id), (0, 10))
 
     def test_frozen_capture_records_ids_without_reading_raw_columns(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3016,17 +3659,19 @@ class CaptureServiceTests(unittest.TestCase):
                             last_event_id=0, frozen=True, **{field: value},
                         )
 
-    def test_oversized_capture_message_fails_before_raw_fetch_and_preserves_state(self) -> None:
+    def test_source_observation_ignores_oversized_raw_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.fixture(
                 directory, [(1, "user", "x" * (hermes_supervisor._CAPTURE_CONTENT_MAX_BYTES + 1))]
             )
             store = hermes_supervisor.StateStore(Path(directory) / "supervisor.json")
-            store.initialize(); before = store.path.read_bytes(); client = self.Client()
-            with self.assertRaises(hermes_supervisor.DetectionError):
-                hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
+            store.initialize(); client = self.Client()
+            result = hermes_supervisor.CaptureService(client).run_once(
+                store, state_db, kanban_db
+            )
             self.assertEqual(client.calls, [])
-            self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(result.state.last_message_id, 1)
+            self.assertEqual(result.cards, ())
 
     def test_frozen_pending_cap_stops_without_cursor_or_state_growth(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3052,15 +3697,10 @@ class CaptureServiceTests(unittest.TestCase):
             store.control("resume")
             client = self.Client(); service = hermes_supervisor.CaptureService(client)
             first_resume = service.run_once(store, state_db, kanban_db)
-            self.assertEqual(len(first_resume.cards), hermes_supervisor._CAPTURE_MAX_MESSAGES)
-            self.assertEqual(len(first_resume.state.pending_message_ids),
-                             hermes_supervisor._CAPTURE_PENDING_ID_CAP - hermes_supervisor._CAPTURE_MAX_MESSAGES)
-            self.assertNotIn(2049, [call.source_message_id for call in client.calls])
-            for _ in range(40):
-                drained = service.run_once(store, state_db, kanban_db)
-                if not drained.state.pending_message_ids and drained.state.last_message_id == 2049:
-                    break
-            self.assertEqual([call.source_message_id for call in client.calls], list(range(1, 2050)))
+            self.assertEqual(first_resume.cards, ())
+            self.assertEqual(first_resume.state.pending_message_ids, ())
+            self.assertEqual(first_resume.state.last_message_id, 2049)
+            self.assertEqual(client.calls, [])
             self.assertEqual(store.read().pending_message_ids, ())
 
     def test_pending_messages_resume_in_ascending_source_order(self) -> None:
@@ -3073,10 +3713,13 @@ class CaptureServiceTests(unittest.TestCase):
                 hermes_supervisor.initial_supervisor_state(), last_message_id=2,
                 pending_message_ids=(2, 1),
             ))
+            pending = hermes_supervisor.read_pending_messages(state_db, (2, 1))
+            self.assertEqual([message.id for message in pending], [1, 2])
             client = self.Client()
             result = hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
-            self.assertEqual([call.source_message_id for call in client.calls], [1, 2])
+            self.assertEqual(client.calls, [])
             self.assertEqual(result.state.pending_message_ids, ())
+            self.assertEqual(result.state.last_message_id, 2)
 
     def test_batch_cursor_sees_event_after_capture_clears_legacy_marker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3096,7 +3739,7 @@ class CaptureServiceTests(unittest.TestCase):
             self.assertEqual([event.id for event in batch.events], [1])
 
 
-class CaptureFakeBinaryE2ETests(unittest.TestCase):
+class SourceObservationFakeBinaryE2ETests(unittest.TestCase):
     def setup_fixture(self, directory: str, content: str):
         state_db, kanban_db = ChangeDetectionTests.make_databases(directory)
         with closing(sqlite3.connect(state_db)) as connection, connection:
@@ -3134,7 +3777,7 @@ print(json.dumps(task, ensure_ascii=True))
         fake.chmod(0o700)
         return state_db, kanban_db, fake, Path(directory) / "argv.jsonl", Path(directory) / "cards.json"
 
-    def test_multi_message_cycle_stays_on_pinned_board_with_argv_integrity(self) -> None:
+    def test_multi_message_observation_never_invokes_capture_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "shell-was-run"
             content = f"spaces ' \" ; $(touch {marker})\nnext"
@@ -3157,24 +3800,15 @@ print(json.dumps(task, ensure_ascii=True))
             )
             first = service.run_once(store, state_db, kanban_db)
             second = service.run_once(store, state_db, kanban_db)
-            invocations = [json.loads(line) for line in log.read_text().splitlines()]
-            boards = json.loads(mapping.read_text())
-            self.assertEqual(len(invocations), 2)
-            self.assertEqual([call["board"] for call in invocations], ["supervisor-test"] * 2)
-            self.assertEqual([call["selector"] for call in invocations], [
-                "current-board", "switched-board",
-            ])
-            self.assertEqual(len(boards["supervisor-test"]), 2)
-            self.assertNotIn("switched-board", boards)
-            self.assertEqual(len(first.cards), 2)
+            self.assertFalse(log.exists())
+            self.assertFalse(mapping.exists())
+            self.assertEqual(first.cards, ())
             self.assertEqual(second.cards, ())
-            first_argv = invocations[0]["argv"]
-            self.assertIn(content, first_argv[first_argv.index("--body") + 1])
+            self.assertEqual(second.state.last_message_id, 2)
             self.assertFalse(marker.exists())
-            self.assertNotIn("--assignee", first_argv)
             self.assertEqual(base_env.get("HERMES_KANBAN_BOARD"), None)
 
-    def test_state_write_crash_retries_same_key_and_fake_deduplicates(self) -> None:
+    def test_state_write_crash_retries_observation_without_capture_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db, fake, log, mapping = self.setup_fixture(directory, "crash window")
             store = hermes_supervisor.StateStore(Path(directory) / "state.json")
@@ -3192,22 +3826,10 @@ print(json.dumps(task, ensure_ascii=True))
                 with self.assertRaises(hermes_supervisor.CaptureError):
                     service.run_once(store, state_db, kanban_db)
             retried = service.run_once(store, state_db, kanban_db)
-            invocations = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertEqual(len(invocations), 2)
-            first_argv, second_argv = invocations[0]["argv"], invocations[1]["argv"]
-            first_key = first_argv[first_argv.index("--idempotency-key") + 1]
-            second_key = second_argv[second_argv.index("--idempotency-key") + 1]
-            self.assertEqual(first_key, second_key)
-            self.assertEqual([call["board"] for call in invocations], ["supervisor-test"] * 2)
-            self.assertEqual([call["selector"] for call in invocations], [
-                "current-board", "switched-board",
-            ])
-            boards = json.loads(mapping.read_text())
-            self.assertEqual(len(boards["supervisor-test"]), 1)
-            self.assertNotIn("switched-board", boards)
-            self.assertTrue(retried.cards[0].existing)
-            only_card = next(iter(boards["supervisor-test"].values()))
-            self.assertEqual(retried.cards[0].id, only_card["id"])
+            self.assertFalse(log.exists())
+            self.assertFalse(mapping.exists())
+            self.assertEqual(retried.cards, ())
+            self.assertEqual(retried.state.last_message_id, 1)
 
 
 class Stage0GateTests(unittest.TestCase):
@@ -4080,7 +4702,7 @@ class SupervisorBatchServiceTests(unittest.TestCase):
                 (identifier, "source-task", None, "blocked", json.dumps(payload), identifier),
             )
 
-    def test_batch_detector_never_reads_message_content_and_returns_redacted_metadata(self) -> None:
+    def test_batch_detector_never_reads_message_content_and_keeps_source_locator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db, _, _ = self.fixture(directory)
             self.add_message(state_db, 1, "x" * (2 * 1024 * 1024))
@@ -4104,8 +4726,498 @@ class SupervisorBatchServiceTests(unittest.TestCase):
                 )
 
             self.assertEqual(len(changes.messages), 1)
-            self.assertEqual(changes.messages[0].session_id, "batch-redacted")
+            self.assertEqual(changes.messages[0].session_id, "session")
             self.assertEqual(changes.messages[0].content, "")
+
+    def test_batch_detector_skips_subagent_but_keeps_child_human_sources_and_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO sessions VALUES (?, ?, ?, 0, NULL)",
+                    (
+                        ("derived", "subagent", "derived"),
+                        ("tui-child", "tui", "human continuation"),
+                        ("webui-child", "webui", "human continuation"),
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, ?, 'user', ?, ?, 1, 0)",
+                    (
+                        (1, "derived", "derived instruction", 1),
+                        (2, "tui-child", "human reply", 2),
+                        (3, "webui-child", "human reply", 3),
+                    ),
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db,
+                kanban_db,
+                profile="default",
+                last_message_id=0,
+                last_event_id=0,
+            )
+
+            self.assertEqual([message.id for message in changes.messages], [2, 3])
+            self.assertEqual(
+                [message.session_id for message in changes.messages],
+                ["tui-child", "webui-child"],
+            )
+            self.assertEqual(changes.proposed_message_id, 3)
+
+    def test_batch_detector_skips_cron_source_and_advances_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('scheduled', 'cron', 'scheduled', 0, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (1, 'scheduled', 'user', 'machine prompt', 1, 1, 0)"
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db,
+                kanban_db,
+                profile="default",
+                last_message_id=0,
+                last_event_id=0,
+            )
+
+            self.assertEqual(changes.messages, ())
+            self.assertEqual(changes.proposed_message_id, 1)
+
+    def test_batch_detector_rejects_message_cursor_ahead_of_database_high_water(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            self.add_message(state_db, 1)
+
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "state.db: message cursor exceeds high-water id",
+            ):
+                hermes_supervisor.detect_batch_changes(
+                    state_db,
+                    kanban_db,
+                    profile="default",
+                    last_message_id=2,
+                    last_event_id=0,
+                )
+
+    def test_batch_detector_rejects_event_cursor_ahead_of_empty_database_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, store, state = self.fixture(directory)
+            store.write(replace(state, last_supervisor_event_id=1))
+            before = store.path.read_bytes()
+            client = self.Client()
+
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "kanban.db: event cursor exceeds high-water id",
+            ):
+                hermes_supervisor.SupervisorBatchService(client).run_once(
+                    store, state_db, kanban_db, load_policy(POLICY),
+                    datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+                )
+
+            self.assertEqual(client.projections, [])
+            self.assertEqual(store.path.read_bytes(), before)
+
+    def test_batch_event_cursor_accepts_gap_and_irrelevant_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'task', NULL, ?, '{}', ?)",
+                    ((1, "blocked", 1), (5, "assigned", 5)),
+                )
+
+            gap = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=3,
+            )
+            accepted = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=5,
+            )
+
+        self.assertEqual(gap.events, ())
+        self.assertEqual(gap.proposed_event_id, 5)
+        self.assertEqual(accepted.events, ())
+        self.assertEqual(accepted.proposed_event_id, 5)
+
+    def test_batch_event_poll_uses_one_snapshot_for_high_water_and_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as writer, writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute(
+                    "INSERT INTO task_events VALUES (1, 'first', NULL, 'blocked', '{}', 1)"
+                )
+            original_open = hermes_supervisor._open_readonly
+            inserted = False
+
+            class InsertBeforeRows:
+                def __init__(self, connection: sqlite3.Connection):
+                    self.connection = connection
+
+                def execute(self, sql: str, parameters: object = ()):
+                    nonlocal inserted
+                    if "SELECT e.id" in sql and not inserted:
+                        with closing(sqlite3.connect(kanban_db)) as writer, writer:
+                            writer.execute(
+                                "INSERT INTO task_events VALUES "
+                                "(2, 'late', NULL, 'blocked', '{\"safety_critical\":true}', 2)"
+                            )
+                        inserted = True
+                    return self.connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+                def __getattr__(self, name: str):
+                    return getattr(self.connection, name)
+
+            with mock.patch.object(
+                hermes_supervisor, "_open_readonly",
+                side_effect=lambda path: InsertBeforeRows(original_open(path)),
+            ):
+                first = hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0,
+                )
+            second = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=first.proposed_event_id,
+            )
+
+        self.assertEqual([event.id for event in first.events], [1])
+        self.assertEqual(first.proposed_event_id, 1)
+        self.assertEqual([event.id for event in second.events], [2])
+        self.assertEqual(second.proposed_event_id, 2)
+
+    def test_batch_message_poll_uses_one_snapshot_for_high_water_and_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(state_db)) as writer, writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute(
+                    "INSERT INTO sessions VALUES ('session', 'cli', 'human', 0, NULL)"
+                )
+                writer.execute(
+                    "INSERT INTO messages VALUES (1, 'session', 'user', '', 1, 1, 0)"
+                )
+            original_open = hermes_supervisor._open_readonly
+            inserted = False
+
+            class InsertBeforeRows:
+                def __init__(self, connection: sqlite3.Connection):
+                    self.connection = connection
+
+                def execute(self, sql: str, parameters: object = ()):
+                    nonlocal inserted
+                    if "SELECT m.id, m.session_id, m.timestamp" in sql and not inserted:
+                        with closing(sqlite3.connect(state_db)) as writer, writer:
+                            writer.execute(
+                                "INSERT INTO messages VALUES "
+                                "(2, 'session', 'user', '', 2, 1, 0)"
+                            )
+                        inserted = True
+                    return self.connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+                def __getattr__(self, name: str):
+                    return getattr(self.connection, name)
+
+            with mock.patch.object(
+                hermes_supervisor, "_open_readonly",
+                side_effect=lambda path: InsertBeforeRows(original_open(path)),
+            ):
+                first = hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0,
+                )
+            second = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=first.proposed_message_id, last_event_id=0,
+            )
+
+        self.assertEqual([message.id for message in first.messages], [1])
+        self.assertEqual(first.proposed_message_id, 1)
+        self.assertEqual([message.id for message in second.messages], [2])
+        self.assertEqual(second.proposed_message_id, 2)
+
+    def test_batch_detector_excludes_own_batch_lifecycle_event_and_advances_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES "
+                    "('own-batch', 'done', 'supervisor', NULL, NULL, NULL, "
+                    "'supervisor-watcher', 'supervisor-batch:v2:0123456789abcdef0123456789abcdef')"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES "
+                    "(1, 'own-batch', NULL, 'completed', '{}', 1)"
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db,
+                kanban_db,
+                profile="default",
+                last_message_id=0,
+                last_event_id=0,
+            )
+
+            self.assertEqual(changes.events, ())
+            self.assertEqual(changes.proposed_event_id, 1)
+
+    def test_batch_detector_requires_both_self_batch_markers_before_excluding_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            rows = (
+                ("owner-only", "supervisor-watcher", "human-key"),
+                ("key-only", "human", "supervisor-batch:v2:key-only"),
+                ("null-key", "supervisor-watcher", None),
+                ("null-owner", None, "supervisor-batch:v2:null-owner"),
+                ("both-null", None, None),
+            )
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO tasks VALUES (?, 'done', 'supervisor', NULL, NULL, NULL, ?, ?)",
+                    rows,
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, ?, NULL, 'completed', '{}', ?)",
+                    ((index, task_id, index) for index, (task_id, _, _) in enumerate(rows, 1)),
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=0,
+            )
+
+        self.assertEqual([event.id for event in changes.events], [1, 2, 3, 4, 5])
+        self.assertEqual(changes.proposed_event_id, 5)
+
+    def test_batch_detector_keeps_self_batch_safety_and_rejected_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES "
+                    "('own-batch', 'done', 'supervisor', NULL, NULL, NULL, "
+                    "'supervisor-watcher', 'supervisor-batch:v2:safety')"
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'own-batch', NULL, ?, ?, ?)",
+                    (
+                        (1, "completed", "{}", 1),
+                        (2, "blocked", '{"safety_critical":true}', 2),
+                        (3, "gave_up", '{"user_originated":true}', 3),
+                        (4, "completion_blocked_hallucination", "{}", 4),
+                    ),
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=0,
+            )
+
+        self.assertEqual([event.id for event in changes.events], [2, 3, 4])
+        self.assertEqual(
+            [event.classification for event in changes.events],
+            ["blocked", "blocked", "rejected"],
+        )
+        self.assertEqual(changes.proposed_event_id, 4)
+
+    def test_self_batch_completion_filter_keeps_every_non_harmless_payload_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO tasks VALUES (?, 'done', 'supervisor', NULL, NULL, NULL, ?, ?)",
+                    (
+                        ("self", "supervisor-watcher", "supervisor-batch:v2:self"),
+                        ("owner-only", "supervisor-watcher", "human-key"),
+                        ("key-only", "human", "supervisor-batch:v2:key-only"),
+                    ),
+                )
+                payloads = (
+                    "{}",
+                    '{"safety_critical":true}',
+                    '{"user_originated":true}',
+                    '{"data_loss_risk":true}',
+                    '{"emergency":true}',
+                    '{"future_safety_marker":true}',
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'self', NULL, 'completed', ?, ?)",
+                    ((index, payload, index) for index, payload in enumerate(payloads, 1)),
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, ?, NULL, ?, '{}', ?)",
+                    (
+                        (7, "owner-only", "completed", 7),
+                        (8, "key-only", "completed", 8),
+                        (9, "self", "blocked", 9),
+                    ),
+                )
+
+            changes = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=0,
+            )
+
+        self.assertEqual([event.id for event in changes.events], list(range(2, 10)))
+        self.assertEqual(
+            [event.payload for event in changes.events[:5]],
+            [
+                {"safety_critical": True},
+                {"user_originated": True},
+                {"data_loss_risk": True},
+                {"emergency": True},
+                {"future_safety_marker": True},
+            ],
+        )
+        self.assertEqual(changes.proposed_event_id, 9)
+
+    def test_self_batch_completion_filter_fails_closed_on_malformed_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES "
+                    "('self', 'done', 'supervisor', NULL, NULL, NULL, "
+                    "'supervisor-watcher', 'supervisor-batch:v2:self')"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES "
+                    "(1, 'self', NULL, 'completed', '{malformed', 1)"
+                )
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError, "invalid payload for event 1"
+            ):
+                hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0,
+                )
+
+    def test_batch_detector_fails_closed_when_self_batch_marker_column_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executescript(
+                    "DROP TABLE tasks;"
+                    "CREATE TABLE tasks (id TEXT PRIMARY KEY, created_by TEXT);"
+                    "INSERT INTO task_events VALUES (1, 'task', NULL, 'completed', '{}', 1);"
+                )
+
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0,
+                )
+
+    def test_message_backlog_pages_then_converges_without_pending_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, store, _ = self.fixture(directory)
+            message_count = hermes_supervisor._BATCH_PAGE_MAX_MESSAGES + 1
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('session', 'cli', 'capture', 0, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, 'session', 'user', '', ?, 1, 0)",
+                    ((identifier, identifier) for identifier in range(1, message_count + 1)),
+                )
+            client = self.Client()
+            service = hermes_supervisor.SupervisorBatchService(client)
+
+            first = service.run_once(
+                store,
+                state_db,
+                kanban_db,
+                load_policy(POLICY),
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+            )
+            second = service.run_once(
+                store,
+                state_db,
+                kanban_db,
+                load_policy(POLICY),
+                datetime(2026, 7, 22, 12, 30, tzinfo=timezone.utc),
+            )
+            settled = service.run_once(
+                store,
+                state_db,
+                kanban_db,
+                load_policy(POLICY),
+                datetime(2026, 7, 22, 13, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(len(first.message_ids), hermes_supervisor._BATCH_PAGE_MAX_MESSAGES)
+            self.assertEqual(second.message_ids, (message_count,))
+            self.assertEqual(settled.action, "no_change")
+            self.assertEqual(store.read().last_supervisor_message_id, message_count)
+            self.assertEqual(len(client.projections), 2)
+
+    def test_batch_detector_pages_events_without_skipping_late_safety_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            event_count = hermes_supervisor._BATCH_PAGE_MAX_EVENTS + 1
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'source-task', NULL, ?, '{}', ?)",
+                    (
+                        (
+                            event_id,
+                            "completion_blocked_hallucination"
+                            if event_id == event_count else "blocked",
+                            event_id,
+                        )
+                        for event_id in range(1, event_count + 1)
+                    ),
+                )
+
+            first = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=0,
+            )
+            second = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=first.proposed_message_id,
+                last_event_id=first.proposed_event_id,
+            )
+
+        self.assertEqual(
+            [event.id for event in first.events],
+            list(range(1, hermes_supervisor._BATCH_PAGE_MAX_EVENTS + 1)),
+        )
+        self.assertEqual(first.proposed_event_id, hermes_supervisor._BATCH_PAGE_MAX_EVENTS)
+        self.assertEqual([event.id for event in second.events], [event_count])
+        self.assertEqual(second.events[0].classification, "rejected")
+        self.assertEqual(second.proposed_event_id, event_count)
+
+    def test_batch_detector_rejects_non_text_session_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('broken', ?, 'broken', 0, NULL)",
+                    (sqlite3.Binary(b"subagent"),),
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (1, 'broken', 'user', '', 1, 1, 0)"
+                )
+
+            with self.assertRaisesRegex(
+                hermes_supervisor.DetectionError,
+                "state.db: invalid metadata for message 1",
+            ):
+                hermes_supervisor.detect_batch_changes(
+                    state_db,
+                    kanban_db,
+                    profile="default",
+                    last_message_id=0,
+                    last_event_id=0,
+                )
 
     def test_batch_malformed_user_metadata_fails_without_client_or_state_change(self) -> None:
         cases = (
@@ -4152,9 +5264,9 @@ class SupervisorBatchServiceTests(unittest.TestCase):
                 self.assertEqual(store.path.read_bytes(), before)
                 self.assertEqual(store.read(), state)
 
-    def test_batch_malformed_metadata_precedes_relevant_count_cap(self) -> None:
+    def test_batch_malformed_metadata_fails_at_its_page_without_crossing_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state_db, kanban_db, store, state = self.fixture(directory)
+            state_db, kanban_db, _, _ = self.fixture(directory)
             malformed_id = hermes_supervisor._BATCH_MAX_MESSAGES + 1
             with closing(sqlite3.connect(state_db)) as connection, connection:
                 connection.execute(
@@ -4169,21 +5281,26 @@ class SupervisorBatchServiceTests(unittest.TestCase):
                     "INSERT INTO messages VALUES (?, 'session', 'user', '', ?, 1, 2)",
                     (malformed_id, malformed_id),
                 )
-            before = store.path.read_bytes()
-            client = self.Client()
 
+            cursor = 0
+            while cursor < malformed_id - 1:
+                changes = hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=cursor, last_event_id=0,
+                )
+                self.assertGreater(changes.proposed_message_id, cursor)
+                self.assertLess(changes.proposed_message_id, malformed_id)
+                cursor = changes.proposed_message_id
+
+            self.assertEqual(cursor, malformed_id - 1)
             with self.assertRaisesRegex(
                 hermes_supervisor.DetectionError,
                 f"state.db: invalid metadata for message {malformed_id}",
             ):
-                hermes_supervisor.SupervisorBatchService(client).run_once(
-                    store, state_db, kanban_db, load_policy(POLICY),
-                    datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+                hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=cursor, last_event_id=0,
                 )
-
-            self.assertEqual(client.projections, [])
-            self.assertEqual(store.path.read_bytes(), before)
-            self.assertEqual(store.read(), state)
 
     def test_batch_valid_inactive_user_is_safely_cursor_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4205,35 +5322,123 @@ class SupervisorBatchServiceTests(unittest.TestCase):
             self.assertEqual(result.action, "no_change")
             self.assertEqual(store.read().last_supervisor_message_id, 1)
 
-    def test_batch_message_and_event_caps_fail_without_client_or_state_change(self) -> None:
+    def test_batch_message_and_event_hard_cap_boundaries_converge_in_finite_prefixes(self) -> None:
+        cases = (
+            ("messages", hermes_supervisor._BATCH_MAX_MESSAGES),
+            ("events", hermes_supervisor._BATCH_MAX_EVENTS),
+        )
+        for source, hard_cap in cases:
+            for count in (hard_cap - 1, hard_cap, hard_cap + 1):
+                with self.subTest(source=source, count=count), tempfile.TemporaryDirectory() as directory:
+                    state_db, kanban_db, _, _ = self.fixture(directory)
+                    if source == "messages":
+                        with closing(sqlite3.connect(state_db)) as connection, connection:
+                            connection.execute(
+                                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                                ("session", "cli", "capture", 0, None),
+                            )
+                            connection.executemany(
+                                "INSERT INTO messages VALUES (?, 'session', 'user', '', ?, 1, 0)",
+                                ((identifier, identifier) for identifier in range(1, count + 1)),
+                            )
+                    else:
+                        with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                            connection.executemany(
+                                "INSERT INTO task_events VALUES (?, 't', NULL, 'blocked', '{}', ?)",
+                                ((identifier, identifier) for identifier in range(1, count + 1)),
+                            )
+
+                    cursor = 0
+                    observed: list[int] = []
+                    cycles = 0
+                    while cursor < count:
+                        changes = hermes_supervisor.detect_batch_changes(
+                            state_db, kanban_db, profile="default",
+                            last_message_id=cursor if source == "messages" else 0,
+                            last_event_id=cursor if source == "events" else 0,
+                        )
+                        items = changes.messages if source == "messages" else changes.events
+                        proposed = (
+                            changes.proposed_message_id
+                            if source == "messages" else changes.proposed_event_id
+                        )
+                        self.assertGreater(len(items), 0)
+                        self.assertLessEqual(len(items), hermes_supervisor._BATCH_PAGE_MAX_ITEMS)
+                        self.assertGreater(proposed, cursor)
+                        self.assertLessEqual(proposed, count)
+                        observed.extend(item.id for item in items)
+                        cursor = proposed
+                        cycles += 1
+
+                    settled = hermes_supervisor.detect_batch_changes(
+                        state_db, kanban_db, profile="default",
+                        last_message_id=count if source == "messages" else 0,
+                        last_event_id=count if source == "events" else 0,
+                    )
+                    settled_items = settled.messages if source == "messages" else settled.events
+                    settled_cursor = (
+                        settled.proposed_message_id
+                        if source == "messages" else settled.proposed_event_id
+                    )
+                    self.assertEqual(observed, list(range(1, count + 1)))
+                    self.assertEqual(
+                        cycles,
+                        (count + hermes_supervisor._BATCH_PAGE_MAX_ITEMS - 1)
+                        // hermes_supervisor._BATCH_PAGE_MAX_ITEMS,
+                    )
+                    self.assertEqual(settled_items, ())
+                    self.assertEqual(settled_cursor, count)
+
+    def test_batch_empty_relevant_prefix_advances_only_to_raw_page_end(self) -> None:
         for source in ("messages", "events"):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
-                state_db, kanban_db, store, _ = self.fixture(directory)
+                state_db, kanban_db, _, _ = self.fixture(directory)
+                page = hermes_supervisor._BATCH_PAGE_MAX_ITEMS
                 if source == "messages":
                     with closing(sqlite3.connect(state_db)) as connection, connection:
-                        connection.execute(
-                            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
-                            ("session", "cli", "capture", 0, None),
+                        connection.executemany(
+                            "INSERT INTO sessions VALUES (?, ?, ?, 0, NULL)",
+                            (("machine", "cron", "machine"), ("human", "cli", "human")),
                         )
                         connection.executemany(
-                            "INSERT INTO messages VALUES (?, ?, 'user', '', ?, 1, 0)",
-                            ((i, "session", i) for i in range(1, hermes_supervisor._BATCH_MAX_MESSAGES + 2)),
+                            "INSERT INTO messages VALUES (?, 'machine', 'user', '', ?, 1, 0)",
+                            ((identifier, identifier) for identifier in range(1, page + 1)),
+                        )
+                        connection.execute(
+                            "INSERT INTO messages VALUES (?, 'human', 'user', '', ?, 1, 0)",
+                            (page + 1, page + 1),
                         )
                 else:
                     with closing(sqlite3.connect(kanban_db)) as connection, connection:
                         connection.executemany(
-                            "INSERT INTO task_events VALUES (?, 't', NULL, 'blocked', '{}', ?)",
-                            ((i, i) for i in range(1, hermes_supervisor._BATCH_MAX_EVENTS + 2)),
+                            "INSERT INTO task_events VALUES (?, 't', NULL, 'assigned', '{}', ?)",
+                            ((identifier, identifier) for identifier in range(1, page + 1)),
                         )
-                before = store.path.read_bytes()
-                client = self.Client()
-                with self.assertRaises(hermes_supervisor.DetectionError):
-                    hermes_supervisor.SupervisorBatchService(client).run_once(
-                        store, state_db, kanban_db, load_policy(POLICY),
-                        datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
-                    )
-                self.assertEqual(client.projections, [])
-                self.assertEqual(store.path.read_bytes(), before)
+                        connection.execute(
+                            "INSERT INTO task_events VALUES "
+                            "(?, 't', NULL, 'blocked', '{\"safety_critical\":true}', ?)",
+                            (page + 1, page + 1),
+                        )
+
+                first = hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=0,
+                )
+                first_items = first.messages if source == "messages" else first.events
+                first_cursor = (
+                    first.proposed_message_id if source == "messages"
+                    else first.proposed_event_id
+                )
+                second = hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=first_cursor if source == "messages" else 0,
+                    last_event_id=first_cursor if source == "events" else 0,
+                )
+                second_items = second.messages if source == "messages" else second.events
+
+                self.assertEqual(first_items, ())
+                self.assertEqual(first_cursor, page)
+                self.assertEqual([item.id for item in second_items], [page + 1])
 
     def test_batch_event_byte_limits_fail_without_consumption(self) -> None:
         cases = (
@@ -4259,6 +5464,33 @@ class SupervisorBatchServiceTests(unittest.TestCase):
                     )
                 self.assertEqual(client.projections, [])
                 self.assertEqual(store.path.read_bytes(), before)
+
+    def test_batch_late_oversized_event_fails_without_crossing_its_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, _, _ = self.fixture(directory)
+            page = hermes_supervisor._BATCH_PAGE_MAX_EVENTS
+            with closing(sqlite3.connect(kanban_db)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 't', NULL, 'blocked', '{}', ?)",
+                    ((identifier, identifier) for identifier in range(1, page + 1)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (?, ?, NULL, 'blocked', '{}', ?)",
+                    (page + 1, "x" * (hermes_supervisor._BATCH_TASK_ID_MAX_BYTES + 1), page + 1),
+                )
+
+            first = hermes_supervisor.detect_batch_changes(
+                state_db, kanban_db, profile="default",
+                last_message_id=0, last_event_id=0,
+            )
+            self.assertEqual(first.proposed_event_id, page)
+            self.assertEqual([event.id for event in first.events], list(range(1, page + 1)))
+
+            with self.assertRaises(hermes_supervisor.DetectionError):
+                hermes_supervisor.detect_batch_changes(
+                    state_db, kanban_db, profile="default",
+                    last_message_id=0, last_event_id=first.proposed_event_id,
+                )
 
     def test_duplicate_data_loss_event_never_bypasses_gate_or_changes_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4494,6 +5726,44 @@ class SupervisorBatchServiceTests(unittest.TestCase):
             self.assertEqual(store.read().daily_budget.date, "2026-07-23")
             self.assertEqual(store.read().daily_budget.supervisor_runs, 1)
 
+    def test_daily_limit_waits_quietly_then_enqueues_after_tokyo_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db, store, state = self.fixture(directory)
+            self.add_message(state_db, 1)
+            policy = load_policy(POLICY)
+            store.write(replace(
+                state,
+                daily_budget=hermes_supervisor.DailyBudget(
+                    "2026-07-22", policy.scheduling.daily_supervisor_limit, 0, 0
+                ),
+            ))
+            service = hermes_supervisor.SupervisorBatchService(self.Client())
+
+            waiting = service.run_once(
+                store,
+                state_db,
+                kanban_db,
+                policy,
+                datetime(2026, 7, 22, 14, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
+                (waiting.action, waiting.reason_code),
+                ("scheduled", "supervisor_daily_limit"),
+            )
+            self.assertIsNone(hermes_supervisor.supervisor_batch_report(waiting))
+            self.assertEqual(store.read().last_supervisor_message_id, 0)
+
+            resumed = service.run_once(
+                store,
+                state_db,
+                kanban_db,
+                policy,
+                datetime(2026, 7, 22, 15, tzinfo=timezone.utc),
+            )
+            self.assertEqual(resumed.action, "enqueued")
+            self.assertEqual(store.read().last_supervisor_message_id, 1)
+            self.assertEqual(store.read().daily_budget.supervisor_runs, 1)
+
     def test_future_enqueue_clock_and_busy_lock_fail_closed_without_consumption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db, store, state = self.fixture(directory)
@@ -4646,7 +5916,7 @@ class WatchCycleTests(unittest.TestCase):
                 )
         return state_db, kanban_db
 
-    def test_one_cycle_uses_shared_store_and_returns_safe_frozen_report(self) -> None:
+    def test_one_cycle_batches_source_without_preforming_capture_card(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.fixture(directory, message=True)
             store = hermes_supervisor.StateStore(Path(directory) / "state.json")
@@ -4657,16 +5927,69 @@ class WatchCycleTests(unittest.TestCase):
             )
             report = hermes_supervisor.watch_cycle_report(result)
 
-        self.assertEqual(len(client.capture_calls), 1)
+        assert report is not None
+        self.assertEqual(client.capture_calls, [])
         self.assertEqual(len(client.batch_calls), 1)
         self.assertEqual(result.capture.state.last_message_id, 1)
         self.assertEqual(result.batch.state.last_supervisor_message_id, 1)
-        self.assertEqual(report["capture"], {"card_count": 1, "card_ids": ["capture-1"]})
+        self.assertNotIn("capture", report)
         self.assertEqual(report["batch"]["card"]["id"], "batch-1")
         self.assertNotIn("RAW PRIVATE INTENT", json.dumps(report))
         self.assertNotIn("session-secret", json.dumps(report))
         with self.assertRaises(FrozenInstanceError):
             result.mode_changed = True
+
+    def test_batch_carries_retrievable_message_references_without_raw_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.fixture(directory, message=True)
+            client = self.Client()
+            hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(Path(directory) / "state.json"),
+                state_db,
+                kanban_db,
+                load_policy(POLICY),
+                client,
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+            )
+
+        body = json.loads(client.batch_calls[0].body)
+        self.assertEqual(
+            body["messages"],
+            [{"id": 1, "session_id": "session-secret"}],
+        )
+        self.assertNotIn("RAW PRIVATE INTENT", client.batch_calls[0].body)
+
+    def test_watch_accepts_batch_only_client_without_capture_write_capability(self) -> None:
+        class BatchOnlyClient:
+            def __init__(self):
+                self.calls = []
+
+            def create_supervisor_batch(self, projection):
+                self.calls.append(projection)
+                return hermes_supervisor.SupervisorBatchAck(
+                    hermes_supervisor.CreatedCardRef(
+                        "batch-only", projection.title, "todo", False
+                    ),
+                    projection.proposed_message_id,
+                    projection.proposed_event_id,
+                    projection.message_ids,
+                    projection.event_ids,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = self.fixture(directory, message=True)
+            client = BatchOnlyClient()
+            result = hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(Path(directory) / "state.json"),
+                state_db,
+                kanban_db,
+                load_policy(POLICY),
+                client,
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(result.capture.cards, ())
+        self.assertEqual(len(client.calls), 1)
 
     def test_missing_state_defaults_shadow_and_no_change_has_no_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4697,7 +6020,7 @@ class WatchCycleTests(unittest.TestCase):
             )
             self.assertIsNone(hermes_supervisor.watch_cycle_report(again))
 
-    def test_capture_commit_survives_batch_failure_and_retry_is_idempotent(self) -> None:
+    def test_source_observation_survives_batch_failure_and_retry_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = self.fixture(directory, message=True)
             store = hermes_supervisor.StateStore(Path(directory) / "state.json")
@@ -4714,7 +6037,7 @@ class WatchCycleTests(unittest.TestCase):
                 store, state_db, kanban_db, load_policy(POLICY), client, now
             )
 
-        self.assertEqual(len(client.capture_calls), 1)
+        self.assertEqual(client.capture_calls, [])
         self.assertEqual(len(client.batch_calls), 2)
         self.assertEqual(result.capture.cards, ())
         self.assertEqual(result.batch.action, "enqueued")
@@ -4946,9 +6269,13 @@ class SupervisorBatchPlannerAndClientTests(unittest.TestCase):
         self.assertEqual(first.title, "Supervisor batch m5-7 e9-10")
         self.assertLessEqual(len(first.body.encode()), 65536)
         self.assertNotIn("RAW SECRET", first.body)
-        self.assertNotIn("secret-session", first.body)
+        self.assertIn("secret-session", first.body)
         self.assertNotIn("PAYLOAD SECRET", first.body)
         self.assertEqual(body["message_ids"], [6, 7])
+        self.assertEqual(body["messages"], [
+            {"id": 6, "session_id": "other"},
+            {"id": 7, "session_id": "secret-session"},
+        ])
         self.assertEqual(body["contract"]["allowed_temperatures"], ["research", "build"])
         self.assertEqual(
             body["contract"]["allowed_workspaces"],
@@ -5048,6 +6375,7 @@ class SupervisorBatchPlannerAndClientTests(unittest.TestCase):
         prefix["source_cursors"]["message"]["end"] = 6
         prefix["source_cursors"]["event"]["end"] = 8
         prefix["message_ids"] = [6]
+        prefix["messages"] = [{"id": 6, "session_id": "other"}]
         prefix["event_ids"] = []
         prefix["events"] = []
         prefix_body = json.dumps(prefix, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -5219,6 +6547,9 @@ class RolePromptContractTests(unittest.TestCase):
         self.assertIn("does not implement", texts["supervisor"])
         self.assertIn("self-approve", texts["supervisor"])
         self.assertIn("reason code", texts["supervisor"])
+        self.assertIn("zero or a few intent cards", texts["supervisor"])
+        self.assertIn("never create one card per message", texts["supervisor"])
+        self.assertIn("observe, research, or build", texts["supervisor"])
         self.assertIn("strictly read-only", texts["researcher"])
         self.assertIn("recommendation", texts["researcher"])
         self.assertIn("disposable", texts["builder"])
@@ -6043,6 +7374,338 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertEqual(persisted["cursor"], 0)
             self.assertEqual(persisted["pending"]["cursor"], 2)
 
+    def test_reader_retains_only_one_finite_raw_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'bulk', NULL, 'completed', '{}', '2026-07-22')",
+                    ((index,) for index in range(1, 1001)),
+                )
+
+            rows, prefix_end = hermes_supervisor._read_briefing_rows(db, 0)
+
+            self.assertEqual(len(rows), hermes_supervisor._BRIEFING_MAX_ROWS)
+            self.assertEqual(prefix_end, hermes_supervisor._BRIEFING_MAX_ROWS)
+            self.assertEqual([row[0] for row in rows], list(range(1, 257)))
+
+    def test_reader_rejects_cursor_ahead_of_global_snapshot_highwater(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            self.make_kanban(db)
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "cursor exceeds highwater"
+            ):
+                hermes_supervisor._read_briefing_rows(db, 1)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('tail', 'tail', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (5, 'tail', NULL, 'commented', '{}', '2026-07-22')"
+                )
+            self.assertEqual(hermes_supervisor._read_briefing_rows(db, 5), ([], 5))
+            rows, prefix_end = hermes_supervisor._read_briefing_rows(db, 3)
+            self.assertEqual(([row[0] for row in rows], prefix_end), ([5], 5))
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "cursor exceeds highwater"
+            ):
+                hermes_supervisor._read_briefing_rows(db, 6)
+
+    def test_item_summary_has_an_explicit_retention_bound_and_exact_omission_count(self) -> None:
+        summary = hermes_supervisor._BriefingItemSummary(2, 4)
+        summary.add("d")
+        summary.add("c")
+        summary.add("b")
+        summary.add("a")
+        summary.add("a")
+
+        self.assertEqual(
+            summary.render(),
+            ("a", "b", "… 2件省略（詳細はKanbanを参照）"),
+        )
+        self.assertEqual(len(summary._seen), 4)
+        with self.assertRaisesRegex(hermes_supervisor.BriefingError, "summary limit"):
+            summary.add("e")
+
+    def test_reader_cap_boundaries_gaps_and_backlog_independent_peak_memory(self) -> None:
+        def probe(count: int) -> tuple[int, list[int], int]:
+            with tempfile.TemporaryDirectory() as directory:
+                db = Path(directory) / "kanban.db"
+                self.make_kanban(db)
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                        "'user', NULL, '{}', NULL, NULL)"
+                    )
+                    connection.executemany(
+                        "INSERT INTO task_events VALUES (?, 'bulk', NULL, 'completed', '{}', '2026-07-22')",
+                        ((index * 2,) for index in range(1, count + 1)),
+                    )
+                tracemalloc.start()
+                rows, prefix_end = hermes_supervisor._read_briefing_rows(db, 0)
+                _, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+                return peak, [row[0] for row in rows], prefix_end
+
+        small_peak, small_ids, small_end = probe(1_000)
+        large_peak, large_ids, large_end = probe(10_000)
+
+        expected = [index * 2 for index in range(1, 257)]
+        self.assertEqual((small_ids, small_end), (expected, 512))
+        self.assertEqual((large_ids, large_end), (expected, 512))
+        self.assertLess(large_peak, small_peak * 2)
+
+    def test_invalid_row_after_valid_prefix_fails_without_crossing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            root = Path(directory) / "state"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('valid', 'valid', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('invalid', ?, NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)",
+                    ("x" * 161,),
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'valid', NULL, 'completed', '{}', '2026-07-22')",
+                    ((index,) for index in range(1, 257)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (257, 'invalid', NULL, 'completed', '{}', '2026-07-22')"
+                )
+
+            self.assertIsNone(
+                hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+            )
+            state_path = root / "briefings" / "state.json"
+            self.assertEqual(json.loads(state_path.read_text())["cursor"], 256)
+            with self.assertRaisesRegex(hermes_supervisor.BriefingError, "metadata"):
+                hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+            self.assertEqual(json.loads(state_path.read_text())["cursor"], 256)
+
+    def test_invalid_irrelevant_row_fails_before_cursor_or_state_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            root = Path(directory) / "state"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('bad', 'bad', NULL, NULL, 'done', "
+                    "'user', NULL, '{', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (1, 'bad', NULL, 'completed', '{}', '2026-07-22')"
+                )
+
+            with self.assertRaisesRegex(hermes_supervisor.BriefingError, "task result"):
+                hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+            self.assertFalse(root.exists())
+
+    def test_reader_exact_cap_plus_minus_one_and_total_raw_byte_cap(self) -> None:
+        for count, expected in ((255, 255), (256, 256), (257, 256)):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                db = Path(directory) / "kanban.db"
+                self.make_kanban(db)
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                        "'user', NULL, '{}', NULL, NULL)"
+                    )
+                    connection.executemany(
+                        "INSERT INTO task_events VALUES (?, 'bulk', NULL, 'completed', '{}', '2026-07-22')",
+                        ((index,) for index in range(1, count + 1)),
+                    )
+                rows, prefix_end = hermes_supervisor._read_briefing_rows(db, 0)
+                self.assertEqual((len(rows), prefix_end), (expected, expected))
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            self.make_kanban(db)
+            payload = json.dumps({"padding": "x" * 15_900})
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'bulk', NULL, 'completed', ?, '2026-07-22')",
+                    ((index, payload) for index in range(1, 21)),
+                )
+            rows, prefix_end = hermes_supervisor._read_briefing_rows(db, 0)
+            self.assertGreater(len(rows), 0)
+            self.assertLess(len(rows), 20)
+            self.assertEqual(prefix_end, len(rows))
+
+    def test_reader_snapshot_highwater_defers_concurrent_append(self) -> None:
+        class OneRow:
+            def __init__(self, row):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class AppendAfterHighwater:
+            def __init__(self, path: Path):
+                self.path = path
+                self.connection = sqlite3.connect(path)
+
+            def execute(self, sql, parameters=()):
+                cursor = self.connection.execute(sql, parameters)
+                if "SELECT coalesce(max(id), 0) FROM task_events" in sql:
+                    row = cursor.fetchone()
+                    with closing(sqlite3.connect(self.path)) as writer, writer:
+                        writer.execute(
+                            "INSERT INTO task_events VALUES (2, 'bulk', NULL, 'completed', '{}', '2026-07-22')"
+                        )
+                    return OneRow(row)
+                return cursor
+
+            def rollback(self):
+                return self.connection.rollback()
+
+            def close(self):
+                return self.connection.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (1, 'bulk', NULL, 'completed', '{}', '2026-07-22')"
+                )
+            with mock.patch.object(
+                hermes_supervisor, "_open_readonly",
+                side_effect=lambda path: AppendAfterHighwater(path),
+            ):
+                first_rows, first_end = hermes_supervisor._read_briefing_rows(db, 0)
+            second_rows, second_end = hermes_supervisor._read_briefing_rows(db, first_end)
+
+            self.assertEqual(([row[0] for row in first_rows], first_end), ([1], 1))
+            self.assertEqual(([row[0] for row in second_rows], second_end), ([2], 2))
+
+    def test_public_brief_cli_drains_ten_thousand_rows_without_skip_or_input_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            db = fixture / "kanban.db"
+            state_root = fixture / "state"
+            prompt = fixture / "prompt.md"
+            fake_module = fixture / "hermes_state.py"
+            fake_hermes = fixture / "fake-hermes"
+            send_log = fixture / "send.log"
+            audit = fixture / "audit.jsonl"
+            self.make_kanban(db)
+            decision = json.dumps({"decision": {
+                "key": "late", "question": "最後の判断?", "options": ["A", "B"],
+                "recommendation": "B", "dangerous": False, "importance": 10,
+            }})
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('bulk', 'bulk', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('late', 'late', NULL, NULL, 'pending', "
+                    "'supervisor', NULL, ?, NULL, NULL)",
+                    (decision,),
+                )
+                connection.executemany(
+                    "INSERT INTO task_events VALUES (?, 'bulk', NULL, 'completed', '{}', '2026-07-22')",
+                    ((index,) for index in range(1, 10_000)),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (10000, 'late', NULL, 'decision_required', '{}', '2026-07-22')"
+                )
+            prompt.write_text("trusted prompt\n", encoding="utf-8")
+            prompt.chmod(0o600)
+            fake_module.write_text(
+                "class SessionDB:\n"
+                "    def __init__(self): self.messages = []\n"
+                "    def get_session_by_title(self, title): return None\n"
+                "    def create_session(self, session_id, source, system_prompt=None): return session_id\n"
+                "    def set_session_title(self, session_id, title): return True\n"
+                "    def get_messages(self, session_id, include_inactive=False, limit=None, offset=0): return self.messages[offset:][:limit]\n"
+                "    def append_message(self, session_id, role, content):\n"
+                "        self.messages.append({'role': role, 'content': content})\n"
+                "        return len(self.messages)\n",
+                encoding="utf-8",
+            )
+            fake_hermes.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "with pathlib.Path(os.environ['FAKE_HERMES_LOG']).open('a', encoding='utf-8') as stream:\n"
+                "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "print('{\"ok\":true}')\n",
+                encoding="utf-8",
+            )
+            fake_hermes.chmod(0o700)
+            db_hash = hashlib.sha256(db.read_bytes()).hexdigest()
+            source_hashes = (
+                hashlib.sha256(CLI.read_bytes()).hexdigest(),
+                hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            )
+            environment = dict(
+                os.environ,
+                PYTHONPATH=str(fixture),
+                PYTHONDONTWRITEBYTECODE="1",
+                PYTHONWARNINGS="error::ResourceWarning",
+                FAKE_HERMES_LOG=str(send_log),
+            )
+            cursors = [0]
+            outputs = []
+            for _ in range(50):
+                result = subprocess.run(
+                    [
+                        sys.executable, str(CLI), "brief", "--kanban-db", str(db),
+                        "--state-root", str(state_root), "--hermes", str(fake_hermes),
+                        "--prompt", str(prompt), "--date", "2026-07-22",
+                    ],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=30, check=False,
+                    env=environment,
+                )
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+                outputs.append(result.stdout)
+                state = json.loads(
+                    (state_root / "briefings" / "state.json").read_text(encoding="utf-8")
+                )
+                cursors.append(state["cursor"])
+                if state["cursor"] == 10_000:
+                    break
+
+            deltas = [after - before for before, after in zip(cursors, cursors[1:])]
+            self.assertEqual(cursors[-1], 10_000)
+            self.assertTrue(all(0 < delta <= hermes_supervisor._BRIEFING_MAX_ROWS for delta in deltas))
+            self.assertEqual(cursors, sorted(set(cursors)))
+            self.assertEqual(len(deltas), 40)
+            self.assertEqual(sum(delta for delta in deltas), 10_000)
+            self.assertEqual(sum(bool(output) for output in outputs), 1)
+            self.assertEqual(len(send_log.read_text(encoding="utf-8").splitlines()), 1)
+            self.assertEqual(hashlib.sha256(db.read_bytes()).hexdigest(), db_hash)
+            self.assertFalse(audit.exists())
+            self.assertEqual(
+                (
+                    hashlib.sha256(CLI.read_bytes()).hexdigest(),
+                    hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                ),
+                source_hashes,
+            )
+
     def test_projection_caps_each_human_readable_section_and_reports_omissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "kanban.db"
@@ -6076,6 +7739,90 @@ class BriefingProjectionTests(unittest.TestCase):
                 len(prepared.markdown.encode("utf-8")),
                 hermes_supervisor._BRIEFING_ARTIFACT_MAX_BYTES,
             )
+
+    def test_initial_irrelevant_prefix_advances_then_finds_late_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            root = Path(directory) / "state"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                for index in range(1, 283):
+                    task_id = f"irrelevant-{index:03d}"
+                    connection.execute(
+                        "INSERT INTO tasks VALUES (?, ?, NULL, NULL, 'done', "
+                        "'user', '2026-07-22', ?, NULL, NULL)",
+                        (task_id, f"対象外項目{index:03d}", json.dumps({"summary": f"要約{index:03d}"})),
+                    )
+                    connection.execute(
+                        "INSERT INTO task_events VALUES (?, ?, NULL, 'completed', '{}', '2026-07-22')",
+                        (index, task_id),
+                    )
+                decision = json.dumps({"decision": {
+                    "key": "late-decision",
+                    "question": "対象外prefix後に適用しますか",
+                    "options": ["適用", "保留"],
+                    "recommendation": "保留",
+                    "dangerous": False,
+                    "importance": 9,
+                }})
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('late-decision', '最後の判断', NULL, NULL, "
+                    "'triage', 'supervisor', NULL, ?, NULL, NULL)",
+                    (decision,),
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (283, 'late-decision', NULL, "
+                    "'decision_required', '{}', '2026-07-22')"
+                )
+
+            first = hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+            state_path = root / "briefings" / "state.json"
+            after_first = json.loads(state_path.read_text(encoding="utf-8"))
+            second = hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
+
+            self.assertIsNone(first)
+            self.assertEqual(after_first["cursor"], hermes_supervisor._BRIEFING_MAX_ROWS)
+            if second is None:
+                self.fail("expected late Decision on the next finite prefix")
+            self.assertEqual([item.key for item in second.decisions], ["late-decision"])
+            persisted = json.loads(second.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["cursor"], hermes_supervisor._BRIEFING_MAX_ROWS)
+            self.assertEqual(persisted["pending"]["cursor"], 283)
+
+    def test_briefing_prompt_accepts_readonly_trusted_nix_store_hardlink_only(self) -> None:
+        readonly_store_hardlink = mock.Mock(
+            st_mode=stat.S_IFREG | 0o444,
+            st_nlink=76,
+            st_uid=0,
+        )
+
+        self.assertTrue(
+            hermes_supervisor._briefing_prompt_metadata_is_safe(
+                Path("/nix/store/3hbbv9ydljmnpdmd80w3i4dmvmjrzpjk-briefing.md"),
+                readonly_store_hardlink,
+            )
+        )
+        self.assertTrue(
+            hermes_supervisor._briefing_prompt_metadata_is_safe(
+                Path("/nix/store/3hbbv9ydljmnpdmd80w3i4dmvmjrzpjk-briefing.md"),
+                mock.Mock(st_mode=stat.S_IFREG | 0o444, st_nlink=77, st_uid=65534),
+            )
+        )
+        for path, metadata in (
+            (Path("/tmp/briefing.md"), readonly_store_hardlink),
+            (
+                Path("/nix/store/3hbbv9ydljmnpdmd80w3i4dmvmjrzpjk-briefing.md"),
+                mock.Mock(st_mode=stat.S_IFREG | 0o644, st_nlink=76, st_uid=0),
+            ),
+            (
+                Path("/nix/store/3hbbv9ydljmnpdmd80w3i4dmvmjrzpjk-briefing.md"),
+                mock.Mock(st_mode=stat.S_IFREG | 0o444, st_nlink=76, st_uid=1000),
+            ),
+        ):
+            with self.subTest(path=path, mode=metadata.st_mode, uid=metadata.st_uid):
+                self.assertFalse(
+                    hermes_supervisor._briefing_prompt_metadata_is_safe(path, metadata)
+                )
 
     def test_empty_briefing_day_is_noop_without_creating_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -6111,6 +7858,14 @@ class BriefingProjectionTests(unittest.TestCase):
             })
             state_path = root / "briefings" / "state.json"
             hermes_supervisor._write_briefing_state(state_path, state, "2026-07")
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('tail', 'tail', NULL, NULL, 'done', "
+                    "'user', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (300, 'tail', NULL, 'commented', '{}', '2026-07-31')"
+                )
 
             prepared = hermes_supervisor.prepare_briefing(db, root, "2026-08-01")
 
@@ -6217,7 +7972,7 @@ class BriefingProjectionTests(unittest.TestCase):
             self.assertNotIn("判断1?", [item.question for item in prepared.decisions])
             self.assertIn("適用確認: dry-run通過（適用候補）", prepared.markdown)
 
-    def test_event_retention_never_moves_briefing_cursor_backwards(self) -> None:
+    def test_event_retention_cursor_inversion_fails_without_state_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "kanban.db"
             root = Path(directory) / "state"
@@ -6233,13 +7988,14 @@ class BriefingProjectionTests(unittest.TestCase):
             state["cursor"] = 100
             state_path = root / "briefings" / "state.json"
             hermes_supervisor._write_briefing_state(state_path, state, "2026-07")
+            before = state_path.read_bytes()
 
-            self.assertIsNone(
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "cursor exceeds highwater"
+            ):
                 hermes_supervisor.prepare_briefing(db, root, "2026-07-22")
-            )
 
-            persisted = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["cursor"], 100)
+            self.assertEqual(state_path.read_bytes(), before)
 
     def test_pin_action_append_is_idempotent_across_crash_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -6421,6 +8177,78 @@ class BriefingProjectionTests(unittest.TestCase):
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["delivery_anomalies"], ["discord_delivery_failed"])
             self.assertEqual(persisted["pending"]["discord_status"], "failed")
+            self.assertEqual(persisted["cursor"], 0)
+
+            retry = hermes_supervisor.run_briefing_cycle(
+                db, root, "2026-07-22", Store(), "prompt", "/fake/hermes",
+                "discord", "https://ser7",
+                runner=lambda *args, **kwargs: self.fail("failed at-most-once send must not repeat"),
+            )
+            self.assertIsNotNone(retry)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["cursor"], 1)
+            self.assertIsNone(persisted["pending"])
+            self.assertEqual(persisted["delivery_anomalies"], ["discord_delivery_failed"])
+
+    def test_session_delivery_failure_keeps_cursor_then_retry_converges_without_duplicate(self) -> None:
+        class Store:
+            def __init__(self):
+                self.messages = []
+                self.fail_assistant = True
+
+            def get_session_by_title(self, title):
+                return None if not self.messages else {
+                    "id": "supervisor-console-2026-07", "title": title, "source": "cli"
+                }
+
+            def create_session(self, session_id, source, system_prompt=None):
+                return session_id
+
+            def set_session_title(self, session_id, title):
+                return True
+
+            def get_messages(self, session_id, include_inactive=False, limit=None, offset=0):
+                return self.messages[offset:][:limit]
+
+            def append_message(self, session_id, role, content):
+                if role == "assistant" and self.fail_assistant:
+                    raise OSError("fixture failure")
+                self.messages.append({"role": role, "content": content})
+                return len(self.messages)
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "kanban.db"
+            root = Path(directory) / "state"
+            self.make_kanban(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO tasks VALUES ('done', 'done', NULL, NULL, 'done', "
+                    "'supervisor', NULL, '{}', NULL, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO task_events VALUES (1, 'done', NULL, 'completed', '{}', '2026-07-22')"
+                )
+            store = Store()
+
+            with self.assertRaisesRegex(hermes_supervisor.BriefingError, "session delivery"):
+                hermes_supervisor.run_briefing_cycle(
+                    db, root, "2026-07-22", store, "prompt", "/fake/hermes",
+                    "discord", "https://ser7",
+                )
+            state_path = root / "briefings" / "state.json"
+            self.assertEqual(json.loads(state_path.read_text())["cursor"], 0)
+            self.assertEqual([item["role"] for item in store.messages], ["system", "user"])
+
+            store.fail_assistant = False
+            result = hermes_supervisor.run_briefing_cycle(
+                db, root, "2026-07-22", store, "prompt", "/fake/hermes",
+                "discord", "https://ser7",
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual([item["role"] for item in store.messages], ["system", "user", "assistant"])
+            state = json.loads(state_path.read_text())
+            self.assertEqual(state["cursor"], 1)
+            self.assertIsNone(state["pending"])
 
     def test_fake_session_and_discord_delivery_is_exactly_idempotent(self) -> None:
         class FakeSessionStore:
@@ -6688,7 +8516,7 @@ class BriefingProjectionTests(unittest.TestCase):
 
             self.assertFalse((outside / "2026-07" / "artifact.md").exists())
 
-    def test_machine_seed_is_the_only_capture_exclusion(self) -> None:
+    def test_machine_seed_and_human_reply_both_remain_source_only(self) -> None:
         class Client:
             def __init__(self):
                 self.projections = []
@@ -6710,8 +8538,8 @@ class BriefingProjectionTests(unittest.TestCase):
 
             result = hermes_supervisor.CaptureService(client).run_once(store, state_db, kanban_db)
 
-            self.assertEqual(len(client.projections), 1)
-            self.assertIn("D1 適用", client.projections[0].body)
+            self.assertEqual(client.projections, [])
+            self.assertEqual(result.cards, ())
             self.assertEqual(result.state.last_message_id, 2)
 
 
@@ -6808,6 +8636,52 @@ class Task9ConsoleReplyTests(unittest.TestCase):
                 hermes_supervisor._read_console_replies(db, self.MONTH, 0),
                 [(1, hermes_supervisor.BRIEFING_MACHINE_SEED), (3, "D1 B")],
             )
+
+    def test_repository_rejects_cursor_ahead_of_global_snapshot_highwater(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "reply cursor exceeds highwater"
+            ):
+                hermes_supervisor._read_console_replies(db, self.MONTH, 1)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES ('other', 'cli', 'other', 0, NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO messages VALUES (5, 'other', 'assistant', 'tail', 5, 1, 0, NULL, NULL)"
+                )
+            self.assertEqual(
+                hermes_supervisor._read_console_replies(db, self.MONTH, 5), []
+            )
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "reply cursor exceeds highwater"
+            ):
+                hermes_supervisor._read_console_replies(db, self.MONTH, 6)
+
+    def test_reply_cursor_inversion_preserves_state_decisions_and_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            db = Path(directory) / "state.db"
+            self.make_console(db)
+            state_path = self.open_state(root)
+            state = json.loads(state_path.read_text())
+            state["reply_cursor"] = 9
+            hermes_supervisor._write_briefing_state(state_path, state, self.MONTH)
+            before = state_path.read_bytes()
+            repository = self.Repository()
+
+            with self.assertRaisesRegex(
+                hermes_supervisor.BriefingError, "reply cursor exceeds highwater"
+            ):
+                hermes_supervisor.run_briefing_reply_cycle(
+                    db, root, self.MONTH, repository
+                )
+
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertEqual(repository.calls, [])
 
     def test_repository_rejects_session_identity_schema_limits_and_bad_values(self) -> None:
         variants = (
@@ -7279,13 +9153,24 @@ class Task10SupervisorControlTests(unittest.TestCase):
             calls.append((argv, kwargs))
             return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
         adapter = hermes_supervisor.HermesControlAdapter(
-            "/fake/hermes", "fixture", runner=runner, base_env={"SAFE": "1"}
+            "/fake/hermes", "fixture", runner=runner,
+            base_env={
+                "SAFE": "1",
+                "HERMES_KANBAN_BOARD": "hostile-board",
+                "HERMES_KANBAN_DB": "/tmp/hostile.db",
+                "HERMES_KANBAN_HOME": "/tmp/hostile-kanban-home",
+                "HERMES_HOME": "/tmp/hostile-hermes-home",
+            },
+            kanban_home=Path("/expected/hermes-root"),
         )
         self.assertEqual(adapter.list_managed_running(), ("managed-a", "managed-b"))
         self.assertEqual(calls[0][0], [
             "/fake/hermes", "kanban", "--board", "fixture", "list",
             "--status", "running", "--json",
         ])
+        self.assertEqual(calls[0][1]["env"], {
+            "SAFE": "1", "HERMES_KANBAN_HOME": "/expected/hermes-root",
+        })
         valid = self.task("managed-a", "supervisor")
         for field, value in {
             "title": 1, "body": [], "assignee": True, "priority": False,
@@ -7306,6 +9191,225 @@ class Task10SupervisorControlTests(unittest.TestCase):
                 hermes_supervisor.ControlError
             ):
                 malformed.list_managed_running()
+
+    def test_resume_reevaluation_accepts_matching_completed_idempotent_task(self) -> None:
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": [7],
+                "event_ids": [],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        response = self.task("task-a", "supervisor-control")
+        response.update({
+            "title": "Supervisor resume re-evaluation",
+            "body": body,
+            "assignee": "supervisor",
+            "status": "done",
+            "completed_at": 3,
+        })
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
+
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture", runner=runner, base_env={}
+        )
+        self.assertEqual(adapter.schedule_reevaluation((7,), ()), "task-a")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][4], "create")
+
+    def test_resume_reevaluation_accepts_live_completed_idempotent_schema(self) -> None:
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": [7],
+                "event_ids": [],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        response = self.task("task-a", "supervisor-control")
+        response.update({
+            "title": "Supervisor resume re-evaluation",
+            "body": body,
+            "assignee": "supervisor",
+            "status": "done",
+            "completed_at": 3,
+            "model_override": None,
+            "provider_override": None,
+        })
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes",
+            "fixture",
+            runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, json.dumps(response), ""
+            ),
+            base_env={},
+        )
+        self.assertEqual(adapter.schedule_reevaluation((7,), ()), "task-a")
+
+    def test_resume_reevaluation_parks_before_assigning_dispatchable_profile(self) -> None:
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": [7],
+                "event_ids": [],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        created = self.task("task-a", "supervisor-control")
+        created.update({
+            "title": "Supervisor resume re-evaluation",
+            "body": body,
+            "assignee": None,
+            "status": "blocked",
+        })
+        parked = dict(created)
+        parked.update({
+            "assignee": "supervisor",
+            "status": "scheduled",
+            "model_override": None,
+            "provider_override": None,
+        })
+        shown = {
+            "task": parked,
+            "comments": [],
+            "events": [],
+            "parents": [],
+            "children": [],
+            "runs": [],
+            "latest_summary": None,
+        }
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(list(argv))
+            command = argv[4]
+            if command == "create":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(created), "")
+            if command in ("schedule", "assign"):
+                return subprocess.CompletedProcess(argv, 0, "ok", "")
+            if command == "show":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(shown), "")
+            raise AssertionError(argv)
+
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture", runner=runner, base_env={}
+        )
+        self.assertEqual(adapter.schedule_reevaluation((7,), ()), "task-a")
+        self.assertNotIn("--assignee", calls[0])
+        self.assertEqual(
+            [call[4] for call in calls], ["create", "schedule", "assign", "show"]
+        )
+
+    def test_resume_reevaluation_rejects_completed_ack_outside_scratch_workspace(self) -> None:
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": [7],
+                "event_ids": [],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        response = self.task("task-a", "supervisor-control")
+        response.update({
+            "title": "Supervisor resume re-evaluation",
+            "body": body,
+            "assignee": "supervisor",
+            "status": "done",
+            "completed_at": 3,
+            "workspace_kind": "main",
+        })
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes",
+            "fixture",
+            runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, json.dumps(response), ""
+            ),
+            base_env={},
+        )
+        with self.assertRaises(hermes_supervisor.ControlError):
+            adapter.schedule_reevaluation((7,), ())
+
+    def test_resume_reevaluation_reconciles_ambiguous_schedule_with_public_show(self) -> None:
+        body = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "resume_reevaluation",
+                "message_ids": [7],
+                "event_ids": [],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        created = self.task("task-a", "supervisor-control")
+        created.update({
+            "title": "Supervisor resume re-evaluation",
+            "body": body,
+            "assignee": None,
+            "status": "blocked",
+            "started_at": None,
+        })
+        parked = {
+            **created,
+            "status": "scheduled",
+            "model_override": None,
+            "provider_override": None,
+        }
+        calls = []
+        show_count = 0
+
+        def runner(argv, **kwargs):
+            nonlocal show_count
+            calls.append(argv)
+            command = argv[4]
+            if command == "create":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(created), "")
+            if command == "schedule":
+                raise subprocess.TimeoutExpired(argv, 30)
+            if command == "assign":
+                return subprocess.CompletedProcess(argv, 0, "ok", "")
+            if command == "show":
+                show_count += 1
+                task = dict(parked)
+                if show_count == 2:
+                    task["assignee"] = "supervisor"
+                shown = {
+                    "task": task,
+                    "comments": [],
+                    "events": [],
+                    "parents": [],
+                    "children": [],
+                    "runs": [],
+                    "latest_summary": None,
+                }
+                return subprocess.CompletedProcess(argv, 0, json.dumps(shown), "")
+            raise AssertionError(command)
+
+        adapter = hermes_supervisor.HermesControlAdapter(
+            "/fake/hermes", "fixture", runner=runner, base_env={}
+        )
+        self.assertEqual(adapter.schedule_reevaluation((7,), ()), "task-a")
+        self.assertEqual(
+            [call[4] for call in calls],
+            ["create", "schedule", "show", "assign", "show"],
+        )
 
     def test_emergency_status_reconciliation_uses_explicit_bounded_board_reads(self) -> None:
         calls = []
@@ -7586,6 +9690,187 @@ class Task10SupervisorControlTests(unittest.TestCase):
             self.assertEqual(result.state.pending_message_ids, ())
             self.assertEqual(result.reevaluation_task_id, "resume-task")
 
+    def test_resume_terminal_audit_failure_keeps_durable_completion_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(frozen=True),
+                last_message_id=7, last_event_id=9,
+                pending_message_ids=(7,), pending_event_ids=(9,),
+            ))
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self): self.calls = []
+                def schedule_reevaluation(self, messages, events):
+                    self.calls.append((messages, events))
+                    return "resume-task"
+            adapter = Adapter()
+            real_append = audit.append
+            append_count = 0
+            def fail_third(record):
+                nonlocal append_count
+                append_count += 1
+                if append_count == 3:
+                    raise hermes_supervisor.StateError("injected terminal append failure")
+                return real_append(record)
+
+            with mock.patch.object(audit, "append", side_effect=fail_third):
+                with self.assertRaisesRegex(
+                    hermes_supervisor.StateError, "injected terminal append failure"
+                ):
+                    hermes_supervisor.execute_control(
+                        store, audit, adapter, None, "resume", now=310
+                    )
+            failed = store.read()
+            self.assertEqual(append_count, 3)
+            self.assertEqual(adapter.calls, [((7,), (9,))])
+            self.assertEqual(failed.control_state, "running")
+            self.assertEqual(failed.pending_message_ids, (7,))
+            self.assertEqual(failed.pending_event_ids, (9,))
+            self.assertIsNotNone(failed.pending_audit_completion)
+            self.assertEqual(
+                [record["kind"] for record in audit.read_records()],
+                ["control_transition", "resume_intent"],
+            )
+
+            retried = hermes_supervisor.execute_control(
+                store, audit, adapter, None, "resume", now=311
+            )
+            self.assertEqual(adapter.calls, [((7,), (9,))])
+            self.assertEqual(retried.state.pending_message_ids, ())
+            self.assertEqual(retried.state.pending_event_ids, ())
+            self.assertIsNone(retried.state.pending_audit_completion)
+            terminal = [
+                record for record in audit.read_records()
+                if record["kind"] == "resume_result"
+            ]
+            self.assertEqual(len(terminal), 1)
+            self.assertEqual(terminal[0]["task_id"], "resume-task")
+
+    def test_resume_terminal_audit_success_then_clear_failure_restarts_without_reschedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(frozen=True),
+                last_message_id=7, pending_message_ids=(7,),
+            ))
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            class Adapter:
+                def __init__(self): self.calls = []
+                def schedule_reevaluation(self, messages, events):
+                    self.calls.append((messages, events))
+                    return "resume-task"
+            adapter = Adapter()
+            real_write = store._write_unlocked
+            def fail_clear(state):
+                if (
+                    state.pending_audit_completion is None
+                    and audit.path.exists()
+                    and any(record.get("kind") == "resume_result" for record in audit.read_records())
+                ):
+                    raise hermes_supervisor.StateError("injected completion clear failure")
+                return real_write(state)
+
+            with mock.patch.object(store, "_write_unlocked", side_effect=fail_clear):
+                with self.assertRaisesRegex(
+                    hermes_supervisor.StateError, "injected completion clear failure"
+                ):
+                    hermes_supervisor.execute_control(
+                        store, audit, adapter, None, "resume", now=320
+                    )
+            self.assertIsNotNone(store.read().pending_audit_completion)
+            self.assertEqual(adapter.calls, [((7,), ())])
+            terminal_before = [
+                record for record in audit.read_records()
+                if record.get("kind") == "resume_result"
+            ]
+            self.assertEqual(len(terminal_before), 1)
+
+            restarted = hermes_supervisor.execute_control(
+                hermes_supervisor.StateStore(store.path), audit, adapter, None,
+                "resume", now=321,
+            )
+            terminal_after = [
+                record for record in audit.read_records()
+                if record.get("kind") == "resume_result"
+            ]
+            self.assertEqual(adapter.calls, [((7,), ())])
+            self.assertEqual(terminal_after, terminal_before)
+            self.assertIsNone(restarted.state.pending_audit_completion)
+            self.assertEqual(restarted.state.pending_message_ids, ())
+
+    def test_control_pending_audit_readback_fail_closed_matrix(self) -> None:
+        completion_id = hermes_supervisor._resume_intent_key((7,), ())
+        expected = {
+            "schema_version": 1, "kind": "resume_result", "timestamp": 320,
+            "action": "resume", "message_count": 1, "event_count": 0,
+            "outcome": "scheduled", "task_id": "resume-task",
+            "completion_id": completion_id,
+        }
+        completion = hermes_supervisor._state_pending_audit({
+            "channel": "control", "operation_id": completion_id,
+            "terminal_record": expected,
+        })
+        assert completion is not None
+        variants = {
+            "wrong-operation": dict(expected, completion_id="f" * 64),
+            "payload-mismatch": dict(expected, message_count=2),
+            "task-mismatch": dict(expected, task_id="other-task"),
+            "unknown-schema": dict(expected, schema_version=99),
+            "unknown-kind": dict(expected, kind="unknown"),
+            "unknown-channel": dict(expected, channel="watch"),
+            "duplicate-terminal": (expected, dict(expected)),
+            "conflicting-terminal": (expected, dict(expected, task_id="other-task")),
+        }
+        for name, variant in variants.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = hermes_supervisor.StateStore(root / "state.json")
+                store.write(replace(
+                    hermes_supervisor.initial_supervisor_state(),
+                    last_message_id=7, pending_message_ids=(7,),
+                    pending_audit_completion=completion,
+                ))
+                audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+                records = variant if type(variant) is tuple else (variant,)
+                for record in records:
+                    audit.append(record)
+                patcher = (
+                    mock.patch.object(
+                        audit, "append",
+                        side_effect=hermes_supervisor.StateError("injected append failure"),
+                    )
+                    if name == "wrong-operation" else nullcontext()
+                )
+                with patcher, self.assertRaises((
+                    hermes_supervisor.ControlError, hermes_supervisor.StateError
+                )):
+                    hermes_supervisor.execute_control(
+                        store, audit, object(), None, "pause", now=321
+                    )
+                self.assertIsNotNone(store.read().pending_audit_completion)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=7, pending_message_ids=(7,),
+                pending_audit_completion=completion,
+            ))
+            audit = hermes_supervisor.ControlAuditLog(root / "audit.jsonl")
+            audit.path.write_bytes(
+                (json.dumps(expected, separators=(",", ":")) + "\n{").encode("ascii")
+            )
+            os.chmod(audit.path, 0o600)
+            with self.assertRaises(hermes_supervisor.StateError):
+                hermes_supervisor.execute_control(
+                    store, audit, object(), None, "pause", now=321
+                )
+            self.assertIsNotNone(store.read().pending_audit_completion)
+
     def test_transaction_lock_is_private_and_nonblocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transaction.lock"
@@ -7603,7 +9888,8 @@ class Task10SupervisorControlTests(unittest.TestCase):
             argv = [
                 "hermes-supervisor", "state", "control", "--state", str(root / "state"),
                 "--audit", str(root / "audit"), "--board", "fixture",
-                "--hermes", "/fake/hermes", "pause",
+                "--hermes", "/fake/hermes", "--kanban-home", str(root / "hermes"),
+                "pause",
             ]
             with mock.patch.object(sys, "argv", argv), mock.patch.object(
                 hermes_supervisor, "execute_control", return_value=result
@@ -7622,7 +9908,8 @@ class Task10SupervisorControlTests(unittest.TestCase):
         module = (REPO_ROOT / "home/modules/ai/hermes-supervisor.nix").read_text()
         for fragment in (
             "control.enable", "default = false", "controlCommand", "watch.lock",
-            "--audit", "--board", "--hermes", "--ntfy-url", "--curl",
+            "--audit", "--board", "--hermes", "--kanban-home",
+            "--ntfy-url", "--curl",
             "primaryGoalCommand", "hermes-supervisor-primary-goal",
             "state primary-goal", "--goal-id",
             "http://192.168.11.9:8080/nas-alerts",
@@ -7635,6 +9922,13 @@ class Task10SupervisorControlTests(unittest.TestCase):
         )
         self.assertNotIn("--conflict-exit-code 0", control_module)
         self.assertIn("--conflict-exit-code 75", control_module)
+        self.assertIn("\n        resume)", control_module)
+        resume_block = control_module[
+            control_module.index("\n        resume)"):
+            control_module.index("\n        emergency-stop)")
+        ]
+        self.assertIn('"${kanbanDb}.dispatch.lock"', resume_block)
+        self.assertGreaterEqual(resume_block.count("--conflict-exit-code 75"), 2)
         self.assertIn("--state '${stateRoot}/state.json'", module)
         self.assertIn("--audit '${stateRoot}/control-audit.jsonl'", module)
         self.assertNotIn("hermes-supervisor-control.timer", module)
@@ -7719,6 +10013,191 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
         record.update(updates)
         return record
 
+    def test_audit_id_ordering_rejection_is_independent_of_duplicates_and_source_consistency(self) -> None:
+        terminal = self.audit_record()
+        unsorted = dict(
+            terminal,
+            input_message_ids=[2, 1],
+            input_event_ids=[7],
+            source_ids=["event:7", "message:1", "message:2"],
+        )
+        duplicate = dict(
+            terminal,
+            input_message_ids=[1, 1],
+            input_event_ids=[7],
+            source_ids=["event:7", "message:1", "message:1"],
+        )
+        inconsistent = dict(
+            terminal,
+            input_message_ids=[1, 2],
+            input_event_ids=[7],
+            source_ids=["message:1", "message:2"],
+        )
+        for record, message in (
+            (unsorted, "invalid message ids"),
+            (duplicate, "invalid message ids"),
+            (inconsistent, "invalid unique source ids"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                hermes_supervisor.AuditError, message
+            ):
+                hermes_supervisor.validate_run_audit_record(record)
+
+        pending = {
+            "channel": "watch",
+            "operation_id": terminal["batch_id"],
+            "terminal_record": unsorted,
+        }
+        with self.assertRaisesRegex(
+            hermes_supervisor.StateError, "pending watch audit record: invalid"
+        ) as caught:
+            hermes_supervisor._state_pending_audit(pending)
+        self.assertIsInstance(caught.exception.__cause__, hermes_supervisor.AuditError)
+        self.assertEqual(str(caught.exception.__cause__), "invalid message ids")
+
+    def test_pending_audit_state_schema_is_closed_bounded_and_v3_round_trips_exactly(self) -> None:
+        terminal = self.audit_record()
+        pending = {
+            "channel": "watch",
+            "operation_id": terminal["batch_id"],
+            "terminal_record": terminal,
+        }
+        checked = hermes_supervisor._state_pending_audit(pending)
+        self.assertIsNotNone(checked)
+        assert checked is not None
+        self.assertEqual(asdict(checked), pending)
+        with tempfile.TemporaryDirectory() as directory:
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            state = replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=2, last_event_id=7,
+                pending_message_ids=(1, 2), pending_event_ids=(7,),
+                pending_audit_completion=checked,
+            )
+            store.write(state)
+            self.assertEqual(store.read(), state)
+            self.assertEqual(json.loads(store.path.read_text())["schema_version"], 3)
+
+        empty = dict(terminal, input_message_ids=[], input_event_ids=[], source_ids=[],
+                     capture_relations=[], source_change_count=0)
+        oversized = dict(
+            terminal,
+            skipped_candidates=[
+                {"card_id": f"card-{index:03d}-" + "x" * 90,
+                 "reason_code": "lower_priority"}
+                for index in range(200)
+            ],
+        )
+        hermes_supervisor.validate_run_audit_record(oversized)
+        hostile = {
+            "unknown-key": dict(pending, secret="raw"),
+            "missing-key": {key: value for key, value in pending.items() if key != "channel"},
+            "wrong-channel-type": dict(pending, channel=True),
+            "wrong-operation-type": dict(pending, operation_id=True),
+            "oversized-operation": dict(pending, operation_id="x" * 129),
+            "wrong-record-type": dict(pending, terminal_record=[]),
+            "empty-input-ids": dict(pending, terminal_record=empty),
+            "bool-input-id": dict(
+                pending,
+                terminal_record=dict(terminal, input_message_ids=[True, 2],
+                                     source_ids=["message:2", "message:True"]),
+            ),
+            "duplicate-input-id": dict(
+                pending,
+                terminal_record=dict(terminal, input_message_ids=[1, 1],
+                                     source_ids=["message:1", "message:1"]),
+            ),
+            "unsorted-input-id": dict(
+                pending,
+                terminal_record=dict(
+                    terminal,
+                    input_message_ids=[2, 1],
+                    input_event_ids=[7],
+                    source_ids=["event:7", "message:1", "message:2"],
+                ),
+            ),
+            "too-many-input-ids": dict(
+                pending,
+                terminal_record=dict(
+                    terminal,
+                    input_message_ids=list(range(1, hermes_supervisor._RUN_AUDIT_MAX_ITEMS + 2)),
+                    source_ids=[
+                        f"message:{item}"
+                        for item in range(1, hermes_supervisor._RUN_AUDIT_MAX_ITEMS + 2)
+                    ],
+                ),
+            ),
+            "raw-source-extra": dict(
+                pending, terminal_record=dict(terminal, raw_source_content="secret")
+            ),
+            "oversized-record": dict(pending, terminal_record=oversized),
+        }
+        for name, value in hostile.items():
+            with self.subTest(name=name), self.assertRaises(hermes_supervisor.StateError):
+                hermes_supervisor._state_pending_audit(value)
+
+    def test_run_pending_audit_readback_fail_closed_matrix(self) -> None:
+        expected = self.audit_record()
+        completion = hermes_supervisor._state_pending_audit({
+            "channel": "watch", "operation_id": expected["batch_id"],
+            "terminal_record": expected,
+        })
+        assert completion is not None
+        source_mismatch = dict(
+            expected,
+            input_message_ids=[3], input_event_ids=[7],
+            source_ids=["event:7", "message:3"], capture_relations=[],
+            source_change_count=2,
+        )
+        variants = {
+            "wrong-batch": [dict(expected, batch_id="wrong-batch")],
+            "payload-mismatch": [dict(expected, confidence=0.5)],
+            "source-ids-mismatch": [source_mismatch],
+            "card-mismatch": [dict(expected, primary_card_id="other-card")],
+            "unknown-schema": [dict(expected, schema_version=99)],
+            "unknown-kind": [dict(expected, kind="completed")],
+            "unknown-channel": [dict(expected, channel="control")],
+            "duplicate-terminal": [expected, dict(expected)],
+            "conflicting-terminal": [expected, dict(expected, primary_card_id="other-card")],
+        }
+        for name, records in variants.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = hermes_supervisor.StateStore(root / "state.json")
+                store.write(replace(
+                    hermes_supervisor.initial_supervisor_state(),
+                    last_message_id=2, last_event_id=7,
+                    pending_message_ids=(1, 2), pending_event_ids=(7,),
+                    pending_audit_completion=completion,
+                ))
+                audit = hermes_supervisor.RunAuditLog(root / "audit.jsonl")
+                audit.path.write_bytes(b"".join(
+                    (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                    for record in records
+                ))
+                os.chmod(audit.path, 0o600)
+                with self.assertRaises(hermes_supervisor.AuditError):
+                    hermes_supervisor._reconcile_watch_audit(store, audit)
+                self.assertIsNotNone(store.read().pending_audit_completion)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = hermes_supervisor.StateStore(root / "state.json")
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=2, last_event_id=7,
+                pending_message_ids=(1, 2), pending_event_ids=(7,),
+                pending_audit_completion=completion,
+            ))
+            audit = hermes_supervisor.RunAuditLog(root / "audit.jsonl")
+            audit.path.write_bytes(
+                (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n{").encode("ascii")
+            )
+            os.chmod(audit.path, 0o600)
+            with self.assertRaisesRegex(hermes_supervisor.AuditError, "truncated"):
+                hermes_supervisor._reconcile_watch_audit(store, audit)
+            self.assertIsNotNone(store.read().pending_audit_completion)
+
     def test_run_audit_is_strict_private_and_rejects_forbidden_or_unknown_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "private"
@@ -7764,6 +10243,312 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
         self.assertEqual(record["input_message_ids"], [])
         self.assertEqual(record["input_event_ids"], [])
         self.assertNotIn("reasoning", json.dumps(record))
+
+    def test_watch_terminal_audit_failure_reconciles_before_no_change_without_duplicate_card(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            client = WatchCycleTests.Client()
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            real_append = audit.append
+            terminal_calls = 0
+            def fail_terminal(record):
+                nonlocal terminal_calls
+                terminal_calls += 1
+                if terminal_calls == 1:
+                    raise hermes_supervisor.AuditError("injected terminal append failure")
+                return real_append(record)
+
+            with mock.patch.object(audit, "append", side_effect=fail_terminal):
+                with self.assertRaisesRegex(
+                    hermes_supervisor.AuditError, "injected terminal append failure"
+                ):
+                    hermes_supervisor.run_watch_cycle(
+                        store, state_db, kanban_db, load_policy(POLICY), client,
+                        datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
+                    )
+            failed = store.read()
+            records = audit.read_records()
+            self.assertEqual(terminal_calls, 1)
+            self.assertEqual(len(client.batch_calls), 1)
+            self.assertEqual(failed.last_supervisor_message_id, 1)
+            self.assertIsNotNone(failed.pending_audit_completion)
+            self.assertEqual([record["status"] for record in records], ["pending"])
+            self.assertEqual(records[0]["input_message_ids"], [])
+
+            restarted_client = WatchCycleTests.Client()
+            result = hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(store.path), state_db, kanban_db,
+                load_policy(POLICY), restarted_client,
+                datetime(2026, 7, 22, 12, 1, tzinfo=timezone.utc), audit=audit,
+            )
+            records = audit.read_records()
+            self.assertEqual(result.batch.action, "no_change")
+            self.assertEqual(restarted_client.batch_calls, [])
+            self.assertEqual(len(client.batch_calls), 1)
+            self.assertEqual(len(records), 2)
+            original = records[0]
+            self.assertEqual(original["status"], "completed")
+            self.assertEqual(original["input_message_ids"], [1])
+            self.assertEqual(original["primary_card_id"], "batch-1")
+            self.assertEqual(records[1]["status"], "completed")
+            self.assertEqual(records[1]["input_message_ids"], [])
+            self.assertIsNone(store.read().pending_audit_completion)
+
+    def test_watch_terminal_audit_success_then_clear_failure_restarts_without_duplicate_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            client = WatchCycleTests.Client()
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            real_write = store._write_unlocked
+            def fail_clear(state):
+                if (
+                    state.pending_audit_completion is None
+                    and audit.path.exists()
+                    and any(record["status"] == "completed" for record in audit.read_records())
+                ):
+                    raise hermes_supervisor.StateError("injected completion clear failure")
+                return real_write(state)
+
+            with mock.patch.object(store, "_write_unlocked", side_effect=fail_clear):
+                with self.assertRaisesRegex(
+                    hermes_supervisor.StateError, "injected completion clear failure"
+                ):
+                    hermes_supervisor.run_watch_cycle(
+                        store, state_db, kanban_db, load_policy(POLICY), client,
+                        datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
+                    )
+            failed = store.read()
+            self.assertIsNotNone(failed.pending_audit_completion)
+            self.assertEqual(len(client.batch_calls), 1)
+            terminal_before = [
+                record for record in audit.read_records()
+                if record["status"] in ("completed", "failed")
+            ]
+            self.assertEqual(len(terminal_before), 1)
+            self.assertEqual(terminal_before[0]["status"], "completed")
+
+            restarted_client = WatchCycleTests.Client()
+            result = hermes_supervisor.run_watch_cycle(
+                hermes_supervisor.StateStore(store.path), state_db, kanban_db,
+                load_policy(POLICY), restarted_client,
+                datetime(2026, 7, 22, 12, 1, tzinfo=timezone.utc), audit=audit,
+            )
+            original_identity = terminal_before[0]["batch_id"]
+            matching = [
+                record for record in audit.read_records()
+                if record["batch_id"] == original_identity
+            ]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching, terminal_before)
+            self.assertEqual(client.batch_calls.__len__(), 1)
+            self.assertEqual(restarted_client.batch_calls, [])
+            self.assertEqual(result.batch.action, "no_change")
+            self.assertIsNone(store.read().pending_audit_completion)
+
+    def test_public_cli_process_restart_reconciles_resume_and_watch_without_duplicate_calls(self) -> None:
+        fake_source = """#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+command = args[3] if len(args) > 3 and args[0] == 'kanban' and args[1] == '--board' else args[1]
+if command != 'create':
+    raise SystemExit(3)
+def option(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+title = args[4] if args[0] == 'kanban' and args[1] == '--board' else args[2]
+body = option('--body')
+mode = os.environ['FAKE_MODE']
+audit = pathlib.Path(os.environ['FAKE_AUDIT'])
+with open(os.environ['FAKE_CALLS'], 'a', encoding='ascii') as stream:
+    stream.write(mode + ':create\\n')
+if mode == 'resume':
+    audit.chmod(0o400)
+    owner = 'supervisor-control'
+    status = 'done'
+else:
+    audit.parent.chmod(0o500)
+    owner = option('--created-by', 'supervisor-watcher')
+    status = 'scheduled'
+task = {
+    'id': 'resume-task' if mode == 'resume' else 'batch-task',
+    'title': title, 'body': body, 'assignee': 'supervisor', 'status': status,
+    'priority': 0, 'tenant': None, 'workspace_kind': 'scratch',
+    'workspace_path': None, 'branch_name': None, 'project_id': None,
+    'created_by': owner, 'created_at': 1, 'started_at': 1,
+    'completed_at': 2 if status == 'done' else None, 'result': None,
+    'skills': [], 'max_retries': 2, 'session_id': None,
+    'workflow_template_id': None, 'current_step_key': None,
+}
+print(json.dumps(task, separators=(',', ':')))
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake-hermes"
+            fake.write_text(fake_source, encoding="utf-8")
+            fake.chmod(0o700)
+            calls = root / "calls.log"
+            environment = dict(
+                os.environ, PYTHONDONTWRITEBYTECODE="1", FAKE_CALLS=str(calls)
+            )
+
+            resume_root = root / "resume"
+            resume_root.mkdir(mode=0o700)
+            resume_state = resume_root / "state.json"
+            resume_audit = resume_root / "control-audit.jsonl"
+            hermes_supervisor.StateStore(resume_state).write(replace(
+                hermes_supervisor.initial_supervisor_state(frozen=True),
+                last_message_id=7, pending_message_ids=(7,),
+            ))
+            resume_argv = [
+                sys.executable, str(CLI), "state", "control",
+                "--state", str(resume_state), "--audit", str(resume_audit),
+                "--board", "fixture", "--hermes", str(fake),
+                "--kanban-home", str(root / "kanban-home"), "resume",
+            ]
+            first = subprocess.run(
+                resume_argv, text=True, capture_output=True, check=False,
+                env=dict(environment, FAKE_MODE="resume", FAKE_AUDIT=str(resume_audit)),
+            )
+            self.assertNotEqual(first.returncode, 0)
+            resume_audit.chmod(0o600)
+            second = subprocess.run(
+                resume_argv, text=True, capture_output=True, check=False,
+                env=dict(environment, FAKE_MODE="resume", FAKE_AUDIT=str(resume_audit)),
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            control_records = hermes_supervisor.ControlAuditLog(resume_audit).read_records()
+            resume_terminals = [
+                record for record in control_records if record.get("kind") == "resume_result"
+            ]
+            self.assertEqual(len(resume_terminals), 1)
+            self.assertEqual(resume_terminals[0]["task_id"], "resume-task")
+            self.assertIsNone(
+                hermes_supervisor.StateStore(resume_state).read().pending_audit_completion
+            )
+
+            watch_root = root / "watch"
+            watch_root.mkdir(mode=0o700)
+            state_db, kanban_db = WatchCycleTests.fixture(str(watch_root), message=True)
+            watch_state = watch_root / "state.json"
+            audit_root = watch_root / "audit"
+            audit_root.mkdir(mode=0o700)
+            watch_audit = audit_root / "run-audit.jsonl"
+            watch_argv = [
+                sys.executable, str(CLI), "watch", "--policy", str(POLICY),
+                "--state-db", str(state_db), "--kanban-db", str(kanban_db),
+                "--state", str(watch_state), "--board", "fixture",
+                "--hermes", str(fake), "--audit", str(watch_audit),
+            ]
+            first = subprocess.run(
+                watch_argv, text=True, capture_output=True, check=False,
+                env=dict(environment, FAKE_MODE="watch", FAKE_AUDIT=str(watch_audit)),
+            )
+            self.assertNotEqual(first.returncode, 0)
+            audit_root.chmod(0o700)
+            second = subprocess.run(
+                watch_argv, text=True, capture_output=True, check=False,
+                env=dict(environment, FAKE_MODE="watch", FAKE_AUDIT=str(watch_audit)),
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            run_records = hermes_supervisor.RunAuditLog(watch_audit).read_records()
+            original_id = next(
+                record["batch_id"] for record in run_records
+                if record["input_message_ids"] == [1]
+            )
+            self.assertEqual(
+                len([record for record in run_records if record["batch_id"] == original_id]),
+                1,
+            )
+            self.assertIsNone(
+                hermes_supervisor.StateStore(watch_state).read().pending_audit_completion
+            )
+            self.assertEqual(
+                calls.read_text(encoding="ascii").splitlines(),
+                ["resume:create", "watch:create"],
+            )
+
+    def test_public_watch_lock_serializes_two_pending_reconciliations_without_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+            terminal = self.audit_record(
+                batch_id="concurrent-watch", input_message_ids=[1],
+                input_event_ids=[], source_ids=["message:1"],
+                capture_relations=[], source_change_count=1,
+            )
+            completion = hermes_supervisor._state_pending_audit({
+                "channel": "watch", "operation_id": terminal["batch_id"],
+                "terminal_record": terminal,
+            })
+            assert completion is not None
+            store.write(replace(
+                hermes_supervisor.initial_supervisor_state(),
+                last_message_id=1, last_supervisor_message_id=1,
+                pending_audit_completion=completion,
+            ))
+            audit.append(terminal)
+            client = WatchCycleTests.Client()
+            now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+
+            def reconcile():
+                return hermes_supervisor.run_watch_cycle(
+                    hermes_supervisor.StateStore(store.path), state_db, kanban_db,
+                    load_policy(POLICY), client, now, audit=audit,
+                )
+
+            outcomes = []
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(reconcile) for _ in range(2)]
+                for future in futures:
+                    try:
+                        outcomes.append(future.result())
+                    except hermes_supervisor.StateBusyError:
+                        pass
+            self.assertTrue(outcomes)
+            self.assertEqual(client.capture_calls, [])
+            self.assertEqual(client.batch_calls, [])
+            self.assertIsNone(store.read().pending_audit_completion)
+            self.assertEqual(
+                len([
+                    record for record in audit.read_records()
+                    if record["batch_id"] == terminal["batch_id"]
+                ]),
+                1,
+            )
+
+    def test_frozen_watch_pages_backlog_to_audit_limit_without_cursor_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_db, kanban_db = WatchCycleTests.fixture(directory)
+            message_count = hermes_supervisor._RUN_AUDIT_MAX_ITEMS + 1
+            with closing(sqlite3.connect(state_db)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                    ("session", "cli", "capture", 0, None),
+                )
+                connection.executemany(
+                    "INSERT INTO messages VALUES (?, ?, 'user', '', ?, 1, 0)",
+                    ((message_id, "session", message_id) for message_id in range(1, message_count + 1)),
+                )
+            store = hermes_supervisor.StateStore(Path(directory) / "state.json")
+            store.write(hermes_supervisor.initial_supervisor_state(frozen=True))
+            client = WatchCycleTests.Client()
+            audit = hermes_supervisor.RunAuditLog(Path(directory) / "run-audit.jsonl")
+
+            result = hermes_supervisor.run_watch_cycle(
+                store, state_db, kanban_db, load_policy(POLICY), client,
+                datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
+            )
+            record = audit.read_records()[0]
+
+        expected_ids = list(range(1, hermes_supervisor._RUN_AUDIT_MAX_ITEMS + 1))
+        self.assertEqual(result.batch.action, "scheduled")
+        self.assertEqual(result.batch.reason, "control_frozen")
+        self.assertEqual(list(result.batch.message_ids), expected_ids)
+        self.assertEqual(record["input_message_ids"], expected_ids)
+        self.assertEqual(result.batch.state.last_supervisor_message_id, 0)
+        self.assertEqual(client.batch_calls, [])
 
     def test_watch_audit_ids_distinguish_new_input_inside_same_ten_minute_bucket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -7829,7 +10614,7 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
         self.assertEqual(len({record["batch_id"] for record in records}), 2)
         self.assertEqual([record["status"] for record in records], ["failed", "completed"])
 
-    def test_watch_audits_capture_correction_relation_without_raw_content(self) -> None:
+    def test_watch_defers_correction_interpretation_without_raw_audit_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_db, kanban_db = WatchCycleTests.fixture(directory, message=True)
             with closing(sqlite3.connect(state_db)) as connection, connection:
@@ -7844,13 +10629,9 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                 datetime(2026, 7, 22, 12, tzinfo=timezone.utc), audit=audit,
             )
             record = audit.read_records()[0]
-        self.assertEqual(record["capture_relations"], [{
-            "source_message_id": 1,
-            "card_id": "capture-1",
-            "relation_kind": "correction_candidate",
-        }])
+        self.assertEqual(record["capture_relations"], [])
         self.assertNotIn("RAW PRIVATE INTENT", json.dumps(record))
-        self.assertEqual(record["human_corrections"], 1)
+        self.assertEqual(record["human_corrections"], 0)
 
     def test_terminal_audit_accepts_explicit_human_metrics_annotation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -8200,7 +10981,8 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                   last_heartbeat_at INTEGER, current_run_id INTEGER, workflow_template_id TEXT,
                   current_step_key TEXT, skills TEXT, model_override TEXT, max_retries INTEGER,
                   goal_mode INTEGER NOT NULL DEFAULT 0, goal_max_turns INTEGER, session_id TEXT,
-                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0
+                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
+                  provider_override TEXT
                 );
                 INSERT INTO tasks (id,title,status,created_by,created_at,completed_at) VALUES
                   ('old-owned', 'old', 'done', 'supervisor-watcher', 1, 100),
@@ -8279,6 +11061,17 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
                 [candidate.kind for candidate in plan.artifacts],
                 ["detailed_logs", "sandboxes"],
             )
+
+    def test_retention_accepts_current_provider_override_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "kanban.db"
+            self.make_retention_db(database)
+
+            plan = hermes_supervisor.plan_retention(
+                database, "supervisor", {}, days=30, now=4_000_000
+            )
+
+            self.assertEqual(plan.archive_ids, ("old-owned",))
 
     def test_retention_schema_matches_installed_projection_without_board_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -8485,6 +11278,1141 @@ class Task11AuditEcoRetentionTests(unittest.TestCase):
             ), mock.patch("builtins.print"):
                 self.assertEqual(hermes_supervisor.main(), 2)
             self.assertTrue(stale.exists())
+
+
+class Task12AcceptanceReportTests(unittest.TestCase):
+    WINDOW = {"start": 1000, "end": 2000}
+
+    def fixture(
+        self, root: Path, *, phase: str = "shadow",
+        mutate: Any = None, shadow_report: Path | None = None,
+        window: dict[str, int] | None = None,
+    ) -> dict[str, Path]:
+        root.mkdir(mode=0o700, exist_ok=True)
+        selected_window = dict(self.WINDOW if window is None else window)
+        paths = {name: root / name for name in (
+            "state.json", "audit.jsonl", "kanban.db", "evidence.json", "human.json"
+        )}
+        if not hasattr(self, "_acceptance_fixture_windows"):
+            self._acceptance_fixture_windows: dict[Path, dict[str, int]] = {}
+        self._acceptance_fixture_windows[paths["evidence.json"]] = selected_window
+        state = asdict(hermes_supervisor.initial_supervisor_state())
+        state["mode"] = phase
+        record = Task11AuditEcoRetentionTests().audit_record(
+            invocation_at=selected_window["start"] + 200,
+            started_at=selected_window["start"] + 200,
+            finished_at=selected_window["start"] + 210,
+            review_duration_supplied_seconds=300,
+        )
+        limited = None
+        if phase == "limited":
+            limited = {
+                "shadow_report_sha256": hashlib.sha256(shadow_report.read_bytes()).hexdigest()
+                if shadow_report is not None else "0" * 64,
+                "total_dispatches": 1, "allowed_low_risk_dispatches": 1,
+                "verifier_separation_violations": 0, "unauthorized_writes": 0,
+                "external_writes": 0, "restart_recovery": True, "pause_resume": True,
+                "bounded_worker_failure": True, "vertical_slices": 2,
+                "vault_manual_checks_required": 0, "budget_within_limit": True,
+            }
+        evidence = {
+            "schema_version": 1, "phase": phase, "window": selected_window,
+            "observed_at": selected_window["end"], "source_digests": {},
+            "units": {
+                name: {"successes": 1, "failures": 0,
+                       "max_gap_seconds": 600 if name == "watch" else 0}
+                for name in ("watch", "briefing", "gc")
+            },
+            "observations": {
+                "state_message_highwater": 0, "state_event_highwater": 0,
+                "invalid_message_ids": 0, "self_amplification": 0,
+                "capture_duplicates": 0, "worker_dispatches": 0,
+                "mode_control_violations": 0,
+            },
+            "deployment": {"generation": "fixed-gen-1", "sha256": "a" * 64},
+            "limited": limited,
+        }
+        human = {
+            "schema_version": 1, "phase": phase, "window": selected_window,
+            "assessed_at": selected_window["end"], "assessor": "operator-1",
+            "attestation": "explicit-human-assessment-v1", "source_digests": {},
+            "evidence_sha256": "0" * 64,
+            "assessments": {
+                "capture_quality": "PASS", "primary_goal_acceptability": "PASS",
+                "major_capture_misses": 0, "false_capture_reversible": True,
+            },
+        }
+        values = {"state": state, "record": record, "evidence": evidence, "human": human}
+        if mutate is not None:
+            mutate(values)
+        paths["state.json"].write_text(json.dumps(state, sort_keys=True), encoding="ascii")
+        paths["audit.jsonl"].write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="ascii"
+        )
+        with closing(sqlite3.connect(paths["kanban.db"])) as connection, connection:
+            connection.executescript("""
+                CREATE TABLE tasks (
+                  id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, assignee TEXT,
+                  status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT,
+                  created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER,
+                  workspace_kind TEXT NOT NULL DEFAULT 'scratch', workspace_path TEXT,
+                  branch_name TEXT, claim_lock TEXT, claim_expires INTEGER, tenant TEXT,
+                  result TEXT, idempotency_key TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                  worker_pid INTEGER, last_failure_error TEXT, max_runtime_seconds INTEGER,
+                  last_heartbeat_at INTEGER, current_run_id INTEGER, workflow_template_id TEXT,
+                  current_step_key TEXT, skills TEXT, model_override TEXT, max_retries INTEGER,
+                  goal_mode INTEGER NOT NULL DEFAULT 0, goal_max_turns INTEGER, session_id TEXT,
+                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
+                  provider_override TEXT
+                );
+                CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT);
+                CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, run_id INTEGER, kind TEXT, created_at INTEGER);
+            """)
+        digests = {
+            name: hashlib.sha256(paths[filename].read_bytes()).hexdigest()
+            for name, filename in (("state", "state.json"), ("audit", "audit.jsonl"),
+                                   ("kanban_db", "kanban.db"))
+        }
+        evidence["source_digests"] = digests
+        paths["evidence.json"].write_text(json.dumps(evidence, sort_keys=True), encoding="ascii")
+        human["source_digests"] = digests
+        human["evidence_sha256"] = hashlib.sha256(paths["evidence.json"].read_bytes()).hexdigest()
+        paths["human.json"].write_text(json.dumps(human, sort_keys=True), encoding="ascii")
+        for path in paths.values():
+            path.chmod(0o600)
+        return paths
+
+    def build(self, paths: dict[str, Path], *, phase: str = "shadow",
+              shadow_report: Path | None = None,
+              window: dict[str, int] | None = None) -> dict[str, Any]:
+        selected_window = (
+            getattr(self, "_acceptance_fixture_windows", {}).get(
+                paths["evidence.json"], self.WINDOW
+            ) if window is None else window
+        )
+        return hermes_supervisor.build_acceptance_report(
+            phase, paths["state.json"], paths["audit.jsonl"], paths["kanban.db"],
+            paths["evidence.json"], human_path=paths["human.json"],
+            shadow_report_path=shadow_report, window_start=selected_window["start"],
+            window_end=selected_window["end"], now=selected_window["end"],
+        )
+
+    def test_acceptance_uses_exact_production_tasks_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            self.assertEqual(self.build(paths)["overall"], "PASS")
+            for label, sql in (
+                ("unknown", "ALTER TABLE tasks ADD COLUMN surprise_secret TEXT"),
+                ("type", "CREATE TABLE replacement AS SELECT * FROM tasks"),
+                ("not_null", "CREATE TABLE replacement (id TEXT PRIMARY KEY)"),
+            ):
+                with self.subTest(label=label), tempfile.TemporaryDirectory() as mutant_directory:
+                    mutant_paths = self.fixture(Path(mutant_directory))
+                    with closing(sqlite3.connect(mutant_paths["kanban.db"])) as connection, connection:
+                        if label == "unknown":
+                            connection.execute(sql)
+                        else:
+                            create_sql = connection.execute(
+                                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+                            ).fetchone()[0]
+                            connection.execute("ALTER TABLE tasks RENAME TO old_tasks")
+                            if label == "type":
+                                connection.execute(create_sql.replace("priority INTEGER", "priority TEXT"))
+                            else:
+                                connection.execute(create_sql.replace("title TEXT NOT NULL", "title TEXT"))
+                            connection.execute("DROP TABLE old_tasks")
+                    with self.assertRaisesRegex(
+                        hermes_supervisor.AcceptanceError, "unsupported acceptance Kanban schema"
+                    ):
+                        self.build(mutant_paths)
+
+    def test_human_assessment_is_explicitly_attested_and_evidence_bound_not_falsely_signed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            report = self.build(paths)
+        self.assertEqual(report["overall"], "PASS")
+        self.assertTrue(all(item["status"] == "PASS" for item in report["criteria"]))
+        self.assertNotIn("signed", json.dumps(report).lower())
+
+    def test_shadow_one_mutant_per_criterion_is_independent(self) -> None:
+        def idle(values: dict[str, Any]) -> None:
+            values["record"].update(input_message_ids=[], input_event_ids=[], source_ids=[],
+                                    capture_relations=[], source_change_count=0)
+        def retry(values: dict[str, Any]) -> None:
+            call = dict(values["record"]["calls"][0])
+            call.update(attempt_id="attempt-2", result_id="result-2", retry=True)
+            values["record"]["calls"] = [dict(call, attempt_id="attempt-1", result_id="result-1"), call]
+            values["record"]["accepted_result_ids"] = ["result-1", "result-2"]
+        cases = {
+            "timer_watch_continuity": lambda v: v["evidence"]["units"]["watch"].update(failures=1),
+            "briefing": lambda v: v["evidence"]["units"]["briefing"].update(failures=1),
+            "gc": lambda v: v["evidence"]["units"]["gc"].update(failures=1),
+            "mode_control_boundary": lambda v: v["evidence"]["observations"].update(mode_control_violations=1),
+            "cursor_pending_convergence": lambda v: v["evidence"]["observations"].update(state_message_highwater=1),
+            "idle_llm_zero": idle,
+            "budget_retry": retry,
+            "deterministic_source_handling": lambda v: v["evidence"]["observations"].update(invalid_message_ids=1),
+            "worker_dispatch_zero": lambda v: v["evidence"]["observations"].update(worker_dispatches=1),
+            "run_health_diagnostics": lambda v: v["record"].update(status="failed", failure_code="fixture_failure"),
+            "duplicate_capture_zero": lambda v: v["evidence"]["observations"].update(capture_duplicates=1),
+            "capture_quality": lambda v: v["human"]["assessments"].update(capture_quality="FAIL"),
+            "primary_goal_acceptability": lambda v: v["human"]["assessments"].update(primary_goal_acceptability="FAIL"),
+            "review_duration": lambda v: v["record"].update(review_duration_supplied_seconds=601),
+            "fixed_deployed_generation": lambda v: v["evidence"].update(deployment={"generation": None, "sha256": None}),
+        }
+        for target, mutate in cases.items():
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                report = self.build(self.fixture(Path(directory), mutate=mutate))
+                changed = [item for item in report["criteria"] if item["status"] != "PASS"]
+                self.assertEqual(report["overall"], "FAIL")
+                self.assertEqual([item["criterion"] for item in changed], [target])
+                self.assertIn(changed[0]["status"], ("FAIL", "UNOBSERVED"))
+                self.assertRegex(changed[0]["reason_code"], r"^[a-z0-9_]+$")
+                self.assertTrue(all(type(count) is int and count >= 0
+                                    for count in changed[0]["counts"].values()))
+
+    def test_limited_requires_digest_bound_prior_shadow_pass_and_mutates_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shadow_paths = self.fixture(root / "shadow")
+            shadow_report = root / "shadow-pass.json"
+            shadow_report.write_text(json.dumps(self.build(shadow_paths), sort_keys=True), encoding="ascii")
+            shadow_report.chmod(0o600)
+            limited_paths = self.fixture(
+                root / "limited", phase="limited", shadow_report=shadow_report,
+                window={"start": 3000, "end": 4000},
+            )
+            report = self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+            self.assertEqual(report["overall"], "PASS")
+            limited = json.loads(limited_paths["evidence.json"].read_text(encoding="ascii"))
+            limited["limited"]["shadow_report_sha256"] = "f" * 64
+            limited_paths["evidence.json"].write_text(json.dumps(limited, sort_keys=True), encoding="ascii")
+            limited_paths["evidence.json"].chmod(0o600)
+            human = json.loads(limited_paths["human.json"].read_text(encoding="ascii"))
+            human["evidence_sha256"] = hashlib.sha256(limited_paths["evidence.json"].read_bytes()).hexdigest()
+            limited_paths["human.json"].write_text(json.dumps(human, sort_keys=True), encoding="ascii")
+            limited_paths["human.json"].chmod(0o600)
+            failed = self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+            criterion = {item["criterion"]: item for item in failed["criteria"]}
+            self.assertEqual(failed["overall"], "FAIL")
+            self.assertEqual(criterion["shadow_prerequisite"]["status"], "FAIL")
+
+    def test_limited_rejects_non_prior_shadow_window_matrix(self) -> None:
+        cases = {
+            "same": ({"start": 3000, "end": 4000}, {"start": 3000, "end": 4000}),
+            "overlap": ({"start": 2500, "end": 3500}, {"start": 3000, "end": 4000}),
+            "future": ({"start": 4100, "end": 4200}, {"start": 3000, "end": 4000}),
+            "stale_gap": ({"start": 1, "end": 2}, {"start": 90003, "end": 91003}),
+        }
+        for label, (shadow_window, limited_window) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shadow_paths = self.fixture(root / "shadow", window=shadow_window)
+                shadow_value = self.build(shadow_paths)
+                shadow_report = root / "shadow.json"
+                shadow_report.write_text(json.dumps(shadow_value, sort_keys=True), encoding="ascii")
+                shadow_report.chmod(0o600)
+                limited_paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    window=limited_window,
+                )
+                result = self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+                criterion = {item["criterion"]: item for item in result["criteria"]}
+                self.assertEqual(criterion["shadow_prerequisite"]["status"], "FAIL")
+
+    def test_limited_rejects_reversed_shadow_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid_paths = self.fixture(root / "valid-shadow")
+            shadow_value = self.build(valid_paths)
+            shadow_value["window"] = {"start": 2000, "end": 1000}
+            shadow_report = root / "shadow.json"
+            shadow_report.write_text(json.dumps(shadow_value, sort_keys=True), encoding="ascii")
+            shadow_report.chmod(0o600)
+            limited_paths = self.fixture(
+                root / "limited", phase="limited", shadow_report=shadow_report,
+                window={"start": 3000, "end": 4000},
+            )
+            with self.assertRaisesRegex(
+                hermes_supervisor.AcceptanceError, "invalid Shadow prerequisite report"
+            ):
+                self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+
+    def test_limited_rejects_shadow_report_with_open_nested_schema(self) -> None:
+        mutations = (
+            lambda report: report.update(observed={"raw": "RAW_SECRET_TOKEN"}),
+            lambda report: report.update(evidence={"unexpected": ["open"]}),
+            lambda report: report.update(notice=["open", "shape"]),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shadow_paths = self.fixture(root / "shadow")
+                shadow_report = root / "shadow.json"
+                report = self.build(shadow_paths)
+                mutate(report)
+                shadow_report.write_text(json.dumps(report, sort_keys=True), encoding="ascii")
+                shadow_report.chmod(0o600)
+                limited_paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    window={"start": 3000, "end": 4000},
+                )
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+                self.assertLessEqual(len(str(caught.exception)), 96)
+                self.assertNotIn("RAW_SECRET_TOKEN", str(caught.exception))
+
+    def test_limited_rejects_shadow_report_with_open_or_unbounded_criterion_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shadow_paths = self.fixture(root / "shadow")
+            shadow_report = root / "shadow.json"
+            report = self.build(shadow_paths)
+            report["criteria"][0]["counts"] = {"secret": "RAW_SECRET_TOKEN"}
+            shadow_report.write_text(json.dumps(report, sort_keys=True), encoding="ascii")
+            shadow_report.chmod(0o600)
+            limited_paths = self.fixture(
+                root / "limited", phase="limited", shadow_report=shadow_report,
+                window={"start": 3000, "end": 4000},
+            )
+            with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+            self.assertLessEqual(len(str(caught.exception)), 96)
+            self.assertNotIn("RAW_SECRET_TOKEN", str(caught.exception))
+
+    def test_limited_one_mutant_per_criterion_is_independent(self) -> None:
+        cases = {
+            "allowed_low_risk_dispatch_only": lambda x: x.update(total_dispatches=2),
+            "verifier_separation": lambda x: x.update(verifier_separation_violations=1),
+            "no_unauthorized_or_external_writes": lambda x: x.update(unauthorized_writes=1),
+            "restart_recovery": lambda x: x.update(restart_recovery=False),
+            "pause_resume": lambda x: x.update(pause_resume=False),
+            "bounded_worker_failure": lambda x: x.update(bounded_worker_failure=False),
+            "initial_budget": lambda x: x.update(budget_within_limit=False),
+            "cutover_vertical_slices": lambda x: x.update(vertical_slices=1),
+            "no_manual_vault_task_check": lambda x: x.update(vault_manual_checks_required=1),
+        }
+        for target, mutate in cases.items():
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shadow_paths = self.fixture(root / "shadow")
+                shadow_report = root / "shadow.json"
+                shadow_report.write_text(json.dumps(self.build(shadow_paths), sort_keys=True), encoding="ascii")
+                shadow_report.chmod(0o600)
+                paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    mutate=lambda v, change=mutate: change(v["evidence"]["limited"]),
+                    window={"start": 3000, "end": 4000},
+                )
+                report = self.build(paths, phase="limited", shadow_report=shadow_report)
+                changed = [item for item in report["criteria"] if item["status"] != "PASS"]
+                self.assertEqual(report["overall"], "FAIL")
+                self.assertEqual([item["criterion"] for item in changed], [target])
+                self.assertRegex(changed[0]["reason_code"], r"^[a-z0-9_]+$")
+
+    def test_strict_schema_rejects_unknown_bool_nonfinite_future_and_unsafe_file(self) -> None:
+        mutations = (
+            lambda e: e.update(unknown=1),
+            lambda e: e.update(schema_version=True),
+            lambda e: e.update(observed_at=float("nan")),
+            lambda e: e.update(observed_at=2001),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as directory:
+                paths = self.fixture(Path(directory))
+                evidence = json.loads(paths["evidence.json"].read_text(encoding="ascii"))
+                mutate(evidence)
+                paths["evidence.json"].write_text(json.dumps(evidence), encoding="ascii")
+                paths["evidence.json"].chmod(0o600)
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    self.build(paths)
+                self.assertLessEqual(len(str(caught.exception)), 96)
+                self.assertNotIn(str(paths["evidence.json"]), str(caught.exception))
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            paths["human.json"].chmod(0o644)
+            with self.assertRaisesRegex(hermes_supervisor.AcceptanceError, "human assessment"):
+                self.build(paths)
+
+    def test_public_cli_pass_fail_no_write_and_exclusive_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self.fixture(root)
+            argv = [
+                sys.executable, str(CLI), "acceptance-report", "--phase", "shadow",
+                "--state", str(paths["state.json"]), "--audit", str(paths["audit.jsonl"]),
+                "--kanban-db", str(paths["kanban.db"]), "--evidence", str(paths["evidence.json"]),
+                "--human-assessment", str(paths["human.json"]),
+                "--window-start", "1000", "--window-end", "2000", "--observed-at", "2000",
+            ]
+            before = {name: (path.read_bytes(), path.stat().st_mode, path.stat().st_size,
+                             path.stat().st_mtime_ns) for name, path in paths.items()}
+            listing = sorted(item.name for item in root.iterdir())
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                    timeout=30, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            parsed = json.loads(result.stdout)
+            self.assertEqual(parsed["overall"], "PASS")
+            self.assertLessEqual(len(result.stdout), 128 * 1024)
+            self.assertEqual(result.stderr, b"")
+            self.assertEqual(listing, sorted(item.name for item in root.iterdir()))
+            self.assertEqual(before, {name: (path.read_bytes(), path.stat().st_mode,
+                                            path.stat().st_size, path.stat().st_mtime_ns)
+                                      for name, path in paths.items()})
+            self.assertFalse((root / "kanban.db-wal").exists())
+            self.assertFalse((root / "kanban.db-shm").exists())
+            output = root / "report.json"
+            published = subprocess.run(argv + ["--output", str(output)], stdin=subprocess.DEVNULL,
+                                       capture_output=True, timeout=30, check=False)
+            self.assertEqual(published.returncode, 0, published.stderr)
+            self.assertEqual(output.read_bytes(), published.stdout)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            collision = subprocess.run(argv + ["--output", str(output)], stdin=subprocess.DEVNULL,
+                                       capture_output=True, timeout=30, check=False)
+            self.assertEqual(collision.returncode, 2)
+            self.assertEqual(output.read_bytes(), published.stdout)
+            self.assertNotIn(str(root), collision.stderr.decode("utf-8"))
+
+            fail_shadow_argv = list(argv)
+            human_index = fail_shadow_argv.index("--human-assessment")
+            del fail_shadow_argv[human_index:human_index + 2]
+            failed_shadow = subprocess.run(
+                fail_shadow_argv, stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=30, check=False,
+            )
+            self.assertEqual(failed_shadow.returncode, 0, failed_shadow.stderr)
+            self.assertEqual(json.loads(failed_shadow.stdout)["overall"], "FAIL")
+
+            shadow_report = root / "shadow-prerequisite.json"
+            shadow_report.write_bytes(result.stdout)
+            shadow_report.chmod(0o600)
+            limited_paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    window={"start": 3000, "end": 4000},
+                )
+            limited_argv = [
+                sys.executable, str(CLI), "acceptance-report", "--phase", "limited",
+                "--state", str(limited_paths["state.json"]),
+                "--audit", str(limited_paths["audit.jsonl"]),
+                "--kanban-db", str(limited_paths["kanban.db"]),
+                "--evidence", str(limited_paths["evidence.json"]),
+                "--human-assessment", str(limited_paths["human.json"]),
+                "--shadow-report", str(shadow_report), "--window-start", "3000",
+                "--window-end", "4000", "--observed-at", "4000",
+            ]
+            limited_before = {path: path.read_bytes() for path in (*limited_paths.values(), shadow_report)}
+            passed_limited = subprocess.run(
+                limited_argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+            )
+            self.assertEqual(passed_limited.returncode, 0, passed_limited.stderr)
+            self.assertEqual(json.loads(passed_limited.stdout)["overall"], "PASS")
+            report_index = limited_argv.index("--shadow-report")
+            fail_limited_argv = limited_argv[:report_index] + limited_argv[report_index + 2:]
+            failed_limited = subprocess.run(
+                fail_limited_argv, stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=30, check=False,
+            )
+            self.assertEqual(failed_limited.returncode, 0, failed_limited.stderr)
+            self.assertEqual(json.loads(failed_limited.stdout)["overall"], "FAIL")
+            self.assertEqual(limited_before, {
+                path: path.read_bytes() for path in (*limited_paths.values(), shadow_report)
+            })
+
+    @staticmethod
+    def _snapshot(paths: list[Path]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for path in paths:
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                result[str(path)] = None
+            else:
+                result[str(path)] = (
+                    path.read_bytes() if stat.S_ISREG(metadata.st_mode) else None,
+                    metadata.st_mode, metadata.st_size, metadata.st_mtime_ns,
+                    metadata.st_ino, metadata.st_nlink,
+                )
+        return result
+
+    @staticmethod
+    def _argv(paths: dict[str, Path], *, phase: str = "shadow",
+              shadow_report: Path | None = None) -> list[str]:
+        argv = [
+            sys.executable, str(CLI), "acceptance-report", "--phase", phase,
+            "--state", str(paths["state.json"]), "--audit", str(paths["audit.jsonl"]),
+            "--kanban-db", str(paths["kanban.db"]), "--evidence", str(paths["evidence.json"]),
+            "--human-assessment", str(paths["human.json"]),
+            "--window-start", "1000", "--window-end", "2000", "--observed-at", "2000",
+        ]
+        if shadow_report is not None:
+            argv += ["--shadow-report", str(shadow_report)]
+        return argv
+
+    @staticmethod
+    def _reseal_human(paths: dict[str, Path]) -> None:
+        human = json.loads(paths["human.json"].read_text(encoding="ascii"))
+        human["evidence_sha256"] = hashlib.sha256(paths["evidence.json"].read_bytes()).hexdigest()
+        paths["human.json"].write_text(json.dumps(human, sort_keys=True), encoding="ascii")
+        paths["human.json"].chmod(0o600)
+
+    def test_input_reader_accepts_bounded_partial_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.json"
+            payload = b'{"safe":1}'
+            path.write_bytes(payload)
+            path.chmod(0o600)
+            real_read = os.read
+            def short_read(fd: int, size: int) -> bytes:
+                return real_read(fd, min(size, 2))
+            with mock.patch.object(hermes_supervisor.os, "read", side_effect=short_read):
+                self.assertEqual(
+                    hermes_supervisor._acceptance_file(path, "state", 1024), payload
+                )
+
+    def test_input_adversarial_schema_bounds_and_file_kind_matrix(self) -> None:
+        json_mutants = (
+            ("missing", lambda value: value.pop("deployment")),
+            ("unknown", lambda value: value.update(unknown_key=1)),
+            ("wrong_type", lambda value: value.update(units=[])),
+            ("bool_as_int", lambda value: value.update(observed_at=True)),
+            ("nan", lambda value: value.update(observed_at=float("nan"))),
+            ("infinity", lambda value: value.update(observed_at=float("inf"))),
+            ("negative", lambda value: value["observations"].update(worker_dispatches=-1)),
+            ("overflow", lambda value: value["observations"].update(worker_dispatches=1_000_001)),
+            ("future", lambda value: value.update(observed_at=2001)),
+            ("window", lambda value: value.update(window={"start": 999, "end": 2000})),
+            ("digest", lambda value: value["source_digests"].update(state="f" * 64)),
+            ("string", lambda value: value["deployment"].update(generation="x" * 129)),
+            ("list", lambda value: value.update(units={"watch": []})),
+        )
+        for label, mutate in json_mutants:
+            with self.subTest(kind="json", label=label), tempfile.TemporaryDirectory() as directory:
+                paths = self.fixture(Path(directory))
+                value = json.loads(paths["evidence.json"].read_text(encoding="ascii"))
+                mutate(value)
+                paths["evidence.json"].write_text(json.dumps(value), encoding="ascii")
+                paths["evidence.json"].chmod(0o600)
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    self.build(paths)
+                message = str(caught.exception)
+                self.assertLessEqual(len(message), 96)
+                self.assertNotIn("x" * 32, message)
+                self.assertNotIn(str(paths["evidence.json"]), message)
+
+        malformed = (b"{", b'{"schema_version":1} trailing', b'{"schema_version":NaN}')
+        for payload in malformed:
+            with self.subTest(kind="malformed", payload=payload), tempfile.TemporaryDirectory() as directory:
+                paths = self.fixture(Path(directory))
+                paths["evidence.json"].write_bytes(payload)
+                paths["evidence.json"].chmod(0o600)
+                with self.assertRaises(hermes_supervisor.AcceptanceError):
+                    self.build(paths)
+
+        for input_name in ("state.json", "audit.jsonl", "evidence.json", "human.json"):
+            for unsafe in ("symlink", "directory", "fifo", "multi_hardlink", "wrong_mode"):
+                with self.subTest(input=input_name, unsafe=unsafe), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    paths = self.fixture(root)
+                    target = paths[input_name]
+                    saved = root / "saved"
+                    target.rename(saved)
+                    if unsafe == "symlink":
+                        target.symlink_to(saved)
+                    elif unsafe == "directory":
+                        target.mkdir(mode=0o700)
+                    elif unsafe == "fifo":
+                        os.mkfifo(target, 0o600)
+                    elif unsafe == "multi_hardlink":
+                        os.link(saved, target)
+                    else:
+                        saved.rename(target)
+                        target.chmod(0o640)
+                    with self.assertRaises(hermes_supervisor.AcceptanceError):
+                        self.build(paths)
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            paths["evidence.json"].write_bytes(b"{" + b" " * (64 * 1024))
+            paths["evidence.json"].chmod(0o600)
+            with self.assertRaises(hermes_supervisor.AcceptanceError):
+                self.build(paths)
+
+    def test_input_fd_and_sqlite_lifecycle_fault_matrix_preserves_primary_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            open_error = OSError("SECRET_OPEN_BODY")
+            with mock.patch.object(hermes_supervisor.os, "open", side_effect=open_error), mock.patch.object(
+                hermes_supervisor.os, "close", wraps=os.close,
+            ) as close_mock:
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._acceptance_file(paths["state.json"], "state", 1024)
+            self.assertIs(caught.exception.__cause__, open_error)
+            self.assertEqual(close_mock.call_count, 0)
+            read_error = OSError("SECRET_READ_BODY")
+            close_error = OSError("SECRET_CLOSE_BODY")
+            real_read = os.read
+            with mock.patch.object(hermes_supervisor.os, "read", side_effect=read_error), mock.patch.object(
+                hermes_supervisor.os, "close", side_effect=close_error,
+            ) as close_mock:
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._acceptance_file(paths["state.json"], "state", 1024)
+            self.assertIs(caught.exception.__cause__, read_error)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertNotIn("SECRET", str(caught.exception))
+            with mock.patch.object(hermes_supervisor.os, "fstat", side_effect=OSError("SECRET_FSTAT")), mock.patch.object(
+                hermes_supervisor.os, "close", wraps=os.close,
+            ) as close_mock:
+                with self.assertRaises(hermes_supervisor.AcceptanceError):
+                    hermes_supervisor._acceptance_file(paths["state.json"], "state", 1024)
+            self.assertEqual(close_mock.call_count, 1)
+            with mock.patch.object(hermes_supervisor.os, "read", wraps=real_read), mock.patch.object(
+                hermes_supervisor.os, "close", side_effect=close_error,
+            ):
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._acceptance_file(paths["state.json"], "state", 1024 * 1024)
+            self.assertIs(caught.exception.__cause__, close_error)
+
+            class FaultConnection:
+                def __init__(self, fail_query: bool, fail_rollback: bool, fail_close: bool) -> None:
+                    self.fail_query = fail_query
+                    self.fail_rollback = fail_rollback
+                    self.fail_close = fail_close
+                    self.rollback_attempted = False
+                    self.close_attempted = False
+                    self.sql = ""
+                def execute(self, sql: str) -> Any:
+                    self.sql = sql
+                    if self.fail_query and sql.startswith("SELECT"):
+                        raise sqlite3.OperationalError("SECRET_QUERY")
+                    return self
+                def fetchall(self) -> list[tuple[Any, ...]]:
+                    table = self.sql.removeprefix("PRAGMA table_info(").removesuffix(")")
+                    if table == "tasks":
+                        return [
+                            (cid, name, column_type, not_null, None, primary_key)
+                            for cid, (name, column_type, not_null, primary_key) in enumerate(
+                                hermes_supervisor._HERMES_TASK_SCHEMA
+                            )
+                        ]
+                    return [
+                        (cid, column, "INTEGER" if column in {"id", "run_id", "created_at"} else "TEXT",
+                         0, None, 1 if column == "id" else 0)
+                        for cid, column in enumerate(
+                            hermes_supervisor._ACCEPTANCE_DB_SCHEMAS[table]
+                        )
+                    ]
+                def fetchone(self) -> tuple[int]:
+                    return (0,)
+                def rollback(self) -> None:
+                    self.rollback_attempted = True
+                    if self.fail_rollback:
+                        raise sqlite3.OperationalError("SECRET_ROLLBACK")
+                def close(self) -> None:
+                    self.close_attempted = True
+                    if self.fail_close:
+                        raise sqlite3.OperationalError("SECRET_CLOSE")
+
+            connect_error = sqlite3.OperationalError("SECRET_CONNECT")
+            with mock.patch.object(hermes_supervisor.sqlite3, "connect", side_effect=connect_error), mock.patch.object(
+                hermes_supervisor.os, "close", wraps=os.close,
+            ) as close_mock:
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._acceptance_kanban_counts(paths["kanban.db"])
+            self.assertIs(caught.exception.__cause__, connect_error)
+            self.assertEqual(close_mock.call_count, 1)
+
+            for fail_query, fail_rollback, fail_close in (
+                (True, True, True), (False, True, True), (False, False, True),
+            ):
+                fake = FaultConnection(fail_query, fail_rollback, fail_close)
+                with self.subTest(sqlite=(fail_query, fail_rollback, fail_close)), mock.patch.object(
+                    hermes_supervisor.sqlite3, "connect", return_value=fake,
+                ):
+                    with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                        hermes_supervisor._acceptance_kanban_counts(paths["kanban.db"])
+                self.assertTrue(fake.rollback_attempted)
+                self.assertTrue(fake.close_attempted)
+                self.assertLessEqual(len(str(caught.exception)), 96)
+                self.assertNotIn("SECRET", str(caught.exception))
+
+    def test_all_input_readers_reject_nonregular_alias_mode_owner_and_malformed_bounds(self) -> None:
+        ordinary = ("state.json", "audit.jsonl", "evidence.json", "human.json")
+        for input_name in (*ordinary, "kanban.db"):
+            for unsafe in ("symlink", "directory", "fifo", "socket", "multi_hardlink", "wrong_mode"):
+                with self.subTest(input=input_name, unsafe=unsafe), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    paths = self.fixture(root)
+                    target = paths[input_name]
+                    saved = root / "saved"
+                    target.rename(saved)
+                    opened_socket: socket.socket | None = None
+                    try:
+                        if unsafe == "symlink":
+                            target.symlink_to(saved)
+                        elif unsafe == "directory":
+                            target.mkdir(mode=0o700)
+                        elif unsafe == "fifo":
+                            os.mkfifo(target, 0o600)
+                        elif unsafe == "socket":
+                            opened_socket = socket.socket(socket.AF_UNIX)
+                            opened_socket.bind(str(target))
+                        elif unsafe == "multi_hardlink":
+                            os.link(saved, target)
+                        else:
+                            saved.rename(target)
+                            target.chmod(0o640)
+                        with self.assertRaises(hermes_supervisor.AcceptanceError):
+                            self.build(paths)
+                    finally:
+                        if opened_socket is not None:
+                            opened_socket.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            for input_name in ordinary:
+                with self.subTest(input=input_name, unsafe="wrong_owner"), mock.patch.object(
+                    hermes_supervisor.os, "geteuid", return_value=os.geteuid() + 1,
+                ):
+                    with self.assertRaises(hermes_supervisor.AcceptanceError):
+                        hermes_supervisor._acceptance_file(paths[input_name], "sealed input", 300 * 1024 * 1024)
+            with mock.patch.object(hermes_supervisor.os, "geteuid", return_value=os.geteuid() + 1):
+                with self.assertRaises(hermes_supervisor.AcceptanceError):
+                    hermes_supervisor._acceptance_kanban_counts(paths["kanban.db"])
+
+        malformed_rows = (
+            ("state.json", b"{"),
+            ("audit.jsonl", b'{"secret":"RAW_SECRET_TOKEN"'),
+            ("human.json", b"[]"),
+        )
+        for input_name, payload in malformed_rows:
+            with self.subTest(input=input_name, malformed=True), tempfile.TemporaryDirectory() as directory:
+                paths = self.fixture(Path(directory))
+                paths[input_name].write_bytes(payload)
+                paths[input_name].chmod(0o600)
+                with self.assertRaises((hermes_supervisor.AcceptanceError, hermes_supervisor.AuditError)) as caught:
+                    self.build(paths)
+                self.assertLessEqual(len(str(caught.exception)), 96)
+                self.assertNotIn("RAW_SECRET_TOKEN", str(caught.exception))
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.fixture(Path(directory))
+            paths["audit.jsonl"].write_bytes(b"{" + b"x" * (64 * 1024) + b"}\n")
+            paths["audit.jsonl"].chmod(0o600)
+            with self.assertRaises(hermes_supervisor.AuditError):
+                self.build(paths)
+
+        for unsafe in ("symlink", "directory", "fifo", "socket", "multi_hardlink", "wrong_mode"):
+            with self.subTest(input="shadow_report", unsafe=unsafe), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shadow_paths = self.fixture(root / "shadow")
+                shadow_report = root / "shadow.json"
+                shadow_report.write_text(json.dumps(self.build(shadow_paths), sort_keys=True), encoding="ascii")
+                shadow_report.chmod(0o600)
+                limited_paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    window={"start": 3000, "end": 4000},
+                )
+                saved = root / "saved-shadow"
+                shadow_report.rename(saved)
+                opened_socket = None
+                try:
+                    if unsafe == "symlink":
+                        shadow_report.symlink_to(saved)
+                    elif unsafe == "directory":
+                        shadow_report.mkdir(mode=0o700)
+                    elif unsafe == "fifo":
+                        os.mkfifo(shadow_report, 0o600)
+                    elif unsafe == "socket":
+                        opened_socket = socket.socket(socket.AF_UNIX)
+                        opened_socket.bind(str(shadow_report))
+                    elif unsafe == "multi_hardlink":
+                        os.link(saved, shadow_report)
+                    else:
+                        saved.rename(shadow_report)
+                        shadow_report.chmod(0o640)
+                    with self.assertRaises(hermes_supervisor.AcceptanceError):
+                        self.build(limited_paths, phase="limited", shadow_report=shadow_report)
+                finally:
+                    if opened_socket is not None:
+                        opened_socket.close()
+
+    def test_output_parent_and_staging_collision_rejection_is_no_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self.fixture(root / "inputs")
+            payload = b'{"overall":"PASS"}\n'
+            unsafe_parent = root / "unsafe"
+            unsafe_parent.mkdir(mode=0o755)
+            with self.assertRaises(hermes_supervisor.AcceptanceError):
+                hermes_supervisor._publish_acceptance_report(unsafe_parent / "report.json", payload)
+            owned_parent = root / "owner-check"
+            owned_parent.mkdir(mode=0o700)
+            with mock.patch.object(hermes_supervisor.os, "geteuid", return_value=os.geteuid() + 1):
+                with self.assertRaises(hermes_supervisor.AcceptanceError):
+                    hermes_supervisor._publish_acceptance_report(owned_parent / "report.json", payload)
+            self.assertEqual([], list(owned_parent.iterdir()))
+            private_parent = root / "private"
+            private_parent.mkdir(mode=0o700)
+            output = private_parent / "report.json"
+            staging = private_parent / f".{output.name}.tmp.{os.getpid()}.fixed"
+            staging.write_bytes(b"DO_NOT_DELETE_SECRET")
+            staging.chmod(0o600)
+            before = self._snapshot([staging, *paths.values()])
+            listing = sorted(item.name for item in private_parent.iterdir())
+            with mock.patch.object(hermes_supervisor.secrets, "token_hex", return_value="fixed"):
+                with self.assertRaises(hermes_supervisor.AcceptanceError):
+                    hermes_supervisor._publish_acceptance_report(output, payload)
+            self.assertEqual(before, self._snapshot([staging, *paths.values()]))
+            self.assertEqual(listing, sorted(item.name for item in private_parent.iterdir()))
+            self.assertFalse(output.exists())
+
+            for staging_kind in ("symlink", "hardlink", "directory"):
+                with self.subTest(staging=staging_kind):
+                    variant_parent = root / f"private-{staging_kind}"
+                    variant_parent.mkdir(mode=0o700)
+                    variant_output = variant_parent / "report.json"
+                    variant_staging = variant_parent / f".{variant_output.name}.tmp.{os.getpid()}.fixed"
+                    protected = variant_parent / "protected"
+                    protected.write_bytes(b"PROTECTED_STAGING_SECRET")
+                    protected.chmod(0o600)
+                    if staging_kind == "symlink":
+                        variant_staging.symlink_to(protected)
+                    elif staging_kind == "hardlink":
+                        os.link(protected, variant_staging)
+                    else:
+                        variant_staging.mkdir(mode=0o700)
+                    before_variant = self._snapshot([protected, variant_staging])
+                    variant_listing = sorted(item.name for item in variant_parent.iterdir())
+                    with mock.patch.object(hermes_supervisor.secrets, "token_hex", return_value="fixed"):
+                        with self.assertRaises(hermes_supervisor.AcceptanceError):
+                            hermes_supervisor._publish_acceptance_report(variant_output, payload)
+                    self.assertEqual(before_variant, self._snapshot([protected, variant_staging]))
+                    self.assertEqual(variant_listing, sorted(item.name for item in variant_parent.iterdir()))
+                    self.assertFalse(variant_output.exists())
+
+            parent_target = root / "target"
+            parent_target.mkdir(mode=0o700)
+            parent_alias = root / "parent-alias"
+            parent_alias.symlink_to(parent_target, target_is_directory=True)
+            with self.assertRaises(hermes_supervisor.AcceptanceError):
+                hermes_supervisor._publish_acceptance_report(parent_alias / "report.json", payload)
+
+    def test_output_cleanup_close_fault_matrix_preserves_primary_and_attempts_all_cleanup(self) -> None:
+        payload = b'{"overall":"PASS"}\n'
+        for primary_write in (True, False):
+            with self.subTest(primary_write=primary_write), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                root.chmod(0o700)
+                output = root / "report.json"
+                write_error = OSError("PRIMARY_WRITE_SENTINEL")
+                close_error = OSError("TEMP_CLOSE_SENTINEL")
+                real_close = os.close
+                close_calls: list[int] = []
+
+                def close_after_real(fd: int) -> None:
+                    close_calls.append(fd)
+                    real_close(fd)
+                    if len(close_calls) == 1:
+                        raise close_error
+
+                patches = [
+                    mock.patch.object(hermes_supervisor.secrets, "token_hex", return_value="fixed"),
+                    mock.patch.object(hermes_supervisor.os, "close", side_effect=close_after_real),
+                ]
+                if primary_write:
+                    patches.append(mock.patch.object(hermes_supervisor.os, "write", side_effect=write_error))
+                with patches[0], patches[1], patches[2] if primary_write else nullcontext():
+                    with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                        hermes_supervisor._publish_acceptance_report(output, payload)
+                self.assertEqual(len(close_calls), 2)
+                self.assertIs(
+                    caught.exception.__cause__, write_error if primary_write else close_error
+                )
+                self.assertEqual(
+                    [], [item.name for item in root.iterdir() if ".tmp." in item.name]
+                )
+                if primary_write:
+                    self.assertFalse(output.exists())
+                else:
+                    self.assertEqual(output.read_bytes(), payload)
+
+    def test_output_cleanup_retries_inode_binding_and_never_unlinks_substitute(self) -> None:
+        payload = b'{"overall":"PASS"}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            output = root / "report.json"
+            staging = root / f".{output.name}.tmp.{os.getpid()}.fixed"
+            real_fstat = os.fstat
+            fstat_calls = 0
+
+            def one_shot_staging_fstat(fd: int) -> os.stat_result:
+                nonlocal fstat_calls
+                fstat_calls += 1
+                if fstat_calls == 2:
+                    raise OSError("INITIAL_FSTAT_SENTINEL")
+                return real_fstat(fd)
+
+            with mock.patch.object(hermes_supervisor.secrets, "token_hex", return_value="fixed"), mock.patch.object(
+                hermes_supervisor.os, "fstat", side_effect=one_shot_staging_fstat,
+            ):
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._publish_acceptance_report(output, payload)
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+            self.assertGreaterEqual(fstat_calls, 3)
+            self.assertFalse(staging.exists())
+
+            replacement = b"RACER_STAGING_INODE"
+            write_error = OSError("PRIMARY_WRITE_SENTINEL")
+            real_write = os.write
+
+            def substitute_then_fail(fd: int, data: bytes) -> int:
+                staging.unlink()
+                staging.write_bytes(replacement)
+                staging.chmod(0o600)
+                raise write_error
+
+            with mock.patch.object(hermes_supervisor.secrets, "token_hex", return_value="fixed"), mock.patch.object(
+                hermes_supervisor.os, "write", side_effect=substitute_then_fail,
+            ):
+                with self.assertRaises(hermes_supervisor.AcceptanceError) as caught:
+                    hermes_supervisor._publish_acceptance_report(output, payload)
+            self.assertIs(caught.exception.__cause__, write_error)
+            self.assertEqual(staging.read_bytes(), replacement)
+            self.assertFalse(output.exists())
+
+    def test_public_output_collision_alias_matrix_preserves_every_input(self) -> None:
+        for alias_kind in ("exact", "symlink", "hardlink"):
+            for input_name in ("state.json", "audit.jsonl", "kanban.db", "evidence.json", "human.json"):
+                with self.subTest(alias=alias_kind, input=input_name), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    paths = self.fixture(root)
+                    source = paths[input_name]
+                    output = source if alias_kind == "exact" else root / "report.json"
+                    if alias_kind == "symlink":
+                        output.symlink_to(source)
+                    elif alias_kind == "hardlink":
+                        os.link(source, output)
+                    protected = list(paths.values()) + ([output] if output != source else [])
+                    before = self._snapshot(protected)
+                    listing = sorted(item.name for item in root.iterdir())
+                    result = subprocess.run(
+                        self._argv(paths) + ["--output", str(output)],
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, b"")
+                    self.assertNotIn(str(root), result.stderr.decode("utf-8"))
+                    self.assertEqual(before, self._snapshot(protected))
+                    self.assertEqual(listing, sorted(item.name for item in root.iterdir()))
+                    self.assertFalse((root / "kanban.db-wal").exists())
+                    self.assertFalse((root / "kanban.db-shm").exists())
+
+    def test_public_output_publish_race_kills_link_to_replace_mutant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self.fixture(root)
+            output = root / "report.json"
+            racer = b"RACER_DESTINATION_MUST_SURVIVE"
+            protected = list(paths.values())
+            before = self._snapshot(protected)
+            real_link = os.link
+            race_injected = False
+
+            def race_then_link(*args: Any, **kwargs: Any) -> None:
+                nonlocal race_injected
+                race_injected = True
+                output.write_bytes(racer)
+                output.chmod(0o600)
+                real_link(*args, **kwargs)
+
+            argv = [
+                "hermes-supervisor", *self._argv(paths)[2:], "--output", str(output),
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                hermes_supervisor.os, "link", side_effect=race_then_link,
+            ), mock.patch("builtins.print"):
+                result = hermes_supervisor.main()
+            self.assertTrue(race_injected)
+            self.assertEqual(result, 2)
+            self.assertEqual(output.read_bytes(), racer)
+            self.assertEqual(before, self._snapshot(protected))
+            self.assertEqual([], [item.name for item in root.iterdir() if ".tmp." in item.name])
+            self.assertFalse((root / "kanban.db-wal").exists())
+            self.assertFalse((root / "kanban.db-shm").exists())
+
+    def test_public_output_shadow_report_alias_collision_preserves_limited_inputs(self) -> None:
+        for alias_kind in ("exact", "symlink", "hardlink"):
+            with self.subTest(alias=alias_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shadow_paths = self.fixture(root / "shadow")
+                shadow_report = root / "shadow.json"
+                shadow_report.write_text(json.dumps(self.build(shadow_paths), sort_keys=True), encoding="ascii")
+                shadow_report.chmod(0o600)
+                paths = self.fixture(
+                    root / "limited", phase="limited", shadow_report=shadow_report,
+                    window={"start": 3000, "end": 4000},
+                )
+                output = shadow_report if alias_kind == "exact" else root / "output.json"
+                if alias_kind == "symlink":
+                    output.symlink_to(shadow_report)
+                elif alias_kind == "hardlink":
+                    os.link(shadow_report, output)
+                protected = [*paths.values(), shadow_report] + ([output] if output != shadow_report else [])
+                before = self._snapshot(protected)
+                listing = sorted(item.name for item in root.iterdir())
+                result = subprocess.run(
+                    self._argv(paths, phase="limited", shadow_report=shadow_report)
+                    + ["--output", str(output)],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(before, self._snapshot(protected))
+                self.assertEqual(listing, sorted(item.name for item in root.iterdir()))
+
+    def test_public_shadow_each_criterion_mutant_has_closed_reason(self) -> None:
+        def idle(values: dict[str, Any]) -> None:
+            values["record"].update(input_message_ids=[], input_event_ids=[], source_ids=[],
+                                    capture_relations=[], source_change_count=0)
+        def retry(values: dict[str, Any]) -> None:
+            call = dict(values["record"]["calls"][0])
+            call.update(attempt_id="attempt-2", result_id="result-2", retry=True)
+            values["record"]["calls"] = [
+                dict(call, attempt_id="attempt-1", result_id="result-1"), call,
+            ]
+            values["record"]["accepted_result_ids"] = ["result-1", "result-2"]
+        cases = {
+            "timer_watch_continuity": lambda v: v["evidence"]["units"]["watch"].update(failures=1),
+            "briefing": lambda v: v["evidence"]["units"]["briefing"].update(failures=1),
+            "gc": lambda v: v["evidence"]["units"]["gc"].update(failures=1),
+            "mode_control_boundary": lambda v: v["evidence"]["observations"].update(mode_control_violations=1),
+            "cursor_pending_convergence": lambda v: v["evidence"]["observations"].update(state_event_highwater=1),
+            "idle_llm_zero": idle,
+            "budget_retry": retry,
+            "deterministic_source_handling": lambda v: v["evidence"]["observations"].update(self_amplification=1),
+            "worker_dispatch_zero": lambda v: v["evidence"]["observations"].update(worker_dispatches=1),
+            "run_health_diagnostics": lambda v: v["record"].update(status="failed", failure_code="fixture_failure"),
+            "duplicate_capture_zero": lambda v: v["evidence"]["observations"].update(capture_duplicates=1),
+            "capture_quality": lambda v: v["human"]["assessments"].update(capture_quality="FAIL"),
+            "primary_goal_acceptability": lambda v: v["human"]["assessments"].update(primary_goal_acceptability="FAIL"),
+            "review_duration": lambda v: v["record"].update(review_duration_supplied_seconds=601),
+            "fixed_deployed_generation": lambda v: v["evidence"].update(deployment={"generation": None, "sha256": None}),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target, mutate in cases.items():
+                with self.subTest(target=target):
+                    paths = self.fixture(root / target, mutate=mutate)
+                    before = self._snapshot(list(paths.values()))
+                    result = subprocess.run(
+                        self._argv(paths), stdin=subprocess.DEVNULL, capture_output=True,
+                        timeout=30, check=False, env={**os.environ, "HERMES": "/forbidden", "LLM": "/forbidden"},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    report = json.loads(result.stdout)
+                    item = {row["criterion"]: row for row in report["criteria"]}[target]
+                    self.assertEqual(report["overall"], "FAIL")
+                    self.assertIn(item["status"], ("FAIL", "UNOBSERVED"))
+                    self.assertRegex(item["reason_code"], r"^[a-z0-9_]+$")
+                    self.assertEqual(before, self._snapshot(list(paths.values())))
+
+    def test_public_malformed_privacy_and_closed_report_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = self.fixture(root)
+            valid = subprocess.run(
+                self._argv(paths), stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=30, check=False,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            report = json.loads(valid.stdout)
+            self.assertEqual(set(report), {
+                "schema_version", "phase", "window", "observed", "evidence",
+                "criteria", "overall", "notice",
+            })
+            self.assertTrue(all(set(row) == {"criterion", "status", "reason_code", "counts"}
+                                for row in report["criteria"]))
+            serialized = valid.stdout + valid.stderr
+            for secret in (b"RAW_SECRET_TOKEN", b"body", b"content", b"token", str(root).encode()):
+                self.assertNotIn(secret, serialized)
+            paths["audit.jsonl"].write_bytes(b'{"content":"RAW_SECRET_TOKEN"')
+            paths["audit.jsonl"].chmod(0o600)
+            output = root / "must-not-exist.json"
+            before = self._snapshot(list(paths.values()))
+            listing = sorted(item.name for item in root.iterdir())
+            malformed = subprocess.run(
+                self._argv(paths) + ["--output", str(output)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+            )
+            self.assertEqual(malformed.returncode, 2)
+            self.assertEqual(malformed.stdout, b"")
+            self.assertFalse(output.exists())
+            self.assertNotIn(b"RAW_SECRET_TOKEN", malformed.stderr)
+            self.assertNotIn(str(root).encode(), malformed.stderr)
+            self.assertEqual(before, self._snapshot(list(paths.values())))
+            self.assertEqual(listing, sorted(item.name for item in root.iterdir()))
+
+    def test_public_limited_each_criterion_mutant_and_boundary_failures(self) -> None:
+        cases = {
+            "allowed_low_risk_dispatch_only": lambda x: x.update(total_dispatches=2),
+            "verifier_separation": lambda x: x.update(verifier_separation_violations=1),
+            "no_unauthorized_or_external_writes": lambda x: x.update(external_writes=1),
+            "restart_recovery": lambda x: x.update(restart_recovery=False),
+            "pause_resume": lambda x: x.update(pause_resume=False),
+            "bounded_worker_failure": lambda x: x.update(bounded_worker_failure=False),
+            "initial_budget": lambda x: x.update(budget_within_limit=False),
+            "cutover_vertical_slices": lambda x: x.update(vertical_slices=1),
+            "no_manual_vault_task_check": lambda x: x.update(vault_manual_checks_required=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shadow_paths = self.fixture(root / "shadow")
+            shadow_report = root / "shadow.json"
+            shadow_report.write_text(json.dumps(self.build(shadow_paths), sort_keys=True), encoding="ascii")
+            shadow_report.chmod(0o600)
+            for target, mutate in cases.items():
+                with self.subTest(target=target):
+                    paths = self.fixture(root / target, phase="limited", shadow_report=shadow_report)
+                    evidence = json.loads(paths["evidence.json"].read_text(encoding="ascii"))
+                    mutate(evidence["limited"])
+                    paths["evidence.json"].write_text(json.dumps(evidence, sort_keys=True), encoding="ascii")
+                    paths["evidence.json"].chmod(0o600)
+                    self._reseal_human(paths)
+                    protected = [*paths.values(), shadow_report]
+                    before = self._snapshot(protected)
+                    listing = sorted(item.name for item in paths["state.json"].parent.iterdir())
+                    result = subprocess.run(
+                        self._argv(paths, phase="limited", shadow_report=shadow_report),
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+                        env={**os.environ, "HERMES": "/forbidden", "LLM": "/forbidden"},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    report = json.loads(result.stdout)
+                    item = {row["criterion"]: row for row in report["criteria"]}[target]
+                    self.assertEqual(report["overall"], "FAIL")
+                    self.assertEqual(item["status"], "FAIL")
+                    self.assertRegex(item["reason_code"], r"^[a-z0-9_]+$")
+                    self.assertEqual(before, self._snapshot(protected))
+                    self.assertEqual(listing, sorted(p.name for p in paths["state.json"].parent.iterdir()))
+                    self.assertFalse((paths["kanban.db"].with_name("kanban.db-wal")).exists())
+                    self.assertFalse((paths["kanban.db"].with_name("kanban.db-shm")).exists())
+
+    def test_public_cli_exposes_only_explicit_acceptance_inputs_and_fresh_window_notice(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(CLI), "acceptance-report", "--help"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="strict", check=False, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0)
+        for option in (
+            "--phase", "--state", "--audit", "--kanban-db", "--evidence",
+            "--window-start", "--window-end", "--observed-at", "--output",
+            "--human-assessment", "--shadow-report",
+        ):
+            self.assertIn(option, result.stdout)
+        self.assertIn("not a substitute", result.stdout)
+        self.assertNotIn("~/.", result.stdout)
 
 
 if __name__ == "__main__":

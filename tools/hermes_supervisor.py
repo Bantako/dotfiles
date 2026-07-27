@@ -84,6 +84,10 @@ class RetentionError(ValueError):
     """A scoped retention plan or operation failed closed."""
 
 
+class AcceptanceError(ValueError):
+    """Acceptance evidence is incomplete, malformed, or inconsistent."""
+
+
 @dataclass(frozen=True)
 class BriefingDecision:
     id: str
@@ -232,7 +236,7 @@ _PROMPT_SIZE_LIMIT = 16_384
 _PROMPT_VERSION = "hermes-supervisor-role/v1"
 _PROMPT_VERSION_HEADER = f"Prompt-Version: {_PROMPT_VERSION}"
 _APPROVED_PROMPT_DIGESTS = {
-    "supervisor": "3957ffd07c037255e231b864734d53468627a235568337a1fc22ea116ae49425",
+    "supervisor": "8a42569c7ce07f38ff7b115d91f04ff2d1fbed1e2bd85cdc6300c412f935fd66",
     "researcher": "c8e1b4200b542c6546a504b5c02a889876e0e3b75a505cb41d3a0b19c1a93a05",
     "builder": "9b322b92db0a6ef416ff473c752096ff8f38f337c9ba9c6eb82d71d5712b7369",
     "verifier": "9e7e5cd59cbb2a6422335d913e7be429e4f023732d4ddbbd4dc2a3e964cf5f32",
@@ -276,6 +280,8 @@ def _validate_prompt_payload(role: str, payload: bytes) -> tuple[str, str]:
             "does not implement", "patch project", "apply", "commit", "push", "deploy",
             "self-approve", "decision", "action", "reason code", "card", "source ids",
             "acceptance", "risks", "rollback", "human gates", "evidence",
+            "zero or a few intent cards", "never create one card per message",
+            "observe, research, or build", "session_search", "confidence",
         ),
         "researcher": (
             "strictly read-only", "project", "kanban", "external writes", "patch",
@@ -822,6 +828,13 @@ class DailyBudget:
 
 
 @dataclass(frozen=True)
+class PendingAuditCompletion:
+    channel: str
+    operation_id: str
+    terminal_record: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class SupervisorState:
     schema_version: int
     mode: str
@@ -837,6 +850,7 @@ class SupervisorState:
     emergency_stop_requested_at: int | None
     last_supervisor_message_id: int = 0
     last_supervisor_event_id: int = 0
+    pending_audit_completion: PendingAuditCompletion | None = None
 
 
 @dataclass(frozen=True)
@@ -859,7 +873,7 @@ class GateDecision:
 
 def initial_supervisor_state(*, frozen: bool = False) -> SupervisorState:
     return SupervisorState(
-        schema_version=2,
+        schema_version=3,
         mode="shadow",
         control_state="frozen" if frozen else "running",
         last_message_id=0,
@@ -882,10 +896,15 @@ _STATE_V1_KEYS = {
     "pending_event_ids", "last_accepted_primary_goal_id", "extractor_version",
     "emergency_stop_requested_at",
 }
-_STATE_KEYS = _STATE_V1_KEYS | {
+_STATE_V2_KEYS = _STATE_V1_KEYS | {
     "last_supervisor_message_id", "last_supervisor_event_id",
 }
+_STATE_KEYS = _STATE_V2_KEYS | {"pending_audit_completion"}
 _BUDGET_KEYS = {"date", "supervisor_runs", "dispatches", "paid_worker_usd"}
+_PENDING_AUDIT_KEYS = {"channel", "operation_id", "terminal_record"}
+_PENDING_AUDIT_MAX_BYTES = 16 * 1024
+_PENDING_AUDIT_OPERATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_STATE_MAX_PENDING_IDS = 4096
 
 
 def _state_object(value: Any, label: str, keys: set[str]) -> dict[str, Any]:
@@ -911,11 +930,13 @@ def _state_optional_int(value: Any, label: str) -> int | None:
 
 
 def _state_ids(value: Any, label: str) -> tuple[int, ...]:
-    if type(value) is not list:
+    if type(value) is not list or len(value) > _STATE_MAX_PENDING_IDS:
         raise StateError(f"{label}: expected array")
     result = tuple(_state_int(item, label) for item in value)
+    if any(identifier <= 0 for identifier in result):
+        raise StateError(f"{label}: expected positive ids")
     if len(result) != len(set(result)):
-        raise StateError(f"{label}: duplicate id")
+        raise StateError(f"{label}: ids must be unique")
     return result
 
 
@@ -923,11 +944,13 @@ def _validate_pending_cursor(
     cursor: Any, pending: Any, *, cursor_label: str, pending_label: str
 ) -> tuple[int, tuple[int, ...]]:
     checked_cursor = _state_int(cursor, cursor_label)
-    if type(pending) is not tuple:
+    if type(pending) is not tuple or len(pending) > _STATE_MAX_PENDING_IDS:
         raise StateError(f"{pending_label}: expected tuple")
     checked_pending = tuple(_state_int(item, pending_label) for item in pending)
+    if any(identifier <= 0 for identifier in checked_pending):
+        raise StateError(f"{pending_label}: expected positive ids")
     if len(checked_pending) != len(set(checked_pending)):
-        raise StateError(f"{pending_label}: duplicate id")
+        raise StateError(f"{pending_label}: ids must be unique")
     if any(identifier > checked_cursor for identifier in checked_pending):
         raise StateError(f"{pending_label}: id beyond cursor")
     return checked_cursor, checked_pending
@@ -941,14 +964,76 @@ def _state_optional_string(value: Any, label: str) -> str | None:
     return value
 
 
+def _state_pending_audit(value: Any) -> PendingAuditCompletion | None:
+    if value is None:
+        return None
+    root = _state_object(value, "pending_audit_completion", _PENDING_AUDIT_KEYS)
+    channel = root["channel"]
+    operation_id = root["operation_id"]
+    record = root["terminal_record"]
+    if channel not in ("control", "watch") or type(channel) is not str:
+        raise StateError("pending_audit_completion.channel: invalid")
+    if (
+        type(operation_id) is not str
+        or _PENDING_AUDIT_OPERATION_ID.fullmatch(operation_id) is None
+    ):
+        raise StateError("pending_audit_completion.operation_id: invalid")
+    if type(record) is not dict:
+        raise StateError("pending_audit_completion.terminal_record: invalid")
+    try:
+        canonical = json.dumps(
+            record, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+        raise StateError("pending_audit_completion.terminal_record: invalid") from error
+    if len(canonical) > _PENDING_AUDIT_MAX_BYTES:
+        raise StateError("pending_audit_completion.terminal_record: too large")
+    if channel == "watch":
+        try:
+            validated = validate_run_audit_record(record)
+        except AuditError as error:
+            raise StateError("pending watch audit record: invalid") from error
+        if (
+            validated["status"] not in ("completed", "failed")
+            or validated["batch_id"] != operation_id
+            or (not validated["input_message_ids"] and not validated["input_event_ids"])
+        ):
+            raise StateError("pending watch audit identity: invalid")
+    else:
+        expected = {
+            "schema_version", "kind", "timestamp", "action", "message_count",
+            "event_count", "outcome", "task_id", "completion_id",
+        }
+        if (
+            set(record) != expected
+            or record.get("schema_version") != 1
+            or record.get("kind") != "resume_result"
+            or record.get("action") != "resume"
+            or record.get("outcome") != "scheduled"
+            or record.get("completion_id") != operation_id
+            or type(record.get("timestamp")) is not int
+            or record["timestamp"] < 0
+            or any(
+                type(record.get(key)) is not int or record[key] < 0
+                for key in ("message_count", "event_count")
+            )
+            or record["message_count"] + record["event_count"] <= 0
+            or type(record.get("task_id")) is not str
+            or _CONTROL_TASK_ID.fullmatch(record["task_id"]) is None
+        ):
+            raise StateError("pending control audit record: invalid")
+    return PendingAuditCompletion(channel, operation_id, dict(record))
+
+
 def _state_from_data(value: Any) -> SupervisorState:
     if type(value) is not dict:
         raise StateError("state: expected object")
     version = _state_int(value.get("schema_version"), "schema_version")
     legacy = version == 1
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise StateError("schema_version: incompatible")
-    root = _state_object(value, "state", _STATE_V1_KEYS if legacy else _STATE_KEYS)
+    keys = _STATE_V1_KEYS if legacy else (_STATE_V2_KEYS if version == 2 else _STATE_KEYS)
+    root = _state_object(value, "state", keys)
     if root["mode"] not in ("shadow", "limited", "eco") or type(root["mode"]) is not str:
         raise StateError("mode: invalid")
     if (root["control_state"] not in
@@ -969,7 +1054,7 @@ def _state_from_data(value: Any) -> SupervisorState:
     if type(extractor) is not str or extractor != "v1":
         raise StateError("extractor_version: incompatible")
     state = SupervisorState(
-        schema_version=2,
+        schema_version=3,
         mode=root["mode"],
         control_state=root["control_state"],
         last_message_id=_state_int(root["last_message_id"], "last_message_id"),
@@ -1001,6 +1086,9 @@ def _state_from_data(value: Any) -> SupervisorState:
             0 if legacy else _state_int(
                 root["last_supervisor_event_id"], "last_supervisor_event_id"
             )
+        ),
+        pending_audit_completion=(
+            None if version < 3 else _state_pending_audit(root["pending_audit_completion"])
         ),
     )
     _validate_pending_cursor(
@@ -1237,8 +1325,8 @@ class StateStore:
 
     def _write_unlocked(self, state: SupervisorState) -> None:
         """Atomically persist state; caller must hold this store's StateLock."""
-        if type(state) is not SupervisorState or state.schema_version != 2:
-            raise StateError("state model must use schema_version 2")
+        if type(state) is not SupervisorState or state.schema_version != 3:
+            raise StateError("state model must use schema_version 3")
         canonical = json.dumps(asdict(state), ensure_ascii=True, separators=(",", ":"))
         _state_from_data(_strict_json_loads(
             canonical, max_bytes=_STATE_JSON_MAX_BYTES, error_type=StateError,
@@ -1576,8 +1664,9 @@ _KANBAN_TASK_STATUSES = {
 }
 _BATCH_BODY_KEYS = {
     "batch_key", "contract", "emergency", "event_ids", "events", "gate_policy",
-    "instruction", "message_ids", "mode", "schema", "source_cursors",
+    "instruction", "message_ids", "messages", "mode", "schema", "source_cursors",
 }
+_BATCH_MESSAGE_KEYS = {"id", "session_id"}
 _BATCH_EVENT_KEYS = {
     "actor_profile", "classification", "id", "kind", "run_id", "task_id",
 }
@@ -1686,7 +1775,7 @@ def _validate_batch_projection(projection: Any) -> dict[str, Any]:
     body = _load_batch_body(projection.body)
     if set(body) != _BATCH_BODY_KEYS:
         raise BatchError("invalid Supervisor batch schema")
-    if (body["schema"] != "supervisor-batch/v1"
+    if (body["schema"] != "supervisor-batch/v2"
             or body["batch_key"] != projection.idempotency_key
             or body["mode"] != projection.mode
             or type(body["emergency"]) is not bool
@@ -1728,6 +1817,20 @@ def _validate_batch_projection(projection: Any) -> dict[str, Any]:
             raise BatchError("invalid Supervisor batch cursors")
     if _batch_ids(body["message_ids"], "message ids") != message_ids:
         raise BatchError("invalid Supervisor batch message ids")
+    messages = body["messages"]
+    if type(messages) is not list or len(messages) != len(message_ids):
+        raise BatchError("invalid Supervisor batch messages")
+    message_summary_ids: list[int] = []
+    for message in messages:
+        if type(message) is not dict or set(message) != _BATCH_MESSAGE_KEYS:
+            raise BatchError("invalid Supervisor batch message")
+        identifier = message["id"]
+        if type(identifier) is not int or identifier <= 0:
+            raise BatchError("invalid Supervisor batch message")
+        _batch_text(message["session_id"])
+        message_summary_ids.append(identifier)
+    if tuple(message_summary_ids) != message_ids:
+        raise BatchError("invalid Supervisor batch messages")
     if _batch_ids(body["event_ids"], "event ids") != event_ids:
         raise BatchError("invalid Supervisor batch event ids")
     events = body["events"]
@@ -1843,6 +1946,9 @@ def _batch_ack_from_response(
     expected["source_cursors"]["event"]["end"] = event_end
     expected["message_ids"] = [
         item for item in current["message_ids"] if item <= message_end
+    ]
+    expected["messages"] = [
+        item for item in current["messages"] if item["id"] <= message_end
     ]
     expected["event_ids"] = [item for item in current["event_ids"] if item <= event_end]
     expected["events"] = [item for item in current["events"] if item["id"] <= event_end]
@@ -2094,6 +2200,10 @@ _CONTROL_TASK_KEYS = {
     "created_at", "started_at", "completed_at", "result", "skills", "max_retries",
     "session_id", "workflow_template_id", "current_step_key",
 }
+_CONTROL_SHOW_KEYS = {
+    "task", "comments", "events", "parents", "children", "runs", "latest_summary",
+}
+_CONTROL_SHOW_TASK_KEYS = _CONTROL_TASK_KEYS | {"model_override", "provider_override"}
 _CONTROL_OWNERS = frozenset({
     "supervisor",
     "supervisor-capture",
@@ -2177,6 +2287,7 @@ class HermesControlAdapter:
         timeout: float = 30.0,
         output_limit: int = 65536,
         base_env: Mapping[str, str] | None = None,
+        kanban_home: Path | None = None,
     ):
         if type(executable) is not str or not executable or "\x00" in executable:
             raise ControlError("invalid Hermes executable")
@@ -2195,7 +2306,23 @@ class HermesControlAdapter:
             raise ControlError("invalid control subprocess environment") from error
         if any(type(key) is not str or type(value) is not str for key, value in environment.items()):
             raise ControlError("invalid control subprocess environment")
-        environment.pop("HERMES_KANBAN_BOARD", None)
+        for variable in (
+            "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB",
+            "HERMES_KANBAN_HOME", "HERMES_HOME",
+        ):
+            environment.pop(variable, None)
+        if kanban_home is None:
+            if runner is None:
+                raise ControlError("explicit Kanban home is required")
+        elif (
+            not isinstance(kanban_home, Path)
+            or not kanban_home.is_absolute()
+            or "\x00" in os.fspath(kanban_home)
+            or len(os.fsencode(kanban_home)) > 4096
+        ):
+            raise ControlError("invalid explicit Kanban home")
+        else:
+            environment["HERMES_KANBAN_HOME"] = os.fspath(kanban_home)
         self.executable = executable
         self.board = board
         self.runner = runner
@@ -2335,7 +2462,6 @@ class HermesControlAdapter:
         completed = self._invoke([
             "create", "Supervisor resume re-evaluation",
             "--body", body,
-            "--assignee", "supervisor",
             "--workspace", "scratch",
             "--idempotency-key", key,
             "--created-by", "supervisor-control",
@@ -2348,20 +2474,89 @@ class HermesControlAdapter:
             error_type=ControlError,
             message="invalid resume task JSON",
         )
-        if type(value) is not dict or set(value) != _CONTROL_TASK_KEYS:
-            raise ControlError("unknown resume task JSON shape")
-        task_id = value["id"]
-        if (
-            type(task_id) is not str or _CONTROL_TASK_ID.fullmatch(task_id) is None
-            or value["title"] != "Supervisor resume re-evaluation"
-            or value["body"] != body
-            or value["assignee"] != "supervisor"
-            or value["created_by"] != "supervisor-control"
-            or value["status"] not in ("blocked", "scheduled")
-        ):
-            raise ControlError("resume task acknowledgement mismatch")
-        if value["status"] == "blocked":
-            self._invoke(["schedule", task_id, "supervisor_resume_reevaluation"])
+
+        def validate_task(task: Any) -> str:
+            if (
+                type(task) is not dict
+                or set(task) not in (_CONTROL_TASK_KEYS, _CONTROL_SHOW_TASK_KEYS)
+            ):
+                raise ControlError("unknown resume task JSON shape")
+            for field in ("model_override", "provider_override"):
+                override = task.get(field)
+                _control_json_text(override, 256, nullable=True)
+                if override == "":
+                    raise ControlError("invalid resume task override")
+            identifier = task["id"]
+            if (
+                type(identifier) is not str
+                or _CONTROL_TASK_ID.fullmatch(identifier) is None
+                or task["title"] != "Supervisor resume re-evaluation"
+                or task["body"] != body
+                or task["created_by"] != "supervisor-control"
+                or task["workspace_kind"] != "scratch"
+            ):
+                raise ControlError("resume task acknowledgement mismatch")
+            return identifier
+
+        task_id = validate_task(value)
+
+        def read_current() -> dict[str, Any]:
+            shown = self._invoke(["show", task_id, "--json"])
+            current = _strict_json_loads(
+                shown.stdout,
+                max_bytes=self.output_limit,
+                error_type=ControlError,
+                message="invalid resume task reconciliation JSON",
+            )
+            if type(current) is not dict or set(current) != _CONTROL_SHOW_KEYS:
+                raise ControlError("unknown resume task reconciliation shape")
+            task = current["task"]
+            if validate_task(task) != task_id or any(
+                type(current[field]) is not list or len(current[field]) > 256
+                for field in ("comments", "events", "parents", "children", "runs")
+            ):
+                raise ControlError("resume task reconciliation mismatch")
+            summary = current["latest_summary"]
+            try:
+                _control_json_text(summary, 16384, nullable=True)
+            except ControlError as error:
+                raise ControlError("invalid resume task reconciliation summary") from error
+            return task
+
+        status = value["status"]
+        assignee = value["assignee"]
+        if status in ("running", "done"):
+            if assignee != "supervisor":
+                raise ControlError("resume terminal task ownership mismatch")
+            return task_id
+        if status == "scheduled" and assignee == "supervisor":
+            return task_id
+        if status not in ("blocked", "ready", "scheduled") or assignee is not None:
+            raise ControlError("unsafe resume task pre-schedule state")
+
+        if status != "scheduled":
+            try:
+                self._invoke(["schedule", task_id, "supervisor_resume_reevaluation"])
+            except ControlError as schedule_error:
+                try:
+                    parked = read_current()
+                    if parked["status"] != "scheduled" or parked["assignee"] is not None:
+                        raise ControlError("resume task was not safely parked")
+                except ControlError:
+                    raise schedule_error
+
+        try:
+            self._invoke(["assign", task_id, "supervisor"])
+        except ControlError as assign_error:
+            try:
+                assigned = read_current()
+                if assigned["status"] != "scheduled" or assigned["assignee"] != "supervisor":
+                    raise ControlError("resume task assignment was not acknowledged")
+            except ControlError:
+                raise assign_error
+        final = read_current()
+        if final["status"] != "scheduled" or final["assignee"] != "supervisor":
+            raise ControlError("resume task final state mismatch")
         return task_id
 
 
@@ -2788,6 +2983,8 @@ class ControlAuditLog:
             if os.read(fd, 1):
                 raise StateError("control audit changed during read")
             payload = b"".join(chunks)
+            if payload and not payload.endswith(b"\n"):
+                raise StateError("truncated control audit")
         except StateError:
             raise
         except OSError as error:
@@ -2909,6 +3106,54 @@ def _resume_intent_key(message_ids: tuple[int, ...], event_ids: tuple[int, ...])
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _reconcile_control_audit_unlocked(
+    store: StateStore, audit: ControlAuditLog, state: SupervisorState
+) -> SupervisorState:
+    pending = state.pending_audit_completion
+    if pending is None:
+        return state
+    if pending.channel != "control":
+        raise ControlError("pending audit requires watch reconciliation")
+    expected = pending.terminal_record
+
+    def matching() -> tuple[dict[str, Any], ...]:
+        return tuple(
+            record for record in audit.read_records()
+            if record.get("completion_id") == pending.operation_id
+        )
+
+    try:
+        matches = matching()
+    except FileNotFoundError:
+        matches = ()
+    if matches and (len(matches) != 1 or matches[0] != expected):
+        raise ControlError("pending control audit identity conflicts")
+    if not matches:
+        append_error: BaseException | None = None
+        try:
+            audit.append(expected)
+        except BaseException as error:
+            append_error = error
+        try:
+            matches = matching()
+        except BaseException:
+            if append_error is not None:
+                raise append_error
+            raise
+        if len(matches) != 1 or matches[0] != expected:
+            if append_error is not None:
+                raise append_error
+            raise ControlError("pending control audit readback failed")
+    cleared = replace(
+        state,
+        pending_message_ids=(),
+        pending_event_ids=(),
+        pending_audit_completion=None,
+    )
+    store._write_unlocked(cleared)
+    return cleared
+
+
 def execute_control(
     store: StateStore,
     audit: ControlAuditLog,
@@ -2937,6 +3182,7 @@ def execute_control(
     with ControlTransactionLock(transaction_path):
         with StateLock(store.lock_path):
             state = _control_load_unlocked(store)
+            state = _reconcile_control_audit_unlocked(store, audit, state)
             changed = transition_control(state, action, now=timestamp)
             pending_messages = state.pending_message_ids
             pending_events = state.pending_event_ids
@@ -2987,14 +3233,10 @@ def execute_control(
                             or current.pending_event_ids != pending_events
                         ):
                             raise ControlError("resume pending ids changed")
-                        committed = replace(
-                            current,
-                            control_state="running",
-                            pending_message_ids=(),
-                            pending_event_ids=(),
+                        completion_id = _resume_intent_key(
+                            pending_messages, pending_events
                         )
-                        store._write_unlocked(committed)
-                        audit.append({
+                        terminal_record = {
                             "schema_version": 1,
                             "kind": "resume_result",
                             "timestamp": timestamp,
@@ -3003,7 +3245,23 @@ def execute_control(
                             "event_count": len(pending_events),
                             "outcome": "scheduled",
                             "task_id": task_id,
+                            "completion_id": completion_id,
+                        }
+                        completion = _state_pending_audit({
+                            "channel": "control",
+                            "operation_id": completion_id,
+                            "terminal_record": terminal_record,
                         })
+                        assert completion is not None
+                        committed = replace(
+                            current,
+                            control_state="running",
+                            pending_audit_completion=completion,
+                        )
+                        store._write_unlocked(committed)
+                        committed = _reconcile_control_audit_unlocked(
+                            store, audit, committed
+                        )
                     return ControlExecutionResult(
                         action, committed, reevaluation_task_id=task_id
                     )
@@ -3372,7 +3630,7 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
 
 _REQUIRED_STATE_SCHEMA = {
     "messages": {"id", "session_id", "role", "content", "timestamp", "active", "compacted"},
-    "sessions": {"id", "archived"},
+    "sessions": {"id", "source", "archived"},
 }
 _REQUIRED_KANBAN_SCHEMA = {
     "task_events": {"id", "task_id", "run_id", "kind", "payload", "created_at"},
@@ -3395,16 +3653,21 @@ _EVENT_CLASSIFICATIONS = {
     "completion_blocked_hallucination": "rejected",
 }
 
-# Batch polling fails closed rather than truncating: advancing past an overflow could
-# permanently skip a safety-critical event later in the same backlog.
+# Historical backlog cap boundaries remain explicit regression fixtures, but polling
+# always consumes one bounded raw-row prefix.  This prevents a backlog above a
+# former cap from wedging while ensuring irrelevant rows and malformed metadata
+# cannot be skipped by a relevant-only query.
 _BATCH_MAX_MESSAGES = 4096
 _BATCH_MAX_EVENTS = 1024
-_BATCH_MESSAGE_QUERY_LIMIT = _BATCH_MAX_MESSAGES + 1
-_BATCH_EVENT_QUERY_LIMIT = _BATCH_MAX_EVENTS + 1
+_BATCH_PAGE_MAX_ITEMS = 256
+_BATCH_PAGE_MAX_MESSAGES = _BATCH_PAGE_MAX_ITEMS
+_BATCH_PAGE_MAX_EVENTS = _BATCH_PAGE_MAX_ITEMS
+_BATCH_MESSAGE_QUERY_LIMIT = _BATCH_PAGE_MAX_MESSAGES + 1
+_BATCH_EVENT_QUERY_LIMIT = _BATCH_PAGE_MAX_EVENTS + 1
 _BATCH_TASK_ID_MAX_BYTES = 4096
 _BATCH_ACTOR_MAX_BYTES = 256
 _BATCH_TOTAL_EVENT_BYTES = 256 * 1024
-_BATCH_REDACTED_SESSION_ID = "batch-redacted"
+_BATCH_SESSION_MAX_BYTES = 4096
 
 # Capture cycles are intentionally conservative: no more than 64 cards, 256
 # event markers, or 512 KiB of message strings are exposed per cycle.  The
@@ -3610,19 +3873,49 @@ def _event_change(row: sqlite3.Row) -> EventChange:
     )
 
 
+def _snapshot_high_water(
+    connection: sqlite3.Connection,
+    cursor: int,
+    *,
+    table: str,
+    database: str,
+    item: str,
+) -> int:
+    maximum = _validate_id(
+        connection.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0],
+        database,
+        f"{item} high-water id",
+    )
+    if cursor > maximum:
+        raise DetectionError(f"{database}: {item} cursor exceeds high-water id")
+    return maximum
+
+
 def _read_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, ...], int]:
     with contextlib.closing(_open_readonly(path)) as connection:
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "state.db", _REQUIRED_STATE_SCHEMA)
-            maximum = _validate_id(
-                connection.execute(
-                    "SELECT COALESCE(MAX(id), ?) FROM messages WHERE id > ?",
-                    (cursor, cursor),
-                ).fetchone()[0],
-                "state.db",
-                "message high-water id",
+            snapshot_maximum = _snapshot_high_water(
+                connection, cursor, table="messages", database="state.db", item="message"
             )
+            page_ids = connection.execute(
+                "SELECT id FROM messages WHERE id > ? AND id <= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (cursor, snapshot_maximum, _BATCH_MESSAGE_QUERY_LIMIT),
+            ).fetchall()
+            if not page_ids:
+                return (), snapshot_maximum
+            maximum = snapshot_maximum
+            if len(page_ids) > _BATCH_PAGE_MAX_MESSAGES:
+                maximum = _validate_id(
+                    page_ids[_BATCH_PAGE_MAX_MESSAGES - 1][0],
+                    "state.db", "message page high-water id",
+                )
+            raw_ids = [
+                _validate_id(row[0], "state.db", "message id")
+                for row in page_ids[:_BATCH_PAGE_MAX_MESSAGES]
+            ]
             bad_role = connection.execute(
                 """
                 SELECT id FROM messages
@@ -3634,19 +3927,87 @@ def _read_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, ...], 
             if bad_role is not None:
                 message_id = _validate_id(bad_role[0], "state.db", "message id")
                 raise DetectionError(f"state.db: invalid role for message {message_id}")
+            malformed = connection.execute(
+                """
+                SELECT m.id
+                  FROM messages AS m
+                  LEFT JOIN sessions AS s ON s.id = m.session_id
+                 WHERE m.id > ? AND m.id <= ? AND m.role = 'user'
+                   AND (
+                       s.id IS NULL
+                       OR typeof(m.active) != 'integer' OR m.active NOT IN (0, 1)
+                       OR typeof(s.archived) != 'integer' OR s.archived NOT IN (0, 1)
+                       OR (m.active = 1 AND s.archived = 0 AND (
+                           typeof(m.session_id) != 'text' OR m.session_id = ''
+                           OR length(CAST(m.session_id AS BLOB)) > ?
+                           OR typeof(m.timestamp) NOT IN ('integer', 'real')
+                           OR m.timestamp < -1.7976931348623157e308
+                           OR m.timestamp > 1.7976931348623157e308
+                           OR typeof(m.compacted) != 'integer'
+                           OR m.compacted NOT IN (0, 1)
+                       ))
+                   )
+                 ORDER BY m.id ASC LIMIT 1
+                """,
+                (cursor, maximum, _BATCH_SESSION_MAX_BYTES),
+            ).fetchone()
+            if malformed is not None:
+                message_id = _validate_id(malformed[0], "state.db", "message id")
+                raise DetectionError(f"state.db: invalid metadata for message {message_id}")
+            relevant = connection.execute(
+                """
+                SELECT m.id
+                  FROM messages AS m JOIN sessions AS s ON s.id = m.session_id
+                 WHERE m.id > ? AND m.id <= ?
+                   AND m.role = 'user' AND m.active = 1 AND s.archived = 0
+                 ORDER BY m.id ASC LIMIT ?
+                """,
+                (cursor, maximum, _BATCH_MESSAGE_QUERY_LIMIT),
+            ).fetchall()
+            relevant_ids = [
+                _validate_id(row["id"], "state.db", "message id")
+                for row in relevant
+            ]
+            content_metadata = connection.execute(
+                """
+                SELECT m.id, length(CAST(m.content AS BLOB)) AS content_bytes
+                  FROM messages AS m JOIN sessions AS s ON s.id = m.session_id
+                 WHERE m.id > ? AND m.id <= ?
+                   AND m.role = 'user' AND m.active = 1 AND s.archived = 0
+                 ORDER BY m.id ASC LIMIT ?
+                """,
+                (cursor, maximum, _BATCH_MESSAGE_QUERY_LIMIT),
+            ).fetchall() if relevant_ids else []
+            total = 0
+            content_ids: list[int] = []
+            for row in content_metadata:
+                message_id = _validate_id(row["id"], "state.db", "message id")
+                content_ids.append(message_id)
+                size = row["content_bytes"]
+                if type(size) is not int or size < 0 or size > _CAPTURE_CONTENT_MAX_BYTES:
+                    raise DetectionError(
+                        f"state.db: invalid or oversized content for message {message_id}"
+                    )
+                total += size
+                if total > _CAPTURE_TOTAL_MESSAGE_BYTES:
+                    raise DetectionError("state.db: message content limit exceeded")
+            if content_ids != relevant_ids:
+                raise DetectionError("state.db: inconsistent message metadata")
             rows = connection.execute(
                 """
                 SELECT m.id, m.session_id, m.content, m.timestamp, m.compacted,
                        m.active, s.archived
-                  FROM messages AS m
-                  JOIN sessions AS s ON s.id = m.session_id
+                  FROM messages AS m JOIN sessions AS s ON s.id = m.session_id
                  WHERE m.id > ? AND m.id <= ?
-                   AND m.role = 'user' AND m.active = 1
-                   AND s.archived = 0
-                 ORDER BY m.id ASC
+                   AND m.role = 'user' AND m.active = 1 AND s.archived = 0
+                 ORDER BY m.id ASC LIMIT ?
                 """,
-                (cursor, maximum),
-            ).fetchall()
+                (cursor, maximum, _BATCH_MESSAGE_QUERY_LIMIT),
+            ).fetchall() if relevant_ids else []
+            if [row["id"] for row in rows] != relevant_ids:
+                raise DetectionError("state.db: inconsistent message snapshot")
+            if not raw_ids or raw_ids[-1] != maximum:
+                raise DetectionError("state.db: inconsistent raw message prefix")
             return (tuple(_message_change(row) for row in rows), maximum)
         finally:
             if connection.in_transaction:
@@ -3655,18 +4016,40 @@ def _read_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, ...], 
 
 def _read_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...], int]:
     placeholders = ", ".join("?" for _ in _RELEVANT_EVENT_KINDS)
+    assignment_id = """(SELECT a.id FROM task_events AS a
+        WHERE a.task_id = e.task_id AND a.id <= e.id
+          AND a.kind IN ('created', 'assigned')
+        ORDER BY a.id DESC LIMIT 1)"""
+    assignment_payload = """(SELECT a.payload FROM task_events AS a
+        WHERE a.task_id = e.task_id AND a.id <= e.id
+          AND a.kind IN ('created', 'assigned')
+        ORDER BY a.id DESC LIMIT 1)"""
+    run_profile = """(SELECT r.profile FROM task_runs AS r
+        WHERE r.id = e.run_id AND r.task_id = e.task_id)"""
     with contextlib.closing(_open_readonly(path)) as connection:
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "kanban.db", _REQUIRED_KANBAN_SCHEMA)
-            maximum = _validate_id(
-                connection.execute(
-                    "SELECT COALESCE(MAX(id), ?) FROM task_events WHERE id > ?",
-                    (cursor, cursor),
-                ).fetchone()[0],
-                "kanban.db",
-                "event high-water id",
+            snapshot_maximum = _snapshot_high_water(
+                connection, cursor, table="task_events", database="kanban.db", item="event"
             )
+            page_ids = connection.execute(
+                "SELECT id FROM task_events WHERE id > ? AND id <= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (cursor, snapshot_maximum, _BATCH_EVENT_QUERY_LIMIT),
+            ).fetchall()
+            if not page_ids:
+                return (), snapshot_maximum
+            maximum = snapshot_maximum
+            if len(page_ids) > _BATCH_PAGE_MAX_EVENTS:
+                maximum = _validate_id(
+                    page_ids[_BATCH_PAGE_MAX_EVENTS - 1][0],
+                    "kanban.db", "event page high-water id",
+                )
+            raw_ids = [
+                _validate_id(row[0], "kanban.db", "event id")
+                for row in page_ids[:_BATCH_PAGE_MAX_EVENTS]
+            ]
             bad_kind = connection.execute(
                 """
                 SELECT id FROM task_events
@@ -3678,25 +4061,71 @@ def _read_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...], int]
             if bad_kind is not None:
                 event_id = _validate_id(bad_kind[0], "kanban.db", "event id")
                 raise DetectionError(f"kanban.db: invalid kind for event {event_id}")
+            relevant = connection.execute(
+                f"""
+                SELECT id FROM task_events
+                 WHERE id > ? AND id <= ? AND kind IN ({placeholders})
+                 ORDER BY id ASC LIMIT ?
+                """,
+                (cursor, maximum, *_RELEVANT_EVENT_KINDS, _BATCH_EVENT_QUERY_LIMIT),
+            ).fetchall()
+            relevant_ids = [
+                _validate_id(row["id"], "kanban.db", "event id")
+                for row in relevant
+            ]
+            metadata = connection.execute(
+                f"""
+                SELECT e.id, e.run_id,
+                       length(CAST(e.task_id AS BLOB)) AS task_id_bytes,
+                       length(CAST(e.payload AS BLOB)) AS payload_bytes,
+                       length(CAST({run_profile} AS BLOB)) AS run_profile_bytes,
+                       {assignment_id} AS assignment_event_id,
+                       length(CAST({assignment_payload} AS BLOB)) AS assignment_payload_bytes
+                  FROM task_events AS e
+                 WHERE e.id > ? AND e.id <= ? AND e.kind IN ({placeholders})
+                 ORDER BY e.id ASC LIMIT ?
+                """,
+                (cursor, maximum, *_RELEVANT_EVENT_KINDS, _BATCH_EVENT_QUERY_LIMIT),
+            ).fetchall() if relevant_ids else []
+            total = 0
+            metadata_ids: list[int] = []
+            for row in metadata:
+                event_id = _validate_id(row["id"], "kanban.db", "event id")
+                metadata_ids.append(event_id)
+                _validate_optional_id(row["run_id"], "kanban.db", f"run id for event {event_id}")
+                assignment_id_value = _validate_optional_id(
+                    row["assignment_event_id"], "kanban.db",
+                    f"assignment event id for event {event_id}",
+                )
+                lengths = (
+                    _batch_length(row["task_id_bytes"], "task id", maximum=_BATCH_TASK_ID_MAX_BYTES, optional=False),
+                    _batch_length(row["payload_bytes"], "payload", maximum=_PAYLOAD_JSON_MAX_BYTES, optional=True),
+                    _batch_length(row["run_profile_bytes"], "run profile", maximum=_BATCH_ACTOR_MAX_BYTES, optional=True),
+                    _batch_length(row["assignment_payload_bytes"], "assignment payload", maximum=_PAYLOAD_JSON_MAX_BYTES, optional=True),
+                )
+                if row["assignment_payload_bytes"] is not None and assignment_id_value is None:
+                    raise DetectionError(f"kanban.db: invalid assignment event id for event {event_id}")
+                total += sum(lengths)
+                if total > _BATCH_TOTAL_EVENT_BYTES:
+                    raise DetectionError("kanban.db: event metadata limit exceeded")
+            if metadata_ids != relevant_ids:
+                raise DetectionError("kanban.db: inconsistent event metadata")
             rows = connection.execute(
                 f"""
                 SELECT e.id, e.task_id, e.run_id, e.kind, e.payload,
-                       (SELECT r.profile FROM task_runs AS r
-                         WHERE r.id = e.run_id AND r.task_id = e.task_id) AS run_profile,
-                       (SELECT a.id FROM task_events AS a
-                         WHERE a.task_id = e.task_id AND a.id <= e.id
-                           AND a.kind IN ('created', 'assigned')
-                         ORDER BY a.id DESC LIMIT 1) AS assignment_event_id,
-                       (SELECT a.payload FROM task_events AS a
-                         WHERE a.task_id = e.task_id AND a.id <= e.id
-                           AND a.kind IN ('created', 'assigned')
-                         ORDER BY a.id DESC LIMIT 1) AS assignment_payload
+                       {run_profile} AS run_profile,
+                       {assignment_id} AS assignment_event_id,
+                       {assignment_payload} AS assignment_payload
                   FROM task_events AS e
                  WHERE e.id > ? AND e.id <= ? AND e.kind IN ({placeholders})
-                 ORDER BY e.id ASC
+                 ORDER BY e.id ASC LIMIT ?
                 """,
-                (cursor, maximum, *_RELEVANT_EVENT_KINDS),
-            ).fetchall()
+                (cursor, maximum, *_RELEVANT_EVENT_KINDS, _BATCH_EVENT_QUERY_LIMIT),
+            ).fetchall() if relevant_ids else []
+            if [row["id"] for row in rows] != relevant_ids:
+                raise DetectionError("kanban.db: inconsistent event snapshot")
+            if not raw_ids or raw_ids[-1] != maximum:
+                raise DetectionError("kanban.db: inconsistent raw event prefix")
             return (tuple(_event_change(row) for row in rows), maximum)
         finally:
             if connection.in_transaction:
@@ -3708,13 +4137,21 @@ def _read_batch_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, 
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "state.db", _REQUIRED_STATE_SCHEMA)
-            maximum = _validate_id(
-                connection.execute(
-                    "SELECT COALESCE(MAX(id), ?) FROM messages WHERE id > ?",
-                    (cursor, cursor),
-                ).fetchone()[0],
-                "state.db", "message high-water id",
+            maximum = _snapshot_high_water(
+                connection, cursor, table="messages", database="state.db", item="message"
             )
+            page_ids = connection.execute(
+                "SELECT id FROM messages WHERE id > ? AND id <= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (cursor, maximum, _BATCH_MESSAGE_QUERY_LIMIT),
+            ).fetchall()
+            if not page_ids:
+                return (), maximum
+            if len(page_ids) > _BATCH_PAGE_MAX_MESSAGES:
+                maximum = _validate_id(
+                    page_ids[_BATCH_PAGE_MAX_MESSAGES - 1][0],
+                    "state.db", "message page high-water id",
+                )
             bad_role = connection.execute(
                 """
                 SELECT id FROM messages
@@ -3739,7 +4176,8 @@ def _read_batch_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, 
                        OR (
                            m.active = 1 AND s.archived = 0
                            AND (
-                               typeof(m.timestamp) NOT IN ('integer', 'real')
+                               typeof(s.source) != 'text'
+                               OR typeof(m.timestamp) NOT IN ('integer', 'real')
                                OR m.timestamp < -1.7976931348623157e308
                                OR m.timestamp > 1.7976931348623157e308
                                OR typeof(m.compacted) != 'integer'
@@ -3756,17 +4194,16 @@ def _read_batch_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, 
                 raise DetectionError(f"state.db: invalid metadata for message {message_id}")
             rows = connection.execute(
                 """
-                SELECT m.id, m.timestamp, m.compacted, m.active, s.archived
+                SELECT m.id, m.session_id, m.timestamp, m.compacted, m.active, s.archived
                   FROM messages AS m
                   JOIN sessions AS s ON s.id = m.session_id
                  WHERE m.id > ? AND m.id <= ?
                    AND m.role = 'user' AND m.active = 1 AND s.archived = 0
+                   AND s.source NOT IN ('subagent', 'cron')
                  ORDER BY m.id ASC LIMIT ?
                 """,
                 (cursor, maximum, _BATCH_MESSAGE_QUERY_LIMIT),
             ).fetchall()
-            if len(rows) > _BATCH_MAX_MESSAGES:
-                raise DetectionError("state.db: supervisor batch message limit exceeded")
             changes: list[MessageChange] = []
             for row in rows:
                 message_id = _validate_id(row["id"], "state.db", "message id")
@@ -3774,9 +4211,14 @@ def _read_batch_messages(path: Path, cursor: int) -> tuple[tuple[MessageChange, 
                     raise DetectionError(f"state.db: invalid active flag for message {message_id}")
                 if type(row["archived"]) is not int or row["archived"] != 0:
                     raise DetectionError(f"state.db: invalid archived flag for message {message_id}")
+                session_id = _validate_string(row["session_id"], "state.db", "session id")
+                if len(session_id.encode("utf-8")) > _BATCH_SESSION_MAX_BYTES:
+                    raise DetectionError(
+                        f"state.db: oversized session id for message {message_id}"
+                    )
                 changes.append(MessageChange(
                     id=message_id,
-                    session_id=_BATCH_REDACTED_SESSION_ID,
+                    session_id=session_id,
                     content="",
                     timestamp=_validate_timestamp(row["timestamp"]),
                     compacted=_validate_compacted(row["compacted"]),
@@ -3806,6 +4248,17 @@ def _batch_event_queries(placeholders: str) -> tuple[str, str]:
         ORDER BY a.id DESC LIMIT 1)"""
     run_profile = """(SELECT r.profile FROM task_runs AS r
         WHERE r.id = e.run_id AND r.task_id = e.task_id)"""
+    exclude_own_batch = """NOT (
+        e.kind = 'completed'
+        AND COALESCE(t.created_by = 'supervisor-watcher', 0)
+        AND COALESCE(
+            t.idempotency_key LIKE 'supervisor-batch:v1:%'
+            OR t.idempotency_key LIKE 'supervisor-batch:v2:%',
+            0
+        )
+        AND typeof(e.payload) = 'text'
+        AND e.payload = '{}'
+    )"""
     preflight = f"""
         SELECT e.id, e.run_id,
                length(CAST(e.task_id AS BLOB)) AS task_id_bytes,
@@ -3814,7 +4267,9 @@ def _batch_event_queries(placeholders: str) -> tuple[str, str]:
                {assignment_id} AS assignment_event_id,
                length(CAST({assignment_payload} AS BLOB)) AS assignment_payload_bytes
           FROM task_events AS e
+          LEFT JOIN tasks AS t ON t.id = e.task_id
          WHERE e.id > ? AND e.id <= ? AND e.kind IN ({placeholders})
+           AND {exclude_own_batch}
          ORDER BY e.id ASC LIMIT ?
     """
     fetch = f"""
@@ -3823,7 +4278,9 @@ def _batch_event_queries(placeholders: str) -> tuple[str, str]:
                {assignment_id} AS assignment_event_id,
                {assignment_payload} AS assignment_payload
           FROM task_events AS e
+          LEFT JOIN tasks AS t ON t.id = e.task_id
          WHERE e.id > ? AND e.id <= ? AND e.kind IN ({placeholders})
+           AND {exclude_own_batch}
          ORDER BY e.id ASC LIMIT ?
     """
     return preflight, fetch
@@ -3836,13 +4293,21 @@ def _read_batch_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...]
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "kanban.db", _REQUIRED_KANBAN_SCHEMA)
-            maximum = _validate_id(
-                connection.execute(
-                    "SELECT COALESCE(MAX(id), ?) FROM task_events WHERE id > ?",
-                    (cursor, cursor),
-                ).fetchone()[0],
-                "kanban.db", "event high-water id",
+            maximum = _snapshot_high_water(
+                connection, cursor, table="task_events", database="kanban.db", item="event"
             )
+            page_ids = connection.execute(
+                "SELECT id FROM task_events WHERE id > ? AND id <= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (cursor, maximum, _BATCH_EVENT_QUERY_LIMIT),
+            ).fetchall()
+            if not page_ids:
+                return (), maximum
+            if len(page_ids) > _BATCH_PAGE_MAX_EVENTS:
+                maximum = _validate_id(
+                    page_ids[_BATCH_PAGE_MAX_EVENTS - 1][0],
+                    "kanban.db", "event page high-water id",
+                )
             bad_kind = connection.execute(
                 """
                 SELECT id FROM task_events
@@ -3858,8 +4323,6 @@ def _read_batch_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...]
                 cursor, maximum, *_RELEVANT_EVENT_KINDS, _BATCH_EVENT_QUERY_LIMIT
             )
             metadata = connection.execute(preflight_sql, query_parameters).fetchall()
-            if len(metadata) > _BATCH_MAX_EVENTS:
-                raise DetectionError("kanban.db: supervisor batch event limit exceeded")
             total = 0
             metadata_ids: list[int] = []
             for row in metadata:
@@ -3881,7 +4344,12 @@ def _read_batch_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...]
                 total += sum(lengths)
                 if total > _BATCH_TOTAL_EVENT_BYTES:
                     raise DetectionError("kanban.db: supervisor batch metadata limit exceeded")
-            rows = connection.execute(fetch_sql, query_parameters).fetchall()
+            proposed_maximum = maximum
+            fetch_parameters = (
+                cursor, proposed_maximum, *_RELEVANT_EVENT_KINDS,
+                _BATCH_PAGE_MAX_EVENTS,
+            )
+            rows = connection.execute(fetch_sql, fetch_parameters).fetchall()
             if len(rows) != len(metadata) or [row["id"] for row in rows] != metadata_ids:
                 raise DetectionError("kanban.db: inconsistent supervisor batch snapshot")
             changes = tuple(_event_change(row) for row in rows)
@@ -3891,7 +4359,7 @@ def _read_batch_events(path: Path, cursor: int) -> tuple[tuple[EventChange, ...]
                         len(change.actor_profile.encode("utf-8", "strict")),
                         "actor profile", maximum=_BATCH_ACTOR_MAX_BYTES, optional=False,
                     )
-            return changes, maximum
+            return changes, proposed_maximum
         finally:
             if connection.in_transaction:
                 connection.rollback()
@@ -3987,9 +4455,9 @@ def _read_capture_messages(path: Path, cursor: int, pending_ids: tuple[int, ...]
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "state.db", _REQUIRED_STATE_SCHEMA)
-            maximum = _validate_id(connection.execute(
-                "SELECT COALESCE(MAX(id),?) FROM messages WHERE id>?", (cursor, cursor)
-            ).fetchone()[0], "state.db", "message high-water id")
+            maximum = _snapshot_high_water(
+                connection, cursor, table="messages", database="state.db", item="message"
+            )
             if limit == 0:
                 return (), cursor
             if frozen:
@@ -4084,16 +4552,16 @@ def _read_capture_messages(path: Path, cursor: int, pending_ids: tuple[int, ...]
 
 
 def _read_capture_events(path: Path, cursor: int, *, limit: int) -> tuple[tuple[EventChange, ...], int]:
-    if limit == 0:
-        return (), cursor
     placeholders = ",".join("?" for _ in _RELEVANT_EVENT_KINDS)
     with contextlib.closing(_open_readonly(path)) as connection:
         connection.execute("BEGIN")
         try:
             _validate_schema(connection, "kanban.db", _REQUIRED_KANBAN_SCHEMA)
-            maximum = _validate_id(connection.execute(
-                "SELECT COALESCE(MAX(id),?) FROM task_events WHERE id>?", (cursor, cursor)
-            ).fetchone()[0], "kanban.db", "event high-water id")
+            maximum = _snapshot_high_water(
+                connection, cursor, table="task_events", database="kanban.db", item="event"
+            )
+            if limit == 0:
+                return (), cursor
             bad = connection.execute(
                 "SELECT id FROM task_events WHERE id>? AND id<=? AND typeof(kind)!='text' ORDER BY id LIMIT 1",
                 (cursor, maximum),
@@ -4197,7 +4665,9 @@ class CaptureRunResult:
 
 
 class CaptureService:
-    def __init__(self, client: HermesKanbanClient):
+    """Observe source rows without deciding that each user row is an intent."""
+
+    def __init__(self, client: Any):
         self.client = client
 
     @staticmethod
@@ -4241,10 +4711,10 @@ class CaptureService:
                     state_db, kanban_db, profile=profile,
                     last_message_id=state.last_message_id,
                     last_event_id=state.last_event_id,
-                    pending_message_ids=() if frozen else state.pending_message_ids,
+                    pending_message_ids=(),
                     message_limit=min(_CAPTURE_MAX_MESSAGES, remaining),
                     event_limit=min(_CAPTURE_MAX_EVENTS, remaining),
-                    frozen=frozen,
+                    frozen=True,
                     frozen_capacity=remaining,
                 )
                 if state.control_state == "frozen":
@@ -4254,61 +4724,21 @@ class CaptureService:
                 if not card_formation_allowed(state):
                     raise CaptureError("card formation is not allowed")
 
-                by_id: dict[int, MessageChange] = {}
-                for message in changes.messages:
-                    existing = by_id.get(message.id)
-                    if existing is not None and existing != message:
-                        raise CaptureError("conflicting source message snapshots")
-                    by_id[message.id] = message
-
-                current = state
-                for message in sorted(by_id.values(), key=lambda item: item.id):
-                    if message.content == BRIEFING_MACHINE_SEED:
-                        pending_ids = tuple(
-                            identifier for identifier in current.pending_message_ids
-                            if identifier != message.id
-                        )
-                        acknowledged = replace(
-                            current,
-                            last_message_id=max(current.last_message_id, message.id),
-                            pending_message_ids=pending_ids,
-                        )
-                        self._persist(store, acknowledged)
-                        current = acknowledged
-                        continue
-                    projection = plan_capture(
-                        message, profile=profile, extractor_version=current.extractor_version
-                    )
-                    card = self.client.create(projection)
-                    pending_ids = tuple(
-                        identifier for identifier in current.pending_message_ids
-                        if identifier != message.id
-                    )
-                    acknowledged = replace(
-                        current,
-                        last_message_id=max(current.last_message_id, message.id),
-                        pending_message_ids=pending_ids,
-                    )
-                    self._persist(store, acknowledged)
-                    current = acknowledged
-                    cards.append(card)
-                    relations.append(CaptureAuditRelation(
-                        message.id,
-                        card.id,
-                        projection.relation_kind or "capture",
-                    ))
-
-                if changes.proposed_message_id < current.last_message_id:
+                observed_message_ids = {message.id for message in changes.messages}
+                if len(observed_message_ids) != len(changes.messages):
+                    raise CaptureError("duplicate source message snapshots")
+                if changes.proposed_message_id < state.last_message_id:
                     raise StateError("proposed message cursor cannot move backwards")
-                if changes.proposed_event_id < current.last_event_id:
+                if changes.proposed_event_id < state.last_event_id:
                     raise StateError("proposed event cursor cannot move backwards")
                 final = replace(
-                    current,
+                    state,
                     last_message_id=changes.proposed_message_id,
                     last_event_id=changes.proposed_event_id,
+                    pending_message_ids=(),
                     pending_event_ids=(),
                 )
-                if final != current:
+                if final != state:
                     self._persist(store, final)
                 return CaptureRunResult(tuple(cards), final, tuple(relations))
         except (CaptureError, DetectionError, StateError):
@@ -4862,7 +5292,7 @@ def plan_supervisor_batch(
     """Project metadata-only accumulated changes into one deterministic card."""
     if type(changes) is not ChangeSet:
         raise BatchError("changes: invalid")
-    if type(state) is not SupervisorState or state.schema_version != 2:
+    if type(state) is not SupervisorState or state.schema_version != 3:
         raise BatchError("state: invalid")
     _validate_batch_policy(policy)
     try:
@@ -4872,6 +5302,7 @@ def plan_supervisor_batch(
     if type(changes.messages) is not tuple or type(changes.events) is not tuple:
         raise BatchError("change collections: invalid")
     message_ids: list[int] = []
+    message_summaries: list[dict[str, Any]] = []
     for message in changes.messages:
         if type(message) is not MessageChange:
             raise BatchError("message: invalid")
@@ -4883,6 +5314,7 @@ def plan_supervisor_batch(
         if type(message.compacted) is not bool:
             raise BatchError("message compacted: invalid")
         message_ids.append(identifier)
+        message_summaries.append({"id": identifier, "session_id": message.session_id})
     event_ids: list[int] = []
     event_summaries: list[dict[str, Any]] = []
     for event in changes.events:
@@ -4934,11 +5366,11 @@ def plan_supervisor_batch(
         raise BatchError("batch has no relevant changes")
     emergency, safety, data_loss = _batch_flags(changes.events)
     canonical_key = json.dumps(
-        {"schema": 2, "version": 1, "message_cursor": message_start,
+        {"schema": 2, "version": 2, "message_cursor": message_start,
          "event_cursor": event_start},
         ensure_ascii=True, sort_keys=True, separators=(",", ":"),
     ).encode("ascii")
-    key = "supervisor-batch:v1:" + hashlib.sha256(canonical_key).hexdigest()[:32]
+    key = "supervisor-batch:v2:" + hashlib.sha256(canonical_key).hexdigest()[:32]
     if state.mode == "shadow":
         contract = {
             "allowed_temperatures": [], "allowed_workspaces": [],
@@ -4966,8 +5398,9 @@ def plan_supervisor_batch(
         },
         "instruction": _BATCH_INSTRUCTION,
         "message_ids": message_ids,
+        "messages": sorted(message_summaries, key=lambda item: item["id"]),
         "mode": state.mode,
-        "schema": "supervisor-batch/v1",
+        "schema": "supervisor-batch/v2",
         "source_cursors": {
             "event": {"end": event_end, "start": event_start},
             "message": {"end": message_end, "start": message_start},
@@ -5109,11 +5542,14 @@ class SupervisorBatchService:
         now: datetime,
         *,
         profile: str = "default",
+        audit_completion: Callable[[SupervisorBatchResult], PendingAuditCompletion] | None = None,
     ) -> SupervisorBatchResult:
         if type(store) is not StateStore:
             raise BatchError("state store: invalid")
         if profile != "default" or type(profile) is not str:
             raise BatchError("profile must be 'default'")
+        if audit_completion is not None and not callable(audit_completion):
+            raise BatchError("audit completion callback: invalid")
         epoch = self._epoch(now)
         try:
             with StateLock(store.lock_path):
@@ -5125,6 +5561,8 @@ class SupervisorBatchService:
                 else:
                     state = initial_supervisor_state()
                     store._write_unlocked(state)
+                if state.pending_audit_completion is not None:
+                    raise BatchError("pending audit must be reconciled before batch processing")
                 _validate_batch_policy(policy)
                 changes = detect_batch_changes(
                     state_db, kanban_db, profile=profile,
@@ -5214,6 +5652,14 @@ class SupervisorBatchService:
                     projection=projection, ack=ack, gate=decision,
                     message_ids=ack.message_ids, event_ids=ack.event_ids,
                 ))
+                if audit_completion is not None:
+                    completion = audit_completion(result)
+                    if type(completion) is not PendingAuditCompletion:
+                        raise BatchError("audit completion callback returned invalid intent")
+                    checked = _state_pending_audit(asdict(completion))
+                    assert checked is not None
+                    committed = replace(committed, pending_audit_completion=checked)
+                    result = _validate_batch_result(replace(result, state=committed))
                 store._write_unlocked(committed)
                 return result
         except (BatchError, CaptureError, DetectionError, GateError, StateError):
@@ -5224,7 +5670,13 @@ class SupervisorBatchService:
 
 def supervisor_batch_report(result: SupervisorBatchResult) -> dict[str, Any] | None:
     result = _validate_batch_result(result)
-    if result.action in ("no_change", "accumulating"):
+    if (
+        result.action in ("no_change", "accumulating")
+        or (
+            result.action == "scheduled"
+            and result.reason_code == "supervisor_daily_limit"
+        )
+    ):
         return None
     report: dict[str, Any] = {
         "action": result.action,
@@ -5669,6 +6121,40 @@ def _read_briefing_rows(
         with contextlib.closing(connection):
             connection.execute("BEGIN")
             _briefing_schema(connection)
+            highwater_row = connection.execute(
+                "SELECT coalesce(max(id), 0) FROM task_events"
+            ).fetchone()
+            if (
+                highwater_row is None or type(highwater_row[0]) is not int
+                or highwater_row[0] < 0
+            ):
+                raise BriefingError("invalid briefing highwater")
+            highwater = highwater_row[0]
+            if cursor > highwater:
+                raise BriefingError("briefing cursor exceeds highwater")
+            if cursor == highwater:
+                connection.rollback()
+                return [], cursor
+            raw_ids = [
+                row[0]
+                for row in connection.execute(
+                    """SELECT id FROM task_events
+                       WHERE id > ? AND id <= ? ORDER BY id LIMIT ?""",
+                    (cursor, highwater, _BRIEFING_MAX_ROWS),
+                ).fetchall()
+            ]
+            previous = cursor
+            for identifier in raw_ids:
+                if type(identifier) is not int or identifier <= previous:
+                    raise BriefingError("invalid briefing metadata")
+                previous = identifier
+            if not raw_ids:
+                raise BriefingError("inconsistent briefing snapshot")
+            raw_prefix_end = raw_ids[-1]
+            caps = (
+                256, 64, 16 * 1024, 160, 64, 128,
+                16 * 1024, 128, 64, 512, 128,
+            )
             metadata = connection.execute(
                 """SELECT e.id, length(cast(e.task_id AS blob)),
                           length(cast(e.kind AS blob)), length(cast(e.payload AS blob)),
@@ -5678,55 +6164,77 @@ def _read_briefing_rows(
                           length(cast(r.summary AS blob)), length(cast(r.outcome AS blob))
                    FROM task_events e JOIN tasks t ON t.id=e.task_id
                    LEFT JOIN task_runs r ON r.id=e.run_id
-                   WHERE e.id > ? ORDER BY e.id LIMIT ?""",
-                (cursor, _BRIEFING_MAX_ROWS + 1),
+                   WHERE e.id > ? AND e.id <= ? ORDER BY e.id""",
+                (cursor, raw_prefix_end),
             ).fetchall()
-            if len(metadata) > _BRIEFING_MAX_ROWS:
-                raise BriefingError("briefing row limit exceeded")
+            if [row[0] for row in metadata] != raw_ids:
+                raise BriefingError("inconsistent briefing snapshot")
             total = 0
-            caps = (
-                256, 64, 16 * 1024, 160, 64, 128,
-                16 * 1024, 128, 64, 512, 128,
-            )
+            accepted_count = 0
             for row in metadata:
-                if type(row[0]) is not int or row[0] <= cursor:
-                    raise BriefingError("invalid briefing metadata")
+                row_total = 0
                 for size, cap in zip(row[1:], caps, strict=True):
                     if size is not None and (
                         type(size) is not int or size < 0 or size > cap
                     ):
                         raise BriefingError("invalid briefing metadata")
-                    total += 0 if size is None else size
-            if total > _BRIEFING_TOTAL_RAW_BYTES:
+                    row_total += 0 if size is None else size
+                if total + row_total > _BRIEFING_TOTAL_RAW_BYTES:
+                    break
+                total += row_total
+                accepted_count += 1
+            if accepted_count == 0:
                 raise BriefingError("briefing byte limit exceeded")
+            accepted_ids = raw_ids[:accepted_count]
+            prefix_end = accepted_ids[-1]
             rows = connection.execute(
                 """SELECT e.id,e.task_id,e.kind,e.payload,t.title,t.status,t.created_by,
                           t.result,t.block_kind,r.status,r.outcome,r.summary
                    FROM task_events e JOIN tasks t ON t.id=e.task_id
                    LEFT JOIN task_runs r ON r.id=e.run_id
-                   WHERE e.id > ? ORDER BY e.id LIMIT ?""",
-                (cursor, _BRIEFING_MAX_ROWS),
+                   WHERE e.id > ? AND e.id <= ? ORDER BY e.id""",
+                (cursor, prefix_end),
             ).fetchall()
-            highwater_row = connection.execute(
-                "SELECT coalesce(max(id), ?) FROM task_events", (cursor,)
-            ).fetchone()
+            if [row[0] for row in rows] != accepted_ids:
+                raise BriefingError("inconsistent briefing snapshot")
             connection.rollback()
-        if highwater_row is None or type(highwater_row[0]) is not int:
-            raise BriefingError("invalid briefing highwater")
-        return rows, max(cursor, highwater_row[0])
+        return rows, prefix_end
     except BriefingError:
         raise
     except (sqlite3.Error, OSError, TypeError, ValueError) as error:
         raise BriefingError("Kanban briefing read failed") from error
 
 
-def _bounded_briefing_items(items: list[str], maximum: int) -> tuple[str, ...]:
-    unique = tuple(sorted(set(items)))
-    shown = unique[:maximum]
-    omitted = len(unique) - len(shown)
-    if omitted:
-        return shown + (f"… {omitted}件省略（詳細はKanbanを参照）",)
-    return shown
+class _BriefingItemSummary:
+    """Exact, explicitly bounded unique-item summary for one finite prefix."""
+
+    __slots__ = ("maximum", "capacity", "_seen")
+
+    def __init__(self, maximum: int, capacity: int):
+        if (
+            type(maximum) is not int or maximum <= 0
+            or type(capacity) is not int or capacity < maximum
+        ):
+            raise BriefingError("invalid briefing summary limit")
+        self.maximum = maximum
+        self.capacity = capacity
+        self._seen: set[str] = set()
+
+    def add(self, item: str) -> None:
+        if type(item) is not str:
+            raise BriefingError("invalid briefing summary item")
+        if item in self._seen:
+            return
+        if len(self._seen) >= self.capacity:
+            raise BriefingError("briefing summary limit exceeded")
+        self._seen.add(item)
+
+    def render(self) -> tuple[str, ...]:
+        shown = tuple(sorted(self._seen)[:self.maximum])
+        omitted = len(self._seen) - len(shown)
+        if omitted:
+            return shown + (f"… {omitted}件省略（詳細はKanbanを参照）",)
+        return shown
 
 
 def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBriefing | None:
@@ -5762,9 +6270,15 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
             pending["marker"], artifact_path, state_path,
         )
     rows, highwater = _read_briefing_rows(kanban_db, state["cursor"])
-    outcomes: list[str] = []
-    anomalies: list[str] = list(state["delivery_anomalies"])
-    actions: list[str] = []
+    outcomes = _BriefingItemSummary(_BRIEFING_MAX_OUTCOMES, _BRIEFING_MAX_ROWS)
+    anomalies = _BriefingItemSummary(
+        _BRIEFING_MAX_ANOMALIES, _BRIEFING_MAX_ROWS + 8
+    )
+    actions = _BriefingItemSummary(
+        _BRIEFING_MAX_HUMAN_ACTIONS, _BRIEFING_MAX_ROWS * 2
+    )
+    for anomaly in state["delivery_anomalies"]:
+        anomalies.add(anomaly)
     candidates: dict[str, tuple[str, tuple[str, ...], str, bool, int]] = {
         key: _decision_contract(contract)[1:]
         for key, contract in state["open_decisions"].items()
@@ -5777,13 +6291,13 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
             or type(title) is not str or type(status) is not str or type(created_by) is not str
         ):
             raise BriefingError("invalid briefing row")
-        if _BRIEFING_OWNER.fullmatch(created_by) is None:
-            continue
-        observed_relevant = True
         safe_title = _briefing_text(title, "task title", maximum=160)
         safe_kind = _briefing_text(kind, "event kind", maximum=64)
         payload = {} if payload_raw is None else _briefing_json(payload_raw, "event payload", 16 * 1024)
         result = {} if result_raw is None else _briefing_json(result_raw, "task result", 16 * 1024)
+        if _BRIEFING_OWNER.fullmatch(created_by) is None:
+            continue
+        observed_relevant = True
         for container in (payload, result):
             if "decision" in container:
                 key, question, options, recommendation, dangerous, importance = _decision_contract(container["decision"])
@@ -5806,7 +6320,7 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
                     elif _decision_target(target)[0] != task_id:
                         raise BriefingError("conflicting decision target")
             if "human_action" in container:
-                actions.append(_human_action_contract(container["human_action"]))
+                actions.add(_human_action_contract(container["human_action"]))
         summary = None
         for container in (payload, result):
             if "summary" in container:
@@ -5820,15 +6334,15 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
         summary = summary or safe_title
         if safe_kind in {"completed", "done", "applied", "reviewed"} or status in {"done", "review"}:
             suffix = "（適用候補）" if status == "review" else ""
-            outcomes.append(f"{safe_title}: {summary}{suffix}")
+            outcomes.add(f"{safe_title}: {summary}{suffix}")
         if safe_kind in {"blocked", "failed", "error"} or status == "blocked" or run_status == "failed":
             reason = block_kind if block_kind is not None else outcome
             safe_reason = ""
             if reason is not None:
                 safe_reason = ": " + _briefing_text(reason, "anomaly reason", maximum=128)
-            anomalies.append(f"{safe_title}{safe_reason}")
+            anomalies.add(f"{safe_title}{safe_reason}")
     if (
-        not outcomes and not anomalies and not actions
+        not outcomes._seen and not anomalies._seen and not actions._seen
         and (not candidates or (not observed_relevant and state["last_delivered_date"] == day))
     ):
         if highwater != state["cursor"]:
@@ -5850,9 +6364,9 @@ def prepare_briefing(kanban_db: Path, state_root: Path, day: str) -> PreparedBri
             candidates.items(), key=lambda item: (-item[1][4], item[0])
         )[:10]
     )
-    shown_outcomes = _bounded_briefing_items(outcomes, _BRIEFING_MAX_OUTCOMES)
-    shown_anomalies = _bounded_briefing_items(anomalies, _BRIEFING_MAX_ANOMALIES)
-    shown_actions = _bounded_briefing_items(actions, _BRIEFING_MAX_HUMAN_ACTIONS)
+    shown_outcomes = outcomes.render()
+    shown_anomalies = anomalies.render()
+    shown_actions = actions.render()
     marker = f"<!-- supervisor-briefing:{day}:e{highwater} -->"
     title = f"Supervisor Console — {month}"
     lines = [f"# {title}", marker, "", "## changed outcomes"]
@@ -6114,6 +6628,17 @@ def _read_console_replies(
                     {row[1] for row in info if type(row[1]) is str}
                 ):
                     raise BriefingError("incompatible console repository schema")
+            highwater_row = connection.execute(
+                "SELECT coalesce(max(id), 0) FROM messages"
+            ).fetchone()
+            if (
+                highwater_row is None or type(highwater_row[0]) is not int
+                or highwater_row[0] < 0
+            ):
+                raise BriefingError("invalid console reply highwater")
+            highwater = highwater_row[0]
+            if cursor > highwater:
+                raise BriefingError("reply cursor exceeds highwater")
             sessions = connection.execute(
                 "SELECT id,source,title,archived FROM sessions WHERE id=? LIMIT 2",
                 (session_id,),
@@ -6125,6 +6650,9 @@ def _read_console_replies(
                 session_id, "cli", f"Supervisor Console — {month}", 0,
             ):
                 raise BriefingError("invalid monthly console session")
+            if cursor == highwater:
+                connection.rollback()
+                return []
             metadata = connection.execute(
                 """SELECT id,length(cast(content AS blob)) FROM messages
                    WHERE session_id=? AND role='user' AND active=1 AND id>?
@@ -6422,6 +6950,23 @@ def _run_discord(
         raise BriefingError(f"Discord delivery exited with status {completed.returncode}")
 
 
+_NIX_STORE_BASENAME = re.compile(r"[0-9a-df-np-sv-z]{32}-.+")
+
+
+def _briefing_prompt_metadata_is_safe(path: Path, metadata: Any) -> bool:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink < 1:
+        return False
+    if metadata.st_nlink == 1:
+        return True
+    return (
+        path.is_absolute()
+        and path.parent == Path("/nix/store")
+        and _NIX_STORE_BASENAME.fullmatch(path.name) is not None
+        and metadata.st_uid in (0, 65534)
+        and metadata.st_mode & 0o222 == 0
+    )
+
+
 def run_briefing_cycle(
     kanban_db: Path,
     state_root: Path,
@@ -6468,6 +7013,8 @@ def run_briefing_cycle(
         raise BriefingError("missing pending briefing")
     pending["session_done"] = True
     included_anomalies = set(pending["included_anomalies"])
+    if pending["discord_status"] == "failed":
+        included_anomalies.discard("discord_delivery_failed")
     state["delivery_anomalies"] = [
         item for item in state["delivery_anomalies"] if item not in included_anomalies
     ]
@@ -6547,7 +7094,7 @@ _AUDIT_CURRENCY = re.compile(r"[A-Z]{3}")
 _RUN_AUDIT_MAX_RECORDS = 65_536
 _RUN_AUDIT_MAX_FILE_BYTES = 256 * 1024 * 1024
 _RUN_AUDIT_MAX_RECORD_BYTES = 64 * 1024
-_RUN_AUDIT_MAX_ITEMS = 256
+_RUN_AUDIT_MAX_ITEMS = _BATCH_PAGE_MAX_ITEMS
 _AUDIT_CODE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _AUDIT_ID_MAX_LENGTH = 128
 _AUDIT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -7162,6 +7709,683 @@ def build_eco_report(records: tuple[dict[str, Any], ...]) -> dict[str, Any]:
     }
 
 
+_ACCEPTANCE_SOURCE_KEYS = {"state", "audit", "kanban_db"}
+_ACCEPTANCE_EVIDENCE_KEYS = {
+    "schema_version", "phase", "window", "observed_at", "source_digests",
+    "units", "observations", "deployment", "limited",
+}
+_ACCEPTANCE_OBSERVATION_KEYS = {
+    "state_message_highwater", "state_event_highwater", "invalid_message_ids",
+    "self_amplification", "capture_duplicates", "worker_dispatches",
+    "mode_control_violations",
+}
+_ACCEPTANCE_UNIT_KEYS = {"successes", "failures", "max_gap_seconds"}
+_HERMES_TASK_SCHEMA = (
+    ("id", "TEXT", 0, 1), ("title", "TEXT", 1, 0), ("body", "TEXT", 0, 0),
+    ("assignee", "TEXT", 0, 0), ("status", "TEXT", 1, 0),
+    ("priority", "INTEGER", 0, 0), ("created_by", "TEXT", 0, 0),
+    ("created_at", "INTEGER", 1, 0), ("started_at", "INTEGER", 0, 0),
+    ("completed_at", "INTEGER", 0, 0), ("workspace_kind", "TEXT", 1, 0),
+    ("workspace_path", "TEXT", 0, 0), ("branch_name", "TEXT", 0, 0),
+    ("claim_lock", "TEXT", 0, 0), ("claim_expires", "INTEGER", 0, 0),
+    ("tenant", "TEXT", 0, 0), ("result", "TEXT", 0, 0),
+    ("idempotency_key", "TEXT", 0, 0), ("consecutive_failures", "INTEGER", 1, 0),
+    ("worker_pid", "INTEGER", 0, 0), ("last_failure_error", "TEXT", 0, 0),
+    ("max_runtime_seconds", "INTEGER", 0, 0), ("last_heartbeat_at", "INTEGER", 0, 0),
+    ("current_run_id", "INTEGER", 0, 0), ("workflow_template_id", "TEXT", 0, 0),
+    ("current_step_key", "TEXT", 0, 0), ("skills", "TEXT", 0, 0),
+    ("model_override", "TEXT", 0, 0), ("max_retries", "INTEGER", 0, 0),
+    ("goal_mode", "INTEGER", 1, 0), ("goal_max_turns", "INTEGER", 0, 0),
+    ("session_id", "TEXT", 0, 0), ("project_id", "TEXT", 0, 0),
+    ("block_kind", "TEXT", 0, 0), ("block_recurrences", "INTEGER", 1, 0),
+    ("provider_override", "TEXT", 0, 0),
+)
+_ACCEPTANCE_DB_SCHEMAS = {
+    "tasks": tuple(row[0] for row in _HERMES_TASK_SCHEMA),
+    "task_runs": ("id", "task_id", "profile", "status"),
+    "task_events": ("id", "task_id", "run_id", "kind", "created_at"),
+}
+_ACCEPTANCE_SHADOW_CRITERIA = frozenset({
+    "timer_watch_continuity", "briefing", "gc", "mode_control_boundary",
+    "cursor_pending_convergence", "idle_llm_zero", "budget_retry",
+    "deterministic_source_handling", "worker_dispatch_zero", "run_health_diagnostics",
+    "duplicate_capture_zero", "capture_quality", "review_duration",
+    "fixed_deployed_generation", "primary_goal_acceptability",
+})
+_ACCEPTANCE_NOTICE = (
+    "This report is not a substitute for a new observation window; a past failed window "
+    "remains FAIL and a fixed deployed generation requires a fresh window."
+)
+_ACCEPTANCE_MAX_PHASE_GAP_SECONDS = 24 * 60 * 60
+
+
+def _acceptance_count(value: Any, label: str) -> int:
+    if type(value) is not int or not 0 <= value <= 1_000_000:
+        raise AcceptanceError(f"invalid {label}")
+    return value
+
+
+def _acceptance_digest(value: Any, label: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise AcceptanceError(f"invalid {label}")
+    return value
+
+
+def _acceptance_file(path: Path, label: str, maximum: int) -> bytes:
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise AcceptanceError(f"invalid {label} path")
+    fd = -1
+    payload: bytes | None = None
+    primary: AcceptanceError | None = None
+    try:
+        flags = (
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        fd = os.open(path, flags)
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > maximum
+        ):
+            raise AcceptanceError(f"invalid {label} file")
+        chunks = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise AcceptanceError(f"{label} changed during read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise AcceptanceError(f"{label} changed during read")
+        payload = b"".join(chunks)
+    except AcceptanceError as error:
+        primary = error
+    except OSError as error:
+        primary = AcceptanceError(f"cannot read {label}")
+        primary.__cause__ = error
+    if fd >= 0:
+        try:
+            os.close(fd)
+        except OSError as error:
+            if primary is None:
+                primary = AcceptanceError(f"cannot read {label}")
+                primary.__cause__ = error
+    if primary is not None:
+        raise primary
+    if payload is None:
+        raise AcceptanceError(f"cannot read {label}")
+    return payload
+
+
+def _acceptance_json(path: Path, label: str, maximum: int) -> tuple[Any, bytes]:
+    payload = _acceptance_file(path, label, maximum)
+    try:
+        text = payload.decode("ascii", "strict")
+    except UnicodeError as error:
+        raise AcceptanceError(f"invalid {label}") from error
+    return _strict_json_loads(
+        text, max_bytes=maximum, error_type=AcceptanceError, message=f"invalid {label}"
+    ), payload
+
+
+def _acceptance_kanban_counts(path: Path) -> tuple[dict[str, int], bytes]:
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise AcceptanceError("invalid kanban database path")
+    file_fd = -1
+    connection: sqlite3.Connection | None = None
+    transaction_started = False
+    primary: AcceptanceError | None = None
+    result_value: tuple[dict[str, int], bytes] | None = None
+    try:
+        file_fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        metadata = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 64 * 1024 * 1024
+        ):
+            raise AcceptanceError("invalid kanban database file")
+        chunks = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(file_fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise AcceptanceError("kanban database changed during read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(file_fd, 1):
+            raise AcceptanceError("kanban database changed during read")
+        payload = b"".join(chunks)
+        connection = sqlite3.connect(
+            f"file:/proc/self/fd/{file_fd}?mode=ro", uri=True, isolation_level=None
+        )
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        transaction_started = True
+        for table, expected in _ACCEPTANCE_DB_SCHEMAS.items():
+            rows = connection.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+            columns = tuple(row[1] for row in rows)
+            if columns != expected:
+                raise AcceptanceError("unsupported acceptance Kanban schema")
+            if table == "tasks":
+                schema = tuple(
+                    (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5]))
+                    for row in rows
+                )
+                if schema != _HERMES_TASK_SCHEMA:
+                    raise AcceptanceError("unsupported acceptance Kanban schema")
+        result = {}
+        for table in sorted(_ACCEPTANCE_DB_SCHEMAS):
+            count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            result[table] = _acceptance_count(count, f"{table} rows")
+        result_value = result, payload
+    except AcceptanceError as error:
+        primary = error
+    except (OSError, sqlite3.Error, ValueError) as error:
+        primary = AcceptanceError("acceptance Kanban read failed")
+        primary.__cause__ = error
+    if connection is not None:
+        if transaction_started:
+            try:
+                connection.rollback()
+            except sqlite3.Error as error:
+                if primary is None:
+                    primary = AcceptanceError("acceptance Kanban read failed")
+                    primary.__cause__ = error
+        try:
+            connection.close()
+        except sqlite3.Error as error:
+            if primary is None:
+                primary = AcceptanceError("acceptance Kanban read failed")
+                primary.__cause__ = error
+    if file_fd >= 0:
+        try:
+            os.close(file_fd)
+        except OSError as error:
+            if primary is None:
+                primary = AcceptanceError("acceptance Kanban read failed")
+                primary.__cause__ = error
+    if primary is not None:
+        raise primary
+    if result_value is None:
+        raise AcceptanceError("acceptance Kanban read failed")
+    return result_value
+
+
+def _acceptance_criterion(name: str, status_value: str, reason: str, **counts: int) -> dict[str, Any]:
+    if status_value not in ("PASS", "FAIL", "UNOBSERVED"):
+        raise AcceptanceError("invalid criterion status")
+    return {
+        "criterion": name,
+        "status": status_value,
+        "reason_code": reason,
+        "counts": {key: counts[key] for key in sorted(counts)},
+    }
+
+
+def _validate_shadow_acceptance_report(report: Any) -> dict[str, int]:
+    report_keys = {
+        "schema_version", "phase", "window", "observed", "evidence",
+        "criteria", "overall", "notice",
+    }
+    if (
+        type(report) is not dict or set(report) != report_keys
+        or report.get("schema_version") != 1
+        or type(report.get("schema_version")) is not int
+        or report.get("phase") != "shadow"
+        or report.get("overall") not in ("PASS", "FAIL")
+        or report.get("notice") != _ACCEPTANCE_NOTICE
+        or type(report.get("notice")) is not str
+    ):
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    window = report["window"]
+    if type(window) is not dict or set(window) != {"start", "end"}:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    start = _acceptance_count(window["start"], "Shadow window start")
+    end = _acceptance_count(window["end"], "Shadow window end")
+    if start >= end:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    observed = report["observed"]
+    observed_keys = {"audit_records", *_ACCEPTANCE_DB_SCHEMAS}
+    if type(observed) is not dict or set(observed) != observed_keys:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    for key in sorted(observed_keys):
+        _acceptance_count(observed[key], f"Shadow observed {key}")
+    evidence = report["evidence"]
+    evidence_keys = {
+        "state_sha256", "audit_sha256", "kanban_db_sha256",
+        "acceptance_evidence_sha256", "human_assessment_sha256",
+        "shadow_report_sha256",
+    }
+    if type(evidence) is not dict or set(evidence) != evidence_keys:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    for key in (
+        "state_sha256", "audit_sha256", "kanban_db_sha256",
+        "acceptance_evidence_sha256", "human_assessment_sha256",
+    ):
+        _acceptance_digest(evidence[key], f"Shadow {key}")
+    if evidence["shadow_report_sha256"] is not None:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    criteria = report["criteria"]
+    valid_criteria = (
+        type(criteria) is list and bool(criteria)
+        and all(
+            type(item) is dict
+            and set(item) == {"criterion", "status", "reason_code", "counts"}
+            and type(item["criterion"]) is str
+            and item["criterion"] in _ACCEPTANCE_SHADOW_CRITERIA
+            and type(item["status"]) is str
+            and item["status"] in ("PASS", "FAIL", "UNOBSERVED")
+            and type(item["reason_code"]) is str
+            and re.fullmatch(r"[a-z0-9_]{1,64}", item["reason_code"]) is not None
+            and type(item["counts"]) is dict
+            and len(item["counts"]) <= 8
+            and all(
+                type(key) is str and re.fullmatch(r"[a-z0-9_]{1,64}", key) is not None
+                and type(value) is int and 0 <= value <= 1_000_000
+                for key, value in item["counts"].items()
+            )
+            for item in criteria
+        )
+        and {item["criterion"] for item in criteria} == _ACCEPTANCE_SHADOW_CRITERIA
+        and len(criteria) == len(_ACCEPTANCE_SHADOW_CRITERIA)
+        and (report["overall"] == "PASS")
+        == all(item["status"] == "PASS" for item in criteria)
+    )
+    if not valid_criteria:
+        raise AcceptanceError("invalid Shadow prerequisite report")
+    return {"start": start, "end": end}
+
+
+def _publish_acceptance_report(path: Path, payload: bytes) -> None:
+    if type(path) is not type(Path()) or not path.is_absolute() or len(payload) > 128 * 1024:
+        raise AcceptanceError("invalid acceptance output")
+    parent_fd = temporary_fd = -1
+    temporary_created = False
+    temporary_identity: tuple[int, int] | None = None
+    temporary = f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}"
+    primary: AcceptanceError | None = None
+    try:
+        if path.parent.resolve(strict=True) != path.parent:
+            raise AcceptanceError("invalid acceptance output parent")
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent_metadata = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        ):
+            raise AcceptanceError("invalid acceptance output parent")
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AcceptanceError("acceptance output already exists")
+        temporary_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600, dir_fd=parent_fd,
+        )
+        temporary_created = True
+        os.fchmod(temporary_fd, 0o600)
+        temporary_metadata = os.fstat(temporary_fd)
+        temporary_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+        if (
+            not stat.S_ISREG(temporary_metadata.st_mode) or temporary_metadata.st_nlink != 1
+            or temporary_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(temporary_metadata.st_mode) != 0o600
+        ):
+            raise AcceptanceError("acceptance output publication failed")
+        written = 0
+        while written < len(payload):
+            count = os.write(temporary_fd, payload[written:])
+            if count <= 0:
+                raise OSError("short acceptance output write")
+            written += count
+        os.fsync(temporary_fd)
+        os.link(
+            temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(parent_fd)
+        os.unlink(temporary, dir_fd=parent_fd)
+        temporary_created = False
+        os.fsync(parent_fd)
+    except AcceptanceError as error:
+        primary = error
+    except FileExistsError as error:
+        primary = AcceptanceError("acceptance output already exists")
+        primary.__cause__ = error
+    except (OSError, ValueError) as error:
+        primary = AcceptanceError("acceptance output publication failed")
+        primary.__cause__ = error
+
+    cleanup_error: OSError | None = None
+    if temporary_fd >= 0 and temporary_created and temporary_identity is None:
+        try:
+            temporary_metadata = os.fstat(temporary_fd)
+            temporary_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
+        except OSError as error:
+            cleanup_error = error
+    if temporary_fd >= 0:
+        try:
+            os.close(temporary_fd)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    if parent_fd >= 0 and temporary_created and temporary_identity is not None:
+        try:
+            current = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        else:
+            if (current.st_dev, current.st_ino) == temporary_identity:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except OSError as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+    if parent_fd >= 0:
+        try:
+            os.close(parent_fd)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+    if primary is not None:
+        raise primary
+    if cleanup_error is not None:
+        error = AcceptanceError("acceptance output publication failed")
+        error.__cause__ = cleanup_error
+        raise error
+
+
+def build_acceptance_report(
+    phase: str,
+    state_path: Path,
+    audit_path: Path,
+    kanban_db: Path,
+    evidence_path: Path,
+    *,
+    window_start: int,
+    window_end: int,
+    now: int,
+    human_path: Path | None = None,
+    shadow_report_path: Path | None = None,
+) -> dict[str, Any]:
+    """Verify sealed evidence only; this function never observes services or invokes Hermes/LLMs."""
+    if phase not in ("shadow", "limited") or type(phase) is not str:
+        raise AcceptanceError("invalid acceptance phase")
+    for value, label in ((window_start, "window start"), (window_end, "window end"), (now, "now")):
+        _acceptance_count(value, label)
+    if window_start >= window_end or window_end > now:
+        raise AcceptanceError("invalid acceptance window")
+    state_value, state_payload = _acceptance_json(state_path, "state", 1024 * 1024)
+    try:
+        state = _state_from_data(state_value)
+    except StateError as error:
+        raise AcceptanceError("invalid acceptance state") from error
+    audit_payload = _acceptance_file(audit_path, "audit", _RUN_AUDIT_MAX_FILE_BYTES)
+    records = RunAuditLog._decode(audit_payload)
+    kanban_counts, kanban_payload = _acceptance_kanban_counts(kanban_db)
+    evidence, evidence_payload = _acceptance_json(evidence_path, "acceptance evidence", 64 * 1024)
+    if type(evidence) is not dict or set(evidence) != _ACCEPTANCE_EVIDENCE_KEYS:
+        raise AcceptanceError("invalid acceptance evidence fields")
+    if evidence["schema_version"] != 1 or type(evidence["schema_version"]) is not int:
+        raise AcceptanceError("invalid acceptance evidence schema")
+    if evidence["phase"] != phase or evidence["window"] != {
+        "start": window_start, "end": window_end
+    }:
+        raise AcceptanceError("acceptance evidence window mismatch")
+    observed_at = evidence["observed_at"]
+    _acceptance_count(observed_at, "evidence timestamp")
+    if observed_at < window_end or observed_at > now:
+        raise AcceptanceError("invalid evidence timestamp")
+    actual_digests = {
+        "state": hashlib.sha256(state_payload).hexdigest(),
+        "audit": hashlib.sha256(audit_payload).hexdigest(),
+        "kanban_db": hashlib.sha256(kanban_payload).hexdigest(),
+    }
+    supplied_digests = evidence["source_digests"]
+    if type(supplied_digests) is not dict or set(supplied_digests) != _ACCEPTANCE_SOURCE_KEYS:
+        raise AcceptanceError("invalid source digests")
+    for key in sorted(_ACCEPTANCE_SOURCE_KEYS):
+        if _acceptance_digest(supplied_digests[key], key) != actual_digests[key]:
+            raise AcceptanceError("source digest mismatch")
+    units = evidence["units"]
+    if type(units) is not dict or set(units) != {"watch", "briefing", "gc"}:
+        raise AcceptanceError("invalid unit evidence")
+    for name, unit in units.items():
+        if type(unit) is not dict or set(unit) != _ACCEPTANCE_UNIT_KEYS:
+            raise AcceptanceError("invalid unit evidence")
+        for key in sorted(_ACCEPTANCE_UNIT_KEYS):
+            _acceptance_count(unit[key], f"{name} {key}")
+    observations = evidence["observations"]
+    if type(observations) is not dict or set(observations) != _ACCEPTANCE_OBSERVATION_KEYS:
+        raise AcceptanceError("invalid acceptance observations")
+    for key in sorted(_ACCEPTANCE_OBSERVATION_KEYS):
+        _acceptance_count(observations[key], key)
+    deployment = evidence["deployment"]
+    if type(deployment) is not dict or set(deployment) != {"generation", "sha256"}:
+        raise AcceptanceError("invalid deployment evidence")
+    generation = deployment["generation"]
+    generation_hash = deployment["sha256"]
+    fixed = (
+        type(generation) is str and re.fullmatch(r"[A-Za-z0-9._:+-]{1,128}", generation) is not None
+        and type(generation_hash) is str and re.fullmatch(r"[0-9a-f]{64}", generation_hash) is not None
+    )
+    terminal = [record for record in records if window_start <= record["started_at"] <= window_end]
+    idle_llm = sum(
+        call["kind"] == "llm" for record in terminal if not record["source_ids"]
+        for call in record["calls"]
+    )
+    retries = sum(call["retry"] for record in terminal for call in record["calls"])
+    review_values = [
+        value for record in terminal
+        if (value := record["review_duration_supplied_seconds"]) is not None
+    ]
+    criteria = [
+        _acceptance_criterion("timer_watch_continuity", "PASS" if units["watch"]["successes"] and not units["watch"]["failures"] and units["watch"]["max_gap_seconds"] <= 1200 else ("FAIL" if units["watch"]["failures"] or units["watch"]["successes"] else "UNOBSERVED"), "within_bound" if units["watch"]["successes"] and not units["watch"]["failures"] and units["watch"]["max_gap_seconds"] <= 1200 else ("unit_failure" if units["watch"]["failures"] or units["watch"]["successes"] else "unit_unobserved"), failures=units["watch"]["failures"], successes=units["watch"]["successes"]),
+        _acceptance_criterion("briefing", "PASS" if units["briefing"]["successes"] and not units["briefing"]["failures"] else ("FAIL" if units["briefing"]["failures"] else "UNOBSERVED"), "unit_success" if units["briefing"]["successes"] and not units["briefing"]["failures"] else ("unit_failure" if units["briefing"]["failures"] else "unit_unobserved"), failures=units["briefing"]["failures"], successes=units["briefing"]["successes"]),
+        _acceptance_criterion("gc", "PASS" if units["gc"]["successes"] and not units["gc"]["failures"] else ("FAIL" if units["gc"]["failures"] else "UNOBSERVED"), "unit_success" if units["gc"]["successes"] and not units["gc"]["failures"] else ("unit_failure" if units["gc"]["failures"] else "unit_unobserved"), failures=units["gc"]["failures"], successes=units["gc"]["successes"]),
+        _acceptance_criterion("mode_control_boundary", "PASS" if state.mode == phase and state.control_state == "running" and observations["mode_control_violations"] == 0 else "FAIL", "boundary_preserved" if state.mode == phase and state.control_state == "running" and observations["mode_control_violations"] == 0 else "boundary_violation", violations=observations["mode_control_violations"]),
+        _acceptance_criterion("cursor_pending_convergence", "PASS" if not state.pending_message_ids and not state.pending_event_ids and state.last_message_id == observations["state_message_highwater"] and state.last_event_id == observations["state_event_highwater"] else "FAIL", "converged" if not state.pending_message_ids and not state.pending_event_ids and state.last_message_id == observations["state_message_highwater"] and state.last_event_id == observations["state_event_highwater"] else "pending_or_cursor_mismatch", pending_events=len(state.pending_event_ids), pending_messages=len(state.pending_message_ids)),
+        _acceptance_criterion("idle_llm_zero", "PASS" if idle_llm == 0 else "FAIL", "zero" if idle_llm == 0 else "idle_llm_call", calls=idle_llm),
+        _acceptance_criterion("budget_retry", "PASS" if retries <= len(terminal) and all(record["budget"]["supervisor_runs"] <= 12 for record in terminal) else "FAIL", "within_bound" if retries <= len(terminal) and all(record["budget"]["supervisor_runs"] <= 12 for record in terminal) else "budget_or_retry_exceeded", retries=retries),
+        _acceptance_criterion("deterministic_source_handling", "PASS" if observations["invalid_message_ids"] == 0 and observations["self_amplification"] == 0 else "FAIL", "clean" if observations["invalid_message_ids"] == 0 and observations["self_amplification"] == 0 else "invalid_or_self_amplified", invalid_message_ids=observations["invalid_message_ids"], self_amplification=observations["self_amplification"]),
+        _acceptance_criterion("worker_dispatch_zero", "PASS" if observations["worker_dispatches"] == 0 else "FAIL", "zero" if observations["worker_dispatches"] == 0 else "dispatch_observed", dispatches=observations["worker_dispatches"]),
+        _acceptance_criterion("run_health_diagnostics", "PASS" if terminal and all(record["status"] == "completed" for record in terminal) else ("FAIL" if terminal else "UNOBSERVED"), "healthy" if terminal and all(record["status"] == "completed" for record in terminal) else ("terminal_failure" if terminal else "no_runs"), records=len(terminal)),
+        _acceptance_criterion("duplicate_capture_zero", "PASS" if observations["capture_duplicates"] == 0 else "FAIL", "zero" if observations["capture_duplicates"] == 0 else "duplicate_observed", duplicates=observations["capture_duplicates"]),
+        _acceptance_criterion("capture_quality", "UNOBSERVED", "human_assessment_missing", observed=0),
+        _acceptance_criterion("review_duration", "PASS" if review_values and all(value <= 600 for value in review_values) else ("FAIL" if review_values else "UNOBSERVED"), "within_ten_minutes" if review_values and all(value <= 600 for value in review_values) else ("over_ten_minutes" if review_values else "duration_missing"), observations=len(review_values)),
+        _acceptance_criterion("fixed_deployed_generation", "PASS" if fixed else "UNOBSERVED", "fixed_generation" if fixed else "generation_missing", observed=int(fixed)),
+    ]
+    shadow_report_digest = None
+    if phase == "shadow":
+        if evidence["limited"] is not None:
+            raise AcceptanceError("shadow evidence cannot contain Limited observations")
+    else:
+        limited = evidence["limited"]
+        limited_keys = {
+            "shadow_report_sha256",
+            "total_dispatches", "allowed_low_risk_dispatches", "verifier_separation_violations",
+            "unauthorized_writes", "external_writes", "restart_recovery", "pause_resume",
+            "bounded_worker_failure", "vertical_slices", "vault_manual_checks_required",
+            "budget_within_limit",
+        }
+        if type(limited) is not dict or set(limited) != limited_keys:
+            raise AcceptanceError("invalid Limited evidence")
+        _acceptance_digest(limited["shadow_report_sha256"], "Shadow report")
+        for key in (
+            "total_dispatches", "allowed_low_risk_dispatches", "verifier_separation_violations",
+            "unauthorized_writes", "external_writes", "vertical_slices",
+            "vault_manual_checks_required",
+        ):
+            _acceptance_count(limited[key], key)
+        for key in ("restart_recovery", "pause_resume", "bounded_worker_failure", "budget_within_limit"):
+            if type(limited[key]) is not bool:
+                raise AcceptanceError("invalid Limited boolean evidence")
+        criteria = [
+            item for item in criteria
+            if item["criterion"] != "worker_dispatch_zero"
+        ]
+        criteria.extend((
+            _acceptance_criterion(
+                "allowed_low_risk_dispatch_only", "PASS" if limited["total_dispatches"] == limited["allowed_low_risk_dispatches"] else "FAIL",
+                "allowed_only" if limited["total_dispatches"] == limited["allowed_low_risk_dispatches"] else "unauthorized_dispatch",
+                allowed=limited["allowed_low_risk_dispatches"], total=limited["total_dispatches"],
+            ),
+            _acceptance_criterion(
+                "verifier_separation", "PASS" if limited["verifier_separation_violations"] == 0 else "FAIL",
+                "separated" if limited["verifier_separation_violations"] == 0 else "separation_violation",
+                violations=limited["verifier_separation_violations"],
+            ),
+            _acceptance_criterion(
+                "no_unauthorized_or_external_writes", "PASS" if limited["unauthorized_writes"] == 0 and limited["external_writes"] == 0 else "FAIL",
+                "zero" if limited["unauthorized_writes"] == 0 and limited["external_writes"] == 0 else "write_observed",
+                external=limited["external_writes"], unauthorized=limited["unauthorized_writes"],
+            ),
+            *(
+                _acceptance_criterion(name, "PASS" if limited[key] else "FAIL", "observed_pass" if limited[key] else "observed_fail", observed=1)
+                for name, key in (
+                    ("restart_recovery", "restart_recovery"),
+                    ("pause_resume", "pause_resume"),
+                    ("bounded_worker_failure", "bounded_worker_failure"),
+                    ("initial_budget", "budget_within_limit"),
+                )
+            ),
+            _acceptance_criterion(
+                "cutover_vertical_slices", "PASS" if limited["vertical_slices"] >= 2 else "FAIL",
+                "minimum_met" if limited["vertical_slices"] >= 2 else "insufficient_slices",
+                slices=limited["vertical_slices"],
+            ),
+            _acceptance_criterion(
+                "no_manual_vault_task_check", "PASS" if limited["vault_manual_checks_required"] == 0 else "FAIL",
+                "zero" if limited["vault_manual_checks_required"] == 0 else "manual_check_required",
+                checks=limited["vault_manual_checks_required"],
+            ),
+        ))
+        if shadow_report_path is None:
+            criteria.append(_acceptance_criterion(
+                "shadow_prerequisite", "UNOBSERVED", "shadow_report_missing", observed=0,
+            ))
+        else:
+            shadow_report, shadow_payload = _acceptance_json(
+                shadow_report_path, "Shadow acceptance report", 128 * 1024
+            )
+            shadow_window = _validate_shadow_acceptance_report(shadow_report)
+            shadow_report_digest = hashlib.sha256(shadow_payload).hexdigest()
+            shadow_pass = (
+                limited["shadow_report_sha256"] == shadow_report_digest
+                and shadow_window["end"] < window_start
+                and window_start - shadow_window["end"] <= _ACCEPTANCE_MAX_PHASE_GAP_SECONDS
+                and shadow_report["overall"] == "PASS"
+                and all(item["status"] == "PASS" for item in shadow_report["criteria"])
+            )
+            criteria.append(_acceptance_criterion(
+                "shadow_prerequisite", "PASS" if shadow_pass else "FAIL",
+                "shadow_report_pass" if shadow_pass else "shadow_report_unbound_or_failed",
+                observed=1,
+            ))
+    human_digest = None
+    if human_path is not None:
+        human, human_payload = _acceptance_json(human_path, "human assessment", 16 * 1024)
+        human_keys = {
+            "schema_version", "phase", "window", "assessed_at", "assessor",
+            "attestation", "source_digests", "evidence_sha256", "assessments",
+        }
+        assessment_keys = {
+            "capture_quality", "primary_goal_acceptability", "major_capture_misses",
+            "false_capture_reversible",
+        }
+        if type(human) is not dict or set(human) != human_keys:
+            raise AcceptanceError("invalid human assessment fields")
+        if human["schema_version"] != 1 or type(human["schema_version"]) is not int:
+            raise AcceptanceError("invalid human assessment schema")
+        if human["phase"] != phase or human["window"] != evidence["window"]:
+            raise AcceptanceError("human assessment window mismatch")
+        assessed_at = human["assessed_at"]
+        _acceptance_count(assessed_at, "human assessment timestamp")
+        if assessed_at < window_end or assessed_at > now:
+            raise AcceptanceError("invalid human assessment timestamp")
+        if (
+            type(human["assessor"]) is not str
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", human["assessor"]) is None
+            or human["attestation"] != "explicit-human-assessment-v1"
+            or type(human["attestation"]) is not str
+        ):
+            raise AcceptanceError("invalid human assessment attestation")
+        if human["source_digests"] != actual_digests:
+            raise AcceptanceError("human assessment digest mismatch")
+        if _acceptance_digest(human["evidence_sha256"], "human evidence") != hashlib.sha256(evidence_payload).hexdigest():
+            raise AcceptanceError("human assessment evidence mismatch")
+        assessments = human["assessments"]
+        if type(assessments) is not dict or set(assessments) != assessment_keys:
+            raise AcceptanceError("invalid human assessments")
+        for key in ("capture_quality", "primary_goal_acceptability"):
+            if type(assessments[key]) is not str or assessments[key] not in ("PASS", "FAIL"):
+                raise AcceptanceError("invalid human assessment verdict")
+        misses = _acceptance_count(assessments["major_capture_misses"], "major capture misses")
+        if type(assessments["false_capture_reversible"]) is not bool:
+            raise AcceptanceError("invalid reversible capture assessment")
+        capture_pass = (
+            assessments["capture_quality"] == "PASS" and misses == 0
+            and assessments["false_capture_reversible"]
+        )
+        criteria = [
+            _acceptance_criterion(
+                "capture_quality", "PASS" if capture_pass else "FAIL",
+                "human_accepted" if capture_pass else "human_rejected_or_capture_defect",
+                major_misses=misses, observed=1,
+            ) if item["criterion"] == "capture_quality" else item
+            for item in criteria
+        ]
+        primary_pass = assessments["primary_goal_acceptability"] == "PASS"
+        criteria.append(_acceptance_criterion(
+            "primary_goal_acceptability", "PASS" if primary_pass else "FAIL",
+            "human_accepted" if primary_pass else "human_rejected", observed=1,
+        ))
+        human_digest = hashlib.sha256(human_payload).hexdigest()
+    else:
+        criteria.append(_acceptance_criterion(
+            "primary_goal_acceptability", "UNOBSERVED", "human_assessment_missing", observed=0,
+        ))
+    overall = "PASS" if all(item["status"] == "PASS" for item in criteria) else "FAIL"
+    return {
+        "schema_version": 1,
+        "phase": phase,
+        "window": {"start": window_start, "end": window_end},
+        "observed": {"audit_records": len(terminal), **kanban_counts},
+        "evidence": {
+            "state_sha256": actual_digests["state"],
+            "audit_sha256": actual_digests["audit"],
+            "kanban_db_sha256": actual_digests["kanban_db"],
+            "acceptance_evidence_sha256": hashlib.sha256(evidence_payload).hexdigest(),
+            "human_assessment_sha256": human_digest,
+            "shadow_report_sha256": shadow_report_digest,
+        },
+        "criteria": criteria,
+        "overall": overall,
+        "notice": _ACCEPTANCE_NOTICE,
+    }
+
+
 _RETENTION_KINDS = frozenset({"detailed_logs", "worktrees", "sandboxes", "cache"})
 _RETENTION_NAME = re.compile(r"supervisor-[a-z0-9][a-z0-9.-]{0,127}")
 _RETENTION_MAX_CANDIDATES = 256
@@ -7221,25 +8445,7 @@ def _validate_retention_board(board: Any) -> str:
     return board
 
 
-_RETENTION_TASK_SCHEMA = (
-    ("id", "TEXT", 0, 1), ("title", "TEXT", 1, 0), ("body", "TEXT", 0, 0),
-    ("assignee", "TEXT", 0, 0), ("status", "TEXT", 1, 0),
-    ("priority", "INTEGER", 0, 0), ("created_by", "TEXT", 0, 0),
-    ("created_at", "INTEGER", 1, 0), ("started_at", "INTEGER", 0, 0),
-    ("completed_at", "INTEGER", 0, 0), ("workspace_kind", "TEXT", 1, 0),
-    ("workspace_path", "TEXT", 0, 0), ("branch_name", "TEXT", 0, 0),
-    ("claim_lock", "TEXT", 0, 0), ("claim_expires", "INTEGER", 0, 0),
-    ("tenant", "TEXT", 0, 0), ("result", "TEXT", 0, 0),
-    ("idempotency_key", "TEXT", 0, 0), ("consecutive_failures", "INTEGER", 1, 0),
-    ("worker_pid", "INTEGER", 0, 0), ("last_failure_error", "TEXT", 0, 0),
-    ("max_runtime_seconds", "INTEGER", 0, 0), ("last_heartbeat_at", "INTEGER", 0, 0),
-    ("current_run_id", "INTEGER", 0, 0), ("workflow_template_id", "TEXT", 0, 0),
-    ("current_step_key", "TEXT", 0, 0), ("skills", "TEXT", 0, 0),
-    ("model_override", "TEXT", 0, 0), ("max_retries", "INTEGER", 0, 0),
-    ("goal_mode", "INTEGER", 1, 0), ("goal_max_turns", "INTEGER", 0, 0),
-    ("session_id", "TEXT", 0, 0), ("project_id", "TEXT", 0, 0),
-    ("block_kind", "TEXT", 0, 0), ("block_recurrences", "INTEGER", 1, 0),
-)
+_RETENTION_TASK_SCHEMA = _HERMES_TASK_SCHEMA
 
 
 class RetentionTaskRepository:
@@ -7923,11 +9129,57 @@ class WatchCycleResult:
 
 
 def _validate_watch_client(client: Any) -> None:
-    if (
-        not callable(getattr(client, "create", None))
-        or not callable(getattr(client, "create_supervisor_batch", None))
-    ):
+    if not callable(getattr(client, "create_supervisor_batch", None)):
         raise CaptureError("watch client: invalid")
+
+
+def _reconcile_watch_audit_unlocked(
+    store: StateStore, audit: RunAuditLog, state: SupervisorState
+) -> SupervisorState:
+    pending = state.pending_audit_completion
+    if pending is None:
+        return state
+    if pending.channel != "watch":
+        raise AuditError("pending audit requires control reconciliation")
+    expected = validate_run_audit_record(pending.terminal_record)
+
+    def matching() -> tuple[dict[str, Any], ...]:
+        return tuple(
+            record for record in audit.read_records()
+            if record["batch_id"] == pending.operation_id
+        )
+
+    matches = matching()
+    if len(matches) != 1:
+        raise AuditError("pending watch audit reservation is missing or duplicated")
+    existing = matches[0]
+    if existing["status"] in ("completed", "failed") and existing != expected:
+        raise AuditError("pending watch audit identity conflicts")
+    if existing != expected:
+        append_error: BaseException | None = None
+        try:
+            audit.append(expected)
+        except BaseException as error:
+            append_error = error
+        try:
+            matches = matching()
+        except BaseException:
+            if append_error is not None:
+                raise append_error
+            raise
+        if len(matches) != 1 or matches[0] != expected:
+            if append_error is not None:
+                raise append_error
+            raise AuditError("pending watch audit readback failed")
+    cleared = replace(state, pending_audit_completion=None)
+    store._write_unlocked(cleared)
+    return cleared
+
+
+def _reconcile_watch_audit(store: StateStore, audit: RunAuditLog) -> SupervisorState:
+    with StateLock(store.lock_path):
+        state = _control_load_unlocked(store)
+        return _reconcile_watch_audit_unlocked(store, audit, state)
 
 
 def run_watch_cycle(
@@ -7957,6 +9209,12 @@ def run_watch_cycle(
     if audit is not None and type(audit) is not RunAuditLog:
         raise AuditError("watch audit: invalid")
     _validate_watch_client(client)
+    if store.path.exists():
+        existing_state = store.read()
+        if existing_state.pending_audit_completion is not None:
+            if audit is None:
+                raise AuditError("pending audit requires configured watch audit")
+            _reconcile_watch_audit(store, audit)
     invocation_epoch = SupervisorBatchService._epoch(now)
     invocation_tick = invocation_epoch * 1_000_000 + now.microsecond
     scheduled_epoch = float(invocation_epoch // 600 * 600)
@@ -7985,8 +9243,19 @@ def run_watch_cycle(
         capture = CaptureService(client).run_once(
             store, state_db, kanban_db, profile=profile
         )
+
+        def durable_completion(batch_result: SupervisorBatchResult) -> PendingAuditCompletion:
+            if pending is None:
+                raise AuditError("watch audit reservation is missing")
+            terminal = _watch_audit_record(
+                WatchCycleResult(mode_changed, batch_result.state.mode, capture, batch_result),
+                pending,
+            )
+            return PendingAuditCompletion("watch", terminal["batch_id"], terminal)
+
         batch = SupervisorBatchService(client).run_once(
-            store, state_db, kanban_db, policy, now, profile=profile
+            store, state_db, kanban_db, policy, now, profile=profile,
+            audit_completion=durable_completion if audit is not None else None,
         )
         result = WatchCycleResult(mode_changed, batch.state.mode, capture, batch)
     except Exception as error:
@@ -8008,7 +9277,11 @@ def run_watch_cycle(
             ))
         raise
     if audit is not None and pending is not None:
-        audit.append(_watch_audit_record(result, pending))
+        if result.batch.action == "enqueued":
+            cleared = _reconcile_watch_audit(store, audit)
+            result = replace(result, batch=replace(result.batch, state=cleared))
+        else:
+            audit.append(_watch_audit_record(result, pending))
     return result
 
 
@@ -8141,6 +9414,24 @@ def main() -> int:
     gc.add_argument("--dry-run", action="store_true")
     eco = subparsers.add_parser("eco-report")
     eco.add_argument("--audit", type=Path, required=True)
+    acceptance = subparsers.add_parser(
+        "acceptance-report",
+        description=(
+            "Strictly verify sealed evidence; this is not a substitute for a new observation "
+            "window after deploying a fixed generation. It never starts Limited operation."
+        ),
+    )
+    acceptance.add_argument("--phase", choices=("shadow", "limited"), required=True)
+    acceptance.add_argument("--state", type=Path, required=True)
+    acceptance.add_argument("--audit", type=Path, required=True)
+    acceptance.add_argument("--kanban-db", type=Path, required=True)
+    acceptance.add_argument("--evidence", type=Path, required=True)
+    acceptance.add_argument("--human-assessment", type=Path)
+    acceptance.add_argument("--shadow-report", type=Path)
+    acceptance.add_argument("--window-start", type=int, required=True)
+    acceptance.add_argument("--window-end", type=int, required=True)
+    acceptance.add_argument("--observed-at", type=int, required=True)
+    acceptance.add_argument("--output", type=Path)
     annotate = subparsers.add_parser("audit-annotate")
     annotate.add_argument("--audit", type=Path, required=True)
     annotate.add_argument("--batch-id", required=True)
@@ -8182,6 +9473,7 @@ def main() -> int:
     state_control.add_argument("--audit", type=Path, required=True)
     state_control.add_argument("--board", required=True)
     state_control.add_argument("--hermes", required=True)
+    state_control.add_argument("--kanban-home", type=Path, required=True)
     state_control.add_argument("--ntfy-url")
     state_control.add_argument("--curl")
     state_control.add_argument(
@@ -8196,6 +9488,25 @@ def main() -> int:
         default=_CANONICAL_PROMPT_DIR,
     )
     args = parser.parse_args()
+
+    if args.command == "acceptance-report":
+        try:
+            report = build_acceptance_report(
+                args.phase, args.state, args.audit, args.kanban_db, args.evidence,
+                human_path=args.human_assessment, shadow_report_path=args.shadow_report,
+                window_start=args.window_start, window_end=args.window_end,
+                now=args.observed_at,
+            )
+            encoded = (json.dumps(
+                report, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ) + "\n").encode("ascii")
+            if args.output is not None:
+                _publish_acceptance_report(args.output, encoded)
+        except (AcceptanceError, AuditError, OSError, StateError) as error:
+            print(f"acceptance-report: {error}", file=sys.stderr)
+            return 2
+        sys.stdout.buffer.write(encoded)
+        return 0
 
     if args.command == "watch" and not args.dry_run and args.state is None:
         print("watch: --state is required for actual runs", file=sys.stderr)
@@ -8265,8 +9576,8 @@ def main() -> int:
             fd = os.open(args.prompt, flags | nofollow)
             try:
                 metadata = os.fstat(fd)
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                    raise BriefingError("prompt must be a single-link regular file")
+                if not _briefing_prompt_metadata_is_safe(args.prompt, metadata):
+                    raise BriefingError("prompt must be a trusted regular file")
                 payload = os.read(fd, _PROMPT_SIZE_LIMIT + 1)
                 if len(payload) != metadata.st_size or len(payload) > _PROMPT_SIZE_LIMIT:
                     raise BriefingError("prompt size invalid")
@@ -8422,7 +9733,9 @@ def main() -> int:
                 result = execute_control(
                     store,
                     ControlAuditLog(args.audit),
-                    HermesControlAdapter(args.hermes, args.board),
+                    HermesControlAdapter(
+                        args.hermes, args.board, kanban_home=args.kanban_home,
+                    ),
                     notifier,
                     args.action,
                     now=int(time.time()),
@@ -8483,7 +9796,11 @@ def main() -> int:
     except (DetectionError, StateError) as error:
         print(f"watch: {error}", file=sys.stderr)
         return 2
-    if changes.messages or changes.events:
+    if (
+        changes.messages or changes.events
+        or changes.proposed_message_id != last_message_id
+        or changes.proposed_event_id != last_event_id
+    ):
         print(json.dumps(_safe_change_summary(changes), ensure_ascii=True, separators=(",", ":")))
     return 0
 

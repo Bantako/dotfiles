@@ -119,12 +119,23 @@ let
         --audit '${stateRoot}/control-audit.jsonl'
         --board ${lib.escapeShellArg cfg.board}
         --hermes ${hermesPkg}/bin/hermes
+        --kanban-home '${config.home.homeDirectory}/.hermes'
       )
       case "$action" in
-        pause|freeze|resume)
+        pause|freeze)
           exec ${pkgs.util-linux}/bin/flock \
             --nonblock --conflict-exit-code 75 \
             "${runtimeRoot}/watch.lock" \
+            ${supervisorCli}/bin/hermes-supervisor-runtime state control \
+            "''${common_args[@]}" "$action"
+          ;;
+        resume)
+          exec ${pkgs.util-linux}/bin/flock \
+            --nonblock --conflict-exit-code 75 \
+            "${runtimeRoot}/watch.lock" \
+            ${pkgs.util-linux}/bin/flock \
+            --nonblock --conflict-exit-code 75 \
+            "${kanbanDb}.dispatch.lock" \
             ${supervisorCli}/bin/hermes-supervisor-runtime state control \
             "''${common_args[@]}" "$action"
           ;;
