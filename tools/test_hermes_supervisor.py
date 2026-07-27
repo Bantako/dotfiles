@@ -10771,7 +10771,8 @@ print(json.dumps(task, separators=(',', ':')))
 
             hermes_supervisor.run_watch_cycle(
                 hermes_supervisor.StateStore(root / "state.json"), state_db, kanban_db,
-                load_policy(POLICY), WatchCycleTests.Client(), now, audit=audit,
+                load_policy(POLICY), WatchCycleTests.Client(), now + timedelta(minutes=10),
+                audit=audit,
             )
             records = audit.read_records()
             self.assertEqual(len(records), 2)
@@ -10797,7 +10798,11 @@ print(json.dumps(task, separators=(',', ':')))
                 finished_at=100.0,
             ))
 
-            self.assertEqual(hermes_supervisor._recover_interrupted_watch_audits(audit), 8)
+            self.assertEqual(hermes_supervisor._recover_interrupted_watch_audits(audit, 100.0), 0)
+            self.assertTrue(all(
+                record["status"] == "pending" for record in audit.read_records()
+            ))
+            self.assertEqual(hermes_supervisor._recover_interrupted_watch_audits(audit, 101.0), 8)
 
             records = audit.read_records()
             self.assertEqual(

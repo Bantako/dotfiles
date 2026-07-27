@@ -9236,7 +9236,9 @@ def _reconcile_watch_audit(store: StateStore, audit: RunAuditLog) -> SupervisorS
 _WATCH_AUDIT_RECOVERY_MAX = 8
 
 
-def _recover_interrupted_watch_audits(audit: RunAuditLog) -> int:
+def _recover_interrupted_watch_audits(audit: RunAuditLog, before: float) -> int:
+    if type(before) not in (int, float) or not math.isfinite(before) or before < 0:
+        raise AuditError("invalid watch audit recovery boundary")
     if not audit.path.exists():
         return 0
     recovered = 0
@@ -9246,6 +9248,7 @@ def _recover_interrupted_watch_audits(audit: RunAuditLog) -> int:
         if (
             record["status"] == "pending"
             and record["batch_id"].startswith("watch-poll-")
+            and record["finished_at"] < before
         ):
             audit.append(_watch_audit_record(
                 None,
@@ -9290,11 +9293,11 @@ def run_watch_cycle(
             if audit is None:
                 raise AuditError("pending audit requires configured watch audit")
             _reconcile_watch_audit(store, audit)
-    if audit is not None:
-        _recover_interrupted_watch_audits(audit)
     invocation_epoch = SupervisorBatchService._epoch(now)
     invocation_tick = invocation_epoch * 1_000_000 + now.microsecond
     scheduled_epoch = float(invocation_epoch // 600 * 600)
+    if audit is not None:
+        _recover_interrupted_watch_audits(audit, scheduled_epoch)
     pending: dict[str, Any] | None = None
     if audit is not None:
         pre_state, pre_operation = _watch_pre_operation(store)
