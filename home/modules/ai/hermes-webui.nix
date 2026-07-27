@@ -12,10 +12,10 @@ let
   hermesPython = "${hermesPkg.passthru.hermesVenv}/bin/python3";
 
   src = pkgs.fetchFromGitHub {
-    owner = "nesquena";
+    owner = "Bantako";
     repo = "hermes-webui";
-    rev = "3b120e70cc887f6099c52f32cf0cbe6ce5b857e0";
-    hash = "sha256-lRbBgaQWMnqST11BLxvxQpdZZ1hwWDl4W/PkqDgYAtw=";
+    rev = "fe57035a0e5d7784e15cfa7ab0744d64c2c01315";
+    hash = "sha256-ZiPQRMcU+abwWJVGh/+G8tqDu0kTwAsj/AOkoXaNHbc=";
   };
 in
 {
