@@ -7728,6 +7728,7 @@ _HERMES_TASK_SCHEMA = (
     ("created_at", "INTEGER", 1, 0), ("started_at", "INTEGER", 0, 0),
     ("completed_at", "INTEGER", 0, 0), ("workspace_kind", "TEXT", 1, 0),
     ("workspace_path", "TEXT", 0, 0), ("branch_name", "TEXT", 0, 0),
+    ("project_id", "TEXT", 0, 0),
     ("claim_lock", "TEXT", 0, 0), ("claim_expires", "INTEGER", 0, 0),
     ("tenant", "TEXT", 0, 0), ("result", "TEXT", 0, 0),
     ("idempotency_key", "TEXT", 0, 0), ("consecutive_failures", "INTEGER", 1, 0),
@@ -7737,7 +7738,7 @@ _HERMES_TASK_SCHEMA = (
     ("current_step_key", "TEXT", 0, 0), ("skills", "TEXT", 0, 0),
     ("model_override", "TEXT", 0, 0), ("max_retries", "INTEGER", 0, 0),
     ("goal_mode", "INTEGER", 1, 0), ("goal_max_turns", "INTEGER", 0, 0),
-    ("session_id", "TEXT", 0, 0), ("project_id", "TEXT", 0, 0),
+    ("session_id", "TEXT", 0, 0),
     ("block_kind", "TEXT", 0, 0), ("block_recurrences", "INTEGER", 1, 0),
     ("provider_override", "TEXT", 0, 0),
 )

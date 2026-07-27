@@ -11040,13 +11040,14 @@ print(json.dumps(task, separators=(',', ':')))
                   status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT,
                   created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER,
                   workspace_kind TEXT NOT NULL DEFAULT 'scratch', workspace_path TEXT,
-                  branch_name TEXT, claim_lock TEXT, claim_expires INTEGER, tenant TEXT,
-                  result TEXT, idempotency_key TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                  worker_pid INTEGER, last_failure_error TEXT, max_runtime_seconds INTEGER,
-                  last_heartbeat_at INTEGER, current_run_id INTEGER, workflow_template_id TEXT,
-                  current_step_key TEXT, skills TEXT, model_override TEXT, max_retries INTEGER,
+                  branch_name TEXT, project_id TEXT, claim_lock TEXT, claim_expires INTEGER,
+                  tenant TEXT, result TEXT, idempotency_key TEXT,
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0, worker_pid INTEGER,
+                  last_failure_error TEXT, max_runtime_seconds INTEGER, last_heartbeat_at INTEGER,
+                  current_run_id INTEGER, workflow_template_id TEXT, current_step_key TEXT,
+                  skills TEXT, model_override TEXT, max_retries INTEGER,
                   goal_mode INTEGER NOT NULL DEFAULT 0, goal_max_turns INTEGER, session_id TEXT,
-                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
+                  block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
                   provider_override TEXT
                 );
                 INSERT INTO tasks (id,title,status,created_by,created_at,completed_at) VALUES
@@ -11421,13 +11422,14 @@ class Task12AcceptanceReportTests(unittest.TestCase):
                   status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT,
                   created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER,
                   workspace_kind TEXT NOT NULL DEFAULT 'scratch', workspace_path TEXT,
-                  branch_name TEXT, claim_lock TEXT, claim_expires INTEGER, tenant TEXT,
-                  result TEXT, idempotency_key TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                  worker_pid INTEGER, last_failure_error TEXT, max_runtime_seconds INTEGER,
-                  last_heartbeat_at INTEGER, current_run_id INTEGER, workflow_template_id TEXT,
-                  current_step_key TEXT, skills TEXT, model_override TEXT, max_retries INTEGER,
+                  branch_name TEXT, project_id TEXT, claim_lock TEXT, claim_expires INTEGER,
+                  tenant TEXT, result TEXT, idempotency_key TEXT,
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0, worker_pid INTEGER,
+                  last_failure_error TEXT, max_runtime_seconds INTEGER, last_heartbeat_at INTEGER,
+                  current_run_id INTEGER, workflow_template_id TEXT, current_step_key TEXT,
+                  skills TEXT, model_override TEXT, max_retries INTEGER,
                   goal_mode INTEGER NOT NULL DEFAULT 0, goal_max_turns INTEGER, session_id TEXT,
-                  project_id TEXT, block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
+                  block_kind TEXT, block_recurrences INTEGER NOT NULL DEFAULT 0,
                   provider_override TEXT
                 );
                 CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT);
